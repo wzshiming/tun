@@ -7,12 +7,6 @@ import (
 	"strings"
 )
 
-// Check everything needed for tun setup
-func Check() error {
-	// TODO: check whether ifconfig and route command exists
-	return nil
-}
-
 // SetRoute set specified ip range route to tun device
 func SetRoute(name string, ipRange []string) error {
 	var err, lastErr error
@@ -20,7 +14,7 @@ func SetRoute(name string, ipRange []string) error {
 		tunIp := strings.Split(r, "/")[0]
 		if i == 0 {
 			// run command: ifconfig utun6 inet 172.20.0.0/16 172.20.0.0
-			err = cmd("ifconfig",
+			err = command("ifconfig",
 				name,
 				"inet",
 				r,
@@ -28,7 +22,7 @@ func SetRoute(name string, ipRange []string) error {
 			)
 		} else {
 			// run command: ifconfig utun6 add 172.20.0.0/16 172.20.0.1
-			err = cmd("ifconfig",
+			err = command("ifconfig",
 				name,
 				"add",
 				r,
@@ -40,7 +34,7 @@ func SetRoute(name string, ipRange []string) error {
 			continue
 		}
 		// run command: route add -net 172.20.0.0/16 -interface utun6
-		err = cmd("route",
+		err = command("route",
 			"add",
 			"-net",
 			r,

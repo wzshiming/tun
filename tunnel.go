@@ -62,7 +62,7 @@ func (t *Tun) handleUDPConn(id stack.TransportEndpointID, uc *gonet.UDPConn) {
 		Port: int(id.LocalPort),
 	}
 
-	pc, err := t.ListenPacket.ListenPacket(context.Background(), "udp", remote.String())
+	pc, err := t.ListenPacket.ListenPacket(context.Background(), "udp", ":0")
 	if err != nil {
 		if t.Logger != nil {
 			t.Logger.Println("UDP listen error:", err)

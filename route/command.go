@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func cmd(name string, arg ...string) error {
+func command(name string, arg ...string) error {
 	c := exec.Command(name, arg...)
 	out, err := c.CombinedOutput()
 	if err != nil {

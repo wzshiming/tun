@@ -1,22 +1,8 @@
 package route
 
 import (
-	"fmt"
 	"strings"
-
-	wintun "golang.zx2c4.com/wintun"
 )
-
-// Check everything needed for tun setup
-func CheckContext() (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("failed to found tun driver: %v", r)
-		}
-	}()
-	wintun.RunningVersion()
-	return
-}
 
 // SetRoute let specified ip range route to tun device
 func SetRoute(name string, ipRange []string) error {
@@ -29,7 +15,7 @@ func SetRoute(name string, ipRange []string) error {
 		}
 		if i == 0 {
 			// run command: netsh interface ip set address KtConnectTunnel static 172.20.0.1 255.255.0.0
-			err = cmd("netsh",
+			err = command("netsh",
 				"interface",
 				"ip",
 				"set",
@@ -41,7 +27,7 @@ func SetRoute(name string, ipRange []string) error {
 			)
 		} else {
 			// run command: netsh interface ip add address KtConnectTunnel 172.21.0.1 255.255.0.0
-			err = cmd("netsh",
+			err = command("netsh",
 				"interface",
 				"ip",
 				"add",
@@ -56,7 +42,7 @@ func SetRoute(name string, ipRange []string) error {
 			continue
 		}
 		// run command: route add 172.20.0.0 mask 255.255.0.0 172.20.0.1
-		err = cmd("route",
+		err = command("route",
 			"add",
 			ip,
 			"mask",

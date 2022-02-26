@@ -2,8 +2,8 @@ package tun
 
 import (
 	"github.com/wzshiming/tun/device"
+	"github.com/wzshiming/tun/netstack"
 	"github.com/wzshiming/tun/route"
-	"github.com/wzshiming/tun/stack"
 )
 
 type Config struct {
@@ -25,7 +25,7 @@ func NewTun(c Config) *Tun {
 type Tun struct {
 	*Config
 
-	stack  *stack.Stack
+	stack  *netstack.Stack
 	device device.Device
 }
 
@@ -34,7 +34,7 @@ func (t *Tun) Start() error {
 		t.Name = route.GetName()
 	}
 	if t.Device == "" {
-		t.Device = route.GetDevice()
+		t.Device = "tun"
 	}
 
 	d, err := device.NewDevice(t.Device, t.Name, uint32(t.MTU))
@@ -43,7 +43,7 @@ func (t *Tun) Start() error {
 	}
 	t.device = d
 
-	s, err := stack.NewStack(t.device, t, stack.WithDefault())
+	s, err := netstack.NewStack(t.device, t, netstack.WithDefault())
 	if err != nil {
 		return err
 	}

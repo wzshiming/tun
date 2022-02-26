@@ -35,7 +35,9 @@ func init() {
 
 func main() {
 	logger := log.New(os.Stderr, "[tun] ", log.LstdFlags)
+
 	controls := []control.ControlFunc{}
+
 	if mark != 0 {
 		controls = append(controls, control.ControlSocketMark(mark))
 	}

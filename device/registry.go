@@ -1,6 +1,8 @@
 package device
 
-import "fmt"
+import (
+	"fmt"
+)
 
 var registry = map[string]func(name string, mtu uint32) (Device, error){}
 

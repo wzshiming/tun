@@ -11,7 +11,3 @@ func toIpAndMask(cidr string) (string, string, error) {
 	}
 	return ipNet.IP.String(), net.IP(ipNet.Mask).String(), nil
 }
-
-func GetDevice() string {
-	return "tun"
-}
