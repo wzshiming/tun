@@ -24,12 +24,13 @@ var (
 )
 
 func init() {
+	iface, _ := control.DefaultInterfaceName()
 	flag.IntVar(&mark, "fwmark", 0, "Set firewall MARK (Linux only)")
 	flag.IntVar(&conf.MTU, "mtu", 0, "Set device maximum transmission unit (MTU)")
 	flag.StringVar(&conf.Device, "device", "", "Use this device")
 	flag.StringVar(&conf.Name, "name", "", "Use this device name")
 	flag.StringVar(&route, "route", "10.0.0.0/8", "Set the route")
-	flag.StringVar(&interfaceName, "interface", "", "Use network INTERFACE (Linux/MacOS only)")
+	flag.StringVar(&interfaceName, "interface", iface, "Use network INTERFACE (Linux/MacOS only)")
 	flag.Parse()
 }
 
@@ -60,7 +61,6 @@ func main() {
 	conf.Logger = logger
 	conf.Dialer = WrapDialerFunc(func(ctx context.Context, network, address string) (net.Conn, error) {
 		logger.Println("Dial", network, address)
-		return dialer.DialContext(ctx, network, "www.baidu.com:80")
 		return dialer.DialContext(ctx, network, address)
 	})
 	conf.ListenPacket = &listenConfig
