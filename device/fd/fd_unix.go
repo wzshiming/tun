@@ -4,9 +4,9 @@ package fd
 
 import (
 	"fmt"
-	"github.com/wzshiming/tun/device"
 	"strconv"
 
+	"github.com/wzshiming/tun/device"
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )

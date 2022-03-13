@@ -3,13 +3,13 @@
 package control
 
 import (
-	"errors"
+	"fmt"
 	"net"
 	"syscall"
 )
 
 func ControlBindToInterface(_ *net.Interface) ControlFunc {
 	return func(string, string, syscall.RawConn) error {
-		return errors.New("bind to interface unsupported platform")
+		return fmt.Errorf("bind to interface unsupported platform")
 	}
 }

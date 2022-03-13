@@ -2,7 +2,7 @@ package device
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"io"
 	"sync"
 
@@ -39,15 +39,15 @@ type Endpoint struct {
 // New returns stack.LinkEndpoint(.*Endpoint) and error.
 func New(rw io.ReadWriter, mtu uint32, offset int) (*Endpoint, error) {
 	if mtu == 0 {
-		return nil, errors.New("MTU size is zero")
+		return nil, fmt.Errorf("MTU size is zero")
 	}
 
 	if rw == nil {
-		return nil, errors.New("RW interface is nil")
+		return nil, fmt.Errorf("RW interface is nil")
 	}
 
 	if offset < 0 {
-		return nil, errors.New("offset must be non-negative")
+		return nil, fmt.Errorf("offset must be non-negative")
 	}
 
 	return &Endpoint{
