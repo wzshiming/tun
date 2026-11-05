@@ -12,9 +12,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// wintunCache returns the directory the wintun.dll directories are created under; it may itself be redirected.
-var wintunCache = os.UserCacheDir
-
 // wintunBeforeOpen runs between extracting wintun.dll and opening it for verification; tests swap the file there.
 var wintunBeforeOpen = func(path string) {}
 
@@ -39,11 +36,12 @@ func loadWintun() error {
 	if wintunModule != 0 {
 		return nil
 	}
-	cache, err := wintunCache()
+	cache, err := CacheDir()
 	if err != nil {
 		return fmt.Errorf("tun: wintun.dll directory: %w", err)
 	}
-	path, err := provisionFile(cache, wintunSubdirs(runtime.GOARCH, wintunDLL), "wintun.dll", wintunDLL, rejectReparsePoint)
+	root, sub := wintunLocation(cache, runtime.GOARCH, wintunDLL)
+	path, err := provisionFile(root, sub, "wintun.dll", wintunDLL, rejectReparsePoint)
 	if err != nil {
 		return fmt.Errorf("tun: extract wintun.dll: %w", err)
 	}

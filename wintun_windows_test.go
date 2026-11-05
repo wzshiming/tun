@@ -14,15 +14,15 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// ttWintunUse points wintunCache at cache and forgets any loaded wintun.dll for t, freeing what t loads when it ends; it returns where wintun.dll goes.
+// ttWintunUse points CacheDir at a directory below cache, which stands for the user cache, and forgets any loaded wintun.dll for t, freeing what t loads when it ends; it returns where wintun.dll goes.
 func ttWintunUse(t *testing.T, cache string) string {
 	t.Helper()
 	if !wintunEmbedded {
 		t.Skipf("no wintun.dll embedded for %s", runtime.GOARCH)
 	}
 	wintunMu.Lock()
-	prevCache, prevModule, prevHook := wintunCache, wintunModule, wintunBeforeOpen
-	wintunCache = func() (string, error) { return cache, nil }
+	prevCache, prevModule, prevHook := CacheDir, wintunModule, wintunBeforeOpen
+	CacheDir = func() (string, error) { return filepath.Join(cache, "tun"), nil }
 	wintunModule = 0
 	wintunMu.Unlock()
 	t.Cleanup(func() {
@@ -31,9 +31,15 @@ func ttWintunUse(t *testing.T, cache string) string {
 		if wintunModule != 0 {
 			windows.FreeLibrary(wintunModule)
 		}
-		wintunCache, wintunModule, wintunBeforeOpen = prevCache, prevModule, prevHook
+		CacheDir, wintunModule, wintunBeforeOpen = prevCache, prevModule, prevHook
 	})
-	return filepath.Join(append(append([]string{cache}, wintunSubdirs(runtime.GOARCH, wintunDLL)...), "wintun.dll")...)
+	return filepath.Join(append(append([]string{cache}, ttWintunSubdirs()...), "wintun.dll")...)
+}
+
+// ttWintunSubdirs are the directories loadWintun creates below the user cache.
+func ttWintunSubdirs() []string {
+	_, sub := wintunLocation(filepath.Join("cache", "tun"), runtime.GOARCH, wintunDLL)
+	return sub
 }
 
 // ttWintunJunction makes link a directory junction to target, which needs no privilege.
@@ -66,16 +72,6 @@ func ttWintunWantEmbedded(t *testing.T, path string) {
 	}
 	if sha256.Sum256(got) != sha256.Sum256(wintunDLL) {
 		t.Errorf("%s differs from the embedded wintun.dll", path)
-	}
-}
-
-func TestWintunCacheDefaultsToTheUserCache(t *testing.T) {
-	want, err := os.UserCacheDir()
-	if err != nil {
-		t.Skipf("no user cache directory: %v", err)
-	}
-	if got, err := wintunCache(); err != nil || got != want {
-		t.Errorf("wintunCache = %q, %v; want %q", got, err, want)
 	}
 }
 
@@ -159,11 +155,11 @@ func TestLoadWintunRefusesAFileChangedBeforeVerification(t *testing.T) {
 }
 
 func TestLoadWintunRefusesAJunctionAtAnOwnedDirectory(t *testing.T) {
-	for i, name := range wintunSubdirs(runtime.GOARCH, wintunDLL) {
+	for i, name := range ttWintunSubdirs() {
 		t.Run(name, func(t *testing.T) {
 			cache, target := t.TempDir(), t.TempDir()
 			ttWintunUse(t, cache)
-			parent := filepath.Join(append([]string{cache}, wintunSubdirs(runtime.GOARCH, wintunDLL)[:i]...)...)
+			parent := filepath.Join(append([]string{cache}, ttWintunSubdirs()[:i]...)...)
 			if err := os.MkdirAll(parent, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -183,9 +179,9 @@ func TestLoadWintunRefusesAJunctionAtTheDLL(t *testing.T) {
 	ttWintunWantRefused(t, loadWintun(), target)
 }
 
-func TestLoadWintunAcceptsARedirectedCache(t *testing.T) {
+func TestLoadWintunAcceptsARedirectedUserCache(t *testing.T) {
 	target := t.TempDir()
-	cache := filepath.Join(t.TempDir(), "jw-redirected-cache")
+	cache := filepath.Join(t.TempDir(), "redirected-cache")
 	ttWintunJunction(t, cache, target)
 	path := ttWintunUse(t, cache)
 	if err := loadWintun(); err != nil {
@@ -196,7 +192,7 @@ func TestLoadWintunAcceptsARedirectedCache(t *testing.T) {
 
 func TestLoadWintunLoadsTheFinalPathOfTheVerifiedFile(t *testing.T) {
 	target := t.TempDir()
-	cache := filepath.Join(t.TempDir(), "jw-redirected-cache")
+	cache := filepath.Join(t.TempDir(), "redirected-cache")
 	ttWintunJunction(t, cache, target)
 	path := ttWintunUse(t, cache)
 	prev := wintunLoadLibrary
@@ -217,7 +213,7 @@ func TestLoadWintunLoadsTheFinalPathOfTheVerifiedFile(t *testing.T) {
 		t.Fatalf("loaded %q, want one path", loaded)
 	}
 	got := loaded[0]
-	if !strings.HasPrefix(got, `\\?\`) || strings.Contains(got, "jw-redirected-cache") {
+	if !strings.HasPrefix(got, `\\?\`) || strings.Contains(got, "redirected-cache") {
 		t.Errorf("loaded %q, want the \\\\?\\ final path with the junction resolved", got)
 	}
 	gotFi, err1 := os.Stat(got)

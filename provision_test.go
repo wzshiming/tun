@@ -107,12 +107,23 @@ func TestProvisionFileLeavesIdenticalContentUntouched(t *testing.T) {
 	}
 }
 
-func TestWintunSubdirsKeyTheCacheByArchAndHash(t *testing.T) {
+func TestCacheDirDefaultsToTunUnderTheUserCache(t *testing.T) {
+	user, err := os.UserCacheDir()
+	if err != nil {
+		t.Skipf("no user cache directory: %v", err)
+	}
+	if got, err := CacheDir(); err != nil || got != filepath.Join(user, "tun") {
+		t.Errorf("CacheDir = %q, %v; want %q", got, err, filepath.Join(user, "tun"))
+	}
+}
+
+func TestWintunLocationKeysTheDLLByArchAndHashUnderCacheDir(t *testing.T) {
 	dll := []byte("dll bytes")
 	sum := sha256.Sum256(dll)
-	want := []string{"tun", "wintun", "arm64-" + hex.EncodeToString(sum[:])[:16]}
-	if got := wintunSubdirs("arm64", dll); !slices.Equal(got, want) {
-		t.Errorf("wintunSubdirs = %q, want %q", got, want)
+	cache := filepath.Join("user-cache", "app")
+	root, sub := wintunLocation(cache, "arm64", dll)
+	if want := []string{"app", "wintun", "arm64-" + hex.EncodeToString(sum[:])[:16]}; root != "user-cache" || !slices.Equal(sub, want) {
+		t.Errorf("wintunLocation = %q, %q; want user-cache, %q", root, sub, want)
 	}
 }
 
