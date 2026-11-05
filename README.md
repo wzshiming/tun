@@ -70,7 +70,7 @@ func (f dialFunc) DialContext(ctx context.Context, network, address string) (net
 
 ## Privileges
 
-A process running as root/administrator opens the device directly. Otherwise `Open` starts the current executable as `<exe> tun-helper …` with elevated rights; the helper creates the device and the routes and serves the session; the helper exits when the parent closes the connection. A refused prompt makes `Open` return `ErrDenied`.
+A process running as root/administrator opens the device directly. Otherwise `Open` starts the current executable as `<exe> tun-helper …` with elevated rights; the helper creates the device and the routes. On macOS and Linux it hands the device's descriptor to the parent and exits once the parent closes the connection; on Windows it serves the session and exits when the parent closes the connection. A refused prompt makes `Open` return `ErrDenied`.
 
 - **macOS**: an `osascript` administrator prompt.
 - **Linux**: `pkexec` (polkit). The helper configures the device with iproute2, so the `ip` command must be installed.
@@ -88,7 +88,7 @@ Traffic forwarded to the real network must not be captured again. The `bypass` d
 
 ## Limits
 
-- UDP: only DNS (port 53) is relayed, over TCP through the dialer; all other UDP is dropped.
+- UDP: only DNS (port 53) is relayed, over TCP through the dialer; all other UDP is answered with ICMP port unreachable.
 - Linux: binding to an interface with `SO_BINDTODEVICE` without privileges requires kernel 5.7 or later.
 
 ## Command `cmd/tun`
@@ -106,7 +106,7 @@ go run ./cmd/tun [flags]
 | `-bypass` | none | destination CIDR never captured, repeatable |
 | `-name` | `tun` | interface name (ignored on macOS) |
 
-It exits 0 on SIGINT/SIGTERM and 1 on any error.
+It exits 0 on SIGINT/SIGTERM once the device is open and 1 on any error; a SIGINT/SIGTERM while the device is still opening, such as during the privilege prompt, exits 1.
 
 ## End-to-end tests
 
