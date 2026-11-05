@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  go:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./... -race -count=1
+      - name: Build without cgo
+        shell: bash
+        run: CGO_ENABLED=0 go build ./...
+
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet e2e
+        run: go vet -tags e2e . ./bypass ./stack
+      - name: Build e2e test binary
+        if: runner.os != 'Windows'
+        run: go test -c -race -tags e2e -o "$RUNNER_TEMP/tun-e2e.test" .
+      - name: Build e2e test binary (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: go test -c -race -tags e2e -o "$RUNNER_TEMP/tun-e2e.test.exe" .
+      - name: E2E unprivileged
+        if: runner.os != 'Windows'
+        run: TUN_E2E=1 "$RUNNER_TEMP/tun-e2e.test" -test.v -test.timeout 6m -test.run '^TestE2E'
+      - name: E2E root
+        if: runner.os != 'Windows'
+        run: sudo -n env TUN_E2E=1 "$RUNNER_TEMP/tun-e2e.test" -test.v -test.timeout 6m -test.run '^TestE2E'
+      - name: E2E (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -o pipefail
+          TUN_E2E=1 TUN_E2E_RUNAS=1 "$RUNNER_TEMP/tun-e2e.test.exe" -test.v -test.timeout 6m -test.run '^TestE2E' | tee "$RUNNER_TEMP/tun-e2e.log"
+          for t in TestE2EWindowsLocal TestE2EWindowsHelper TestE2EWindowsHelperRunas; do
+            grep -qF -- "--- PASS: $t (" "$RUNNER_TEMP/tun-e2e.log" || { echo "$t did not pass"; exit 1; }
+          done
+      - name: Network state
+        if: always() && runner.os == 'Linux'
+        run: |
+          ip addr
+          ip route
+          ip -6 route
+      - name: Network state
+        if: always() && runner.os == 'macOS'
+        run: |
+          ifconfig
+          netstat -rn
+      - name: Network state
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          route print
+          ipconfig /all
