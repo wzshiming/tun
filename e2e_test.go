@@ -152,7 +152,7 @@ func TestE2ERoot(t *testing.T) {
 		t.Skipf("no IPv4 default route for the bypass dialer: %v", err)
 	}
 	cfg := ttE2EConfig()
-	// The embedded default no_proxy entries, as the tray parses them.
+	// The embedded default no_proxy entries.
 	cfg.Bypass = ttPrefixes("127.0.0.1/32", "::1/128", "192.168.0.0/16", "10.0.0.0/8", "fe80::/64", "fd00::/8")
 	capture := CaptureRoutes(cfg)
 	if len(capture) <= 50 {
