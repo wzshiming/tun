@@ -406,6 +406,7 @@ func TestOpenViaRelayReturnsRelayedDevice(t *testing.T) {
 	}
 	var args []string
 	cfg := ttDefaultConfig()
+	cfg.Name = "tt0"
 	dev, err := openViaRelay(t.Context(), cfg, "/x/app.exe", ttRelayLaunch(open, &args))
 	if err != nil {
 		t.Fatalf("openViaRelay: %v", err)
@@ -418,7 +419,7 @@ func TestOpenViaRelayReturnsRelayedDevice(t *testing.T) {
 	if dev.Interface != "tun" || len(dev.Warnings) != 1 || dev.Warnings[0] != "w1" {
 		t.Errorf("Device Interface, Warnings = %q, %q, want tun, [w1]", dev.Interface, dev.Warnings)
 	}
-	if gotCfg.MTU != cfg.MTU || len(gotCfg.Addresses) != 2 || len(gotCfg.Bypass) != len(cfg.Bypass) {
+	if gotCfg.Name != cfg.Name || gotCfg.MTU != cfg.MTU || len(gotCfg.Addresses) != 2 || len(gotCfg.Bypass) != len(cfg.Bypass) {
 		t.Errorf("helper opened %+v, want %+v", gotCfg, cfg)
 	}
 	if mtu, _ := dev.MTU(); mtu != cfg.MTU {

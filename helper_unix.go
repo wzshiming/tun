@@ -38,7 +38,7 @@ func Helper(args []string) int {
 		fmt.Fprintln(os.Stderr, "tun-helper: read request:", err)
 		return 1
 	}
-	cfg := Config{Addresses: req.Addresses, MTU: req.MTU, Bypass: req.Bypass}
+	cfg := req.config()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var dev *Device

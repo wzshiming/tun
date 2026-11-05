@@ -8,8 +8,8 @@ import (
 	wgtun "golang.zx2c4.com/wireguard/tun"
 )
 
-// createTUNName lets the kernel pick a free utun unit.
-const createTUNName = "utun"
+// createTUNName lets the kernel pick a free utun unit; cfg.Name has no say on macOS.
+func createTUNName(Config) string { return "utun" }
 
 func peerUID(conn *net.UnixConn) (uint32, error) {
 	rc, err := conn.SyscallConn()

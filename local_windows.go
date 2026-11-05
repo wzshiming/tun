@@ -20,9 +20,9 @@ func openLocal(ctx context.Context, cfg Config) (*Device, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	wgtun.WintunTunnelType = "tun"
+	wgtun.WintunTunnelType = cfg.name()
 	guid := wintunGUID
-	dev, err := wgtun.CreateTUNWithRequestedGUID("tun", &guid, cfg.MTU)
+	dev, err := wgtun.CreateTUNWithRequestedGUID(cfg.name(), &guid, cfg.MTU)
 	if err != nil {
 		return nil, err
 	}

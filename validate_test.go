@@ -6,6 +6,42 @@ import (
 	"testing"
 )
 
+func TestValidateName(t *testing.T) {
+	for _, tc := range []struct {
+		goos, name string
+		wantErr    bool
+	}{
+		{"linux", "", false},
+		{"linux", "wg", false},
+		{"linux", "wg%d", false},
+		{"linux", "abcdefghijklmn", false},
+		{"linux", "abcdefghijklm%d", false},
+		{"linux", "abcdefghijklmno", true},
+		{"linux", "abcdefghijklmnop%d", true},
+		{"windows", "abcdefghijklmnopqrstuvwxyz", false},
+		{"darwin", "abcdefghijklmnopqrstuvwxyz", false},
+		{"linux", "a/b", true},
+		{"windows", `a\b`, true},
+		{"windows", "a/b", true},
+		{"darwin", "a\x00b", true},
+		{"windows", "a\nb", true},
+		{"linux", "a\x7fb", true},
+	} {
+		err := validateName(tc.goos, tc.name)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("validateName(%s, %q) = %v, want error %t", tc.goos, tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+func TestValidateRejectsAPathSeparatorInName(t *testing.T) {
+	cfg := ttDefaultConfig()
+	cfg.Name = "../x"
+	if err := validate(cfg); err == nil {
+		t.Errorf("validate accepted Name %q, want an error", cfg.Name)
+	}
+}
+
 func TestValidate(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

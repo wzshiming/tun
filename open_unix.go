@@ -110,7 +110,7 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 	var f *os.File
 	if err == nil {
 		conn.SetDeadline(time.Now().Add(60 * time.Second))
-		if err = writeFrame(conn, request{Addresses: cfg.Addresses, MTU: cfg.MTU, Bypass: cfg.Bypass}); err == nil {
+		if err = writeFrame(conn, newRequest(cfg)); err == nil {
 			rep, f, err = recvReply(conn)
 		}
 	}
@@ -136,7 +136,7 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 
 // openLocal creates and configures the TUN in this process, which must be root.
 func openLocal(ctx context.Context, cfg Config) (*Device, error) {
-	dev, err := createTUN(createTUNName, cfg.MTU)
+	dev, err := createTUN(createTUNName(cfg), cfg.MTU)
 	if err != nil {
 		return nil, err
 	}

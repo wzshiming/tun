@@ -288,7 +288,7 @@ func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx c
 
 	var rep reply
 	conn.SetDeadline(time.Now().Add(60 * time.Second))
-	err = writeFrame(conn, request{Addresses: cfg.Addresses, MTU: cfg.MTU, Bypass: cfg.Bypass})
+	err = writeFrame(conn, newRequest(cfg))
 	if err == nil {
 		err = readFrame(conn, &rep)
 	}
@@ -318,7 +318,7 @@ func serveHelper(conn net.Conn, token string, open func(context.Context, Config)
 		fmt.Fprintln(os.Stderr, "tun-helper: read request:", err)
 		return 1
 	}
-	cfg := Config{Addresses: req.Addresses, MTU: req.MTU, Bypass: req.Bypass}
+	cfg := req.config()
 	var dev *Device
 	err := validate(cfg)
 	if err == nil {

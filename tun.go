@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"runtime"
 	"slices"
+	"strings"
 
 	"go4.org/netipx"
 	wgtun "golang.zx2c4.com/wireguard/tun"
@@ -16,6 +18,9 @@ const HelperCommand = "tun-helper"
 
 // Config describes the TUN to open.
 type Config struct {
+	// Name names the interface, "tun" when empty. macOS ignores it and picks a utunN; Linux appends "%d" unless Name holds one, for the kernel to fill in;
+	// Windows names the Wintun adapter and its tunnel type with it and derives the adapter's GUID from it.
+	Name string
 	// Addresses are the TUN's own addresses with their subnets: one or two, at most one per family.
 	Addresses []netip.Prefix
 	// MTU is the TUN's MTU, 1280 to 65535.
@@ -52,7 +57,41 @@ var fixedHoles = []netip.Prefix{
 	netip.MustParsePrefix("ff00::/8"),
 }
 
+// name returns the interface name, defaulting to "tun".
+func (cfg Config) name() string {
+	if cfg.Name == "" {
+		return "tun"
+	}
+	return cfg.Name
+}
+
+// linuxName returns the name pattern a Linux TUN is created with, in which the kernel replaces "%d" with a free index.
+func linuxName(cfg Config) string {
+	name := cfg.name()
+	if !strings.Contains(name, "%d") {
+		name += "%d"
+	}
+	return name
+}
+
+// validateName rejects a name with a path separator or control character, and on Linux one whose interface name could exceed IFNAMSIZ-1 bytes.
+func validateName(goos, name string) error {
+	if strings.ContainsAny(name, `/\`) || strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return fmt.Errorf("tun: invalid interface name %q", name)
+	}
+	if goos == "linux" {
+		// The kernel fills "%d" in with at least one digit.
+		if n := len(strings.Replace(linuxName(Config{Name: name}), "%d", "0", 1)); n > 15 {
+			return fmt.Errorf("tun: interface name %q is %d bytes, longer than 15", name, n)
+		}
+	}
+	return nil
+}
+
 func validate(cfg Config) error {
+	if err := validateName(runtime.GOOS, cfg.Name); err != nil {
+		return err
+	}
 	if n := len(cfg.Addresses); n < 1 || n > 2 {
 		return fmt.Errorf("tun: want 1 or 2 addresses, got %d", n)
 	}

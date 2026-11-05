@@ -13,9 +13,18 @@ const frameMax = 65536
 
 // request asks the helper for a TUN; the helper validates it and computes the routes itself.
 type request struct {
+	Name      string         `json:"name"`
 	Addresses []netip.Prefix `json:"addresses"`
 	MTU       int            `json:"mtu"`
 	Bypass    []netip.Prefix `json:"bypass,omitempty"`
+}
+
+func newRequest(cfg Config) request {
+	return request{Name: cfg.Name, Addresses: cfg.Addresses, MTU: cfg.MTU, Bypass: cfg.Bypass}
+}
+
+func (r request) config() Config {
+	return Config{Name: r.Name, Addresses: r.Addresses, MTU: r.MTU, Bypass: r.Bypass}
 }
 
 // reply answers a request; the TUN's descriptor travels with it unless Error is set.

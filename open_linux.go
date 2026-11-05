@@ -8,8 +8,8 @@ import (
 	wgtun "golang.zx2c4.com/wireguard/tun"
 )
 
-// createTUNName lets the kernel pick a free tun index.
-const createTUNName = "tun%d"
+// createTUNName lets the kernel pick a free index for the name.
+func createTUNName(cfg Config) string { return linuxName(cfg) }
 
 func peerUID(conn *net.UnixConn) (uint32, error) {
 	rc, err := conn.SyscallConn()
