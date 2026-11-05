@@ -2,6 +2,7 @@ package tun
 
 import (
 	"context"
+	"encoding/binary"
 	"net/netip"
 
 	"golang.org/x/sys/windows"
@@ -9,8 +10,16 @@ import (
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 )
 
-// wintunGUID is the adapter's fixed GUID, which keeps Windows from creating a new network profile on each open.
-var wintunGUID = windows.GUID{Data1: 0x17cb5e1a, Data2: 0xf282, Data3: 0x43a6, Data4: [8]byte{0x97, 0xb6, 0x71, 0x0e, 0xb0, 0x5f, 0xa9, 0x0d}}
+// adapterGUID is the adapter's GUID, fixed per name so Windows keeps one network profile for it and adapters of different names never share one.
+func adapterGUID(cfg Config) windows.GUID {
+	b := nameGUID(cfg.name())
+	return windows.GUID{
+		Data1: binary.BigEndian.Uint32(b[0:4]),
+		Data2: binary.BigEndian.Uint16(b[4:6]),
+		Data3: binary.BigEndian.Uint16(b[6:8]),
+		Data4: [8]byte(b[8:16]),
+	}
+}
 
 // openLocal creates and configures the Wintun adapter in this process, which must be elevated.
 func openLocal(ctx context.Context, cfg Config) (*Device, error) {
@@ -21,7 +30,7 @@ func openLocal(ctx context.Context, cfg Config) (*Device, error) {
 		return nil, err
 	}
 	wgtun.WintunTunnelType = cfg.name()
-	guid := wintunGUID
+	guid := adapterGUID(cfg)
 	dev, err := wgtun.CreateTUNWithRequestedGUID(cfg.name(), &guid, cfg.MTU)
 	if err != nil {
 		return nil, err

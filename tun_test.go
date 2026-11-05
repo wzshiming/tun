@@ -2,6 +2,7 @@ package tun
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"net/netip"
 	"os"
 	"path"
@@ -65,6 +66,31 @@ func TestRequestCarriesTheConfig(t *testing.T) {
 	}
 	if got := req.config(); !reflect.DeepEqual(got, cfg) {
 		t.Errorf("request round trip = %+v, want %+v", got, cfg)
+	}
+}
+
+func TestNameGUIDHashesTheNamespacedName(t *testing.T) {
+	sum := sha256.Sum256([]byte("github.com/wzshiming/tun\x00tun"))
+	want := [16]byte(sum[:16])
+	want[6] = want[6]&0x0f | 0x80
+	want[8] = want[8]&0x3f | 0x80
+	if got := nameGUID("tun"); got != want {
+		t.Errorf("nameGUID(tun) = %x, want %x", got, want)
+	}
+}
+
+func TestNameGUIDSetsVersion8AndTheRFCVariant(t *testing.T) {
+	for _, name := range []string{"tun", "wg", ""} {
+		g := nameGUID(name)
+		if g[6]>>4 != 8 || g[8]>>6 != 0b10 {
+			t.Errorf("nameGUID(%q) = %x, want version 8 and variant 10", name, g)
+		}
+	}
+}
+
+func TestNameGUIDDiffersByName(t *testing.T) {
+	if nameGUID("tun") == nameGUID("wg") {
+		t.Error("nameGUID(tun) == nameGUID(wg), want adapters of different names to differ")
 	}
 }
 

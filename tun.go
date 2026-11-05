@@ -2,6 +2,7 @@
 package tun
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -72,6 +73,15 @@ func linuxName(cfg Config) string {
 		name += "%d"
 	}
 	return name
+}
+
+// nameGUID derives a UUID from name: SHA-256 of the namespaced name, cut to 16 bytes and marked version 8 (RFC 9562), variant 10.
+func nameGUID(name string) [16]byte {
+	sum := sha256.Sum256([]byte("github.com/wzshiming/tun\x00" + name))
+	g := [16]byte(sum[:16])
+	g[6] = g[6]&0x0f | 0x80
+	g[8] = g[8]&0x3f | 0x80
+	return g
 }
 
 // validateName rejects a name with a path separator or control character, and on Linux one whose interface name could exceed IFNAMSIZ-1 bytes.
