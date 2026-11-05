@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/wzshiming/tun/wintun"
 )
 
 // ttWinHelperSwap makes the process look unelevated and routes elevate to fake; it returns the recorded launches.
@@ -33,7 +35,7 @@ func ttWinHelperSwap(t *testing.T, fake func(ctx context.Context, exe string, ar
 
 func ttWinHelperNeedWintun(t *testing.T) {
 	t.Helper()
-	if !wintunEmbedded {
+	if !wintun.Embedded {
 		t.Skip("no Wintun DLL embedded for this architecture")
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"golang.org/x/sys/windows"
 	wgtun "golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
+
+	"github.com/wzshiming/tun/wintun"
 )
 
 // adapterGUID is the adapter's GUID, fixed per name so Windows keeps one network profile for it and adapters of different names never share one.
@@ -23,7 +25,7 @@ func adapterGUID(cfg Config) windows.GUID {
 
 // openLocal creates and configures the Wintun adapter in this process, which must be elevated.
 func openLocal(ctx context.Context, cfg Config) (*Device, error) {
-	if err := loadWintun(); err != nil {
+	if err := wintun.Load(); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {

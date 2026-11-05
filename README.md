@@ -18,7 +18,6 @@ go get github.com/wzshiming/tun
 - `const HelperCommand = "tun-helper"` and `func Helper(args []string) int` — the helper subcommand and its entry point; the return value is the exit code.
 - `func CaptureRoutes(cfg Config) []netip.Prefix` — the routes `Open` captures.
 - `var ErrDenied error` — the privilege prompt was refused. `var ErrUnsupported error` — the platform is not supported.
-- `var CacheDir func() (string, error)` — Windows only: where the embedded `wintun.dll` is extracted (default `os.UserCacheDir()/tun`).
 
 ### `stack` — the userspace network stack
 
@@ -31,6 +30,12 @@ go get github.com/wzshiming/tun
 
 - `func NewDialer(capture []netip.Prefix) *net.Dialer` — a dialer that binds connections to captured destinations onto the default-route interface.
 - `func DefaultInterface(ipv6 bool) (*net.Interface, error)` and `var ErrNoDefaultRoute error`.
+
+### `wintun` — the embedded Wintun DLL
+
+- `const Embedded bool` — Windows only: whether this build carries a `wintun.dll` (amd64 and arm64).
+- `var CacheDir func() (string, error)` — where the embedded `wintun.dll` is extracted on Windows (default `os.UserCacheDir()/tun`).
+- `func Load() error` — Windows only: extracts the embedded `wintun.dll` under `CacheDir()`, verifies it and loads it once per process; wraps `errors.ErrUnsupported` when none is embedded. The process that creates the adapter, `Open`'s or its elevated helper, calls it.
 
 ## Example
 
@@ -78,7 +83,7 @@ A process running as root/administrator opens the device directly. Otherwise `Op
 
 ### Wintun
 
-The module embeds the unmodified Wintun 0.14.1 DLLs for amd64 and arm64, made by WireGuard LLC and distributed under the license in [wintun/bin/LICENSE.txt](wintun/bin/LICENSE.txt). The DLL is extracted under `CacheDir()` and verified before it is loaded. Windows installs the Wintun driver on the first `Open`.
+The module embeds the unmodified Wintun 0.14.1 DLLs for amd64 and arm64, made by WireGuard LLC and distributed under the license in [wintun/bin/LICENSE.txt](wintun/bin/LICENSE.txt). The DLL is extracted under `wintun.CacheDir()` and verified before it is loaded. Windows installs the Wintun driver on the first `Open`.
 
 ## What is captured
 

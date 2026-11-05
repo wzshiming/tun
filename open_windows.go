@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/wzshiming/tun/wintun"
 )
 
 var isElevated = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
@@ -17,7 +19,7 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
-	if !wintunEmbedded {
+	if !wintun.Embedded {
 		return nil, ErrUnsupported
 	}
 	if isElevated() {

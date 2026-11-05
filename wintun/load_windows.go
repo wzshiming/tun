@@ -1,4 +1,4 @@
-package tun
+package wintun
 
 import (
 	"crypto/sha256"
@@ -12,45 +12,45 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// wintunBeforeOpen runs between extracting wintun.dll and opening it for verification; tests swap the file there.
-var wintunBeforeOpen = func(path string) {}
+// beforeOpen runs between extracting wintun.dll and opening it for verification; tests swap the file there.
+var beforeOpen = func(path string) {}
 
-// wintunLoadLibrary loads the DLL at the absolute path, resolving its imports from System32 only.
-var wintunLoadLibrary = func(path string) (windows.Handle, error) {
+// loadLibrary loads the DLL at the absolute path, resolving its imports from System32 only.
+var loadLibrary = func(path string) (windows.Handle, error) {
 	return windows.LoadLibraryEx(path, 0, windows.LOAD_LIBRARY_SEARCH_SYSTEM32)
 }
 
 var (
-	wintunMu sync.Mutex
-	// wintunModule is the loaded wintun.dll, which golang.zx2c4.com/wintun then finds by its base name.
-	wintunModule windows.Handle
+	mu sync.Mutex
+	// module is the loaded wintun.dll, which golang.zx2c4.com/wintun then finds by its base name.
+	module windows.Handle
 )
 
-// loadWintun extracts the embedded wintun.dll and loads it once per process.
-func loadWintun() error {
-	if !wintunEmbedded {
-		return fmt.Errorf("tun: no wintun.dll for %s: %w", runtime.GOARCH, ErrUnsupported)
+// Load extracts the embedded wintun.dll and loads it once per process.
+func Load() error {
+	if !Embedded {
+		return fmt.Errorf("tun: no wintun.dll for %s: %w", runtime.GOARCH, errors.ErrUnsupported)
 	}
-	wintunMu.Lock()
-	defer wintunMu.Unlock()
-	if wintunModule != 0 {
+	mu.Lock()
+	defer mu.Unlock()
+	if module != 0 {
 		return nil
 	}
 	cache, err := CacheDir()
 	if err != nil {
 		return fmt.Errorf("tun: wintun.dll directory: %w", err)
 	}
-	root, sub := wintunLocation(cache, runtime.GOARCH, wintunDLL)
-	path, err := provisionFile(root, sub, "wintun.dll", wintunDLL, rejectReparsePoint)
+	root, sub := location(cache, runtime.GOARCH, dll)
+	path, err := provisionFile(root, sub, "wintun.dll", dll, rejectReparsePoint)
 	if err != nil {
 		return fmt.Errorf("tun: extract wintun.dll: %w", err)
 	}
-	wintunBeforeOpen(path)
-	module, err := loadVerified(path, wintunDLL)
+	beforeOpen(path)
+	h, err := loadVerified(path, dll)
 	if err != nil {
 		return fmt.Errorf("tun: load %s: %w", path, err)
 	}
-	wintunModule = module
+	module = h
 	return nil
 }
 
@@ -78,7 +78,7 @@ func loadVerified(path string, want []byte) (windows.Handle, error) {
 	if err != nil {
 		return 0, err
 	}
-	return wintunLoadLibrary(final)
+	return loadLibrary(final)
 }
 
 // GetFinalPathNameByHandle flags golang.org/x/sys/windows does not define.
