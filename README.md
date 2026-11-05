@@ -78,7 +78,7 @@ A process running as root/administrator opens the device directly. Otherwise `Op
 
 ### Wintun
 
-The module embeds the unmodified Wintun 0.14.1 DLLs for amd64 and arm64, made by WireGuard LLC and distributed under the license in [wintun/LICENSE.txt](wintun/LICENSE.txt). The DLL is extracted under `CacheDir()` and verified before it is loaded. Windows installs the Wintun driver on the first `Open`.
+The module embeds the unmodified Wintun 0.14.1 DLLs for amd64 and arm64, made by WireGuard LLC and distributed under the license in [wintun/bin/LICENSE.txt](wintun/bin/LICENSE.txt). The DLL is extracted under `CacheDir()` and verified before it is loaded. Windows installs the Wintun driver on the first `Open`.
 
 ## What is captured
 
@@ -122,4 +122,4 @@ On Windows, `TestE2EWindowsLocal` and `TestE2EWindowsHelper` run with `TUN_E2E=1
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The embedded Wintun DLLs are covered by [wintun/LICENSE.txt](wintun/LICENSE.txt).
+MIT, see [LICENSE](LICENSE). The embedded Wintun DLLs are covered by [wintun/bin/LICENSE.txt](wintun/bin/LICENSE.txt).
