@@ -445,16 +445,17 @@ func ttDNSVia(t *testing.T, address string) {
 // ttRouteDev returns the interface the host routes ip through, or "" when it has no route.
 func ttRouteDev(t *testing.T, ip string) string {
 	t.Helper()
-	bin := defaultTools(runtime.GOOS)
-	argv, key := []string{bin.route, "-n", "get", ip}, "interface:"
+	route, _ := exec.LookPath("route")
+	ipPath, _ := exec.LookPath("ip")
+	argv, key := []string{route, "-n", "get", ip}, "interface:"
 	v6 := netip.MustParseAddr(ip).Is6()
 	switch {
 	case runtime.GOOS == "linux" && v6:
-		argv, key = []string{bin.ip, "-6", "route", "get", ip}, "dev"
+		argv, key = []string{ipPath, "-6", "route", "get", ip}, "dev"
 	case runtime.GOOS == "linux":
-		argv, key = []string{bin.ip, "route", "get", ip}, "dev"
+		argv, key = []string{ipPath, "route", "get", ip}, "dev"
 	case v6:
-		argv = []string{bin.route, "-n", "get", "-inet6", ip}
+		argv = []string{route, "-n", "get", "-inet6", ip}
 	}
 	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
 	fields := strings.Fields(string(out))
@@ -468,7 +469,8 @@ func ttRouteDev(t *testing.T, ip string) string {
 // ttLogRoutes logs the host's route to 1.1.1.1 and, on darwin, the one scoped to phys and the IPv4 defaults; it returns the scoped lookup.
 func ttLogRoutes(t *testing.T, when, phys string) (scoped string) {
 	t.Helper()
-	bin := defaultTools(runtime.GOOS)
+	route, _ := exec.LookPath("route")
+	ip, _ := exec.LookPath("ip")
 	logOutput := func(what, out string, err error) {
 		t.Helper()
 		var lines []string
@@ -490,11 +492,11 @@ func ttLogRoutes(t *testing.T, when, phys string) (scoped string) {
 		return string(out)
 	}
 	if runtime.GOOS == "linux" {
-		run(bin.ip, "route", "get", "1.1.1.1")
+		run(ip, "route", "get", "1.1.1.1")
 		return ""
 	}
-	run(bin.route, "-n", "get", "-inet", "1.1.1.1")
-	scoped = run(bin.route, "-n", "get", "-inet", "-ifscope", phys, "1.1.1.1")
+	run(route, "-n", "get", "-inet", "1.1.1.1")
+	scoped = run(route, "-n", "get", "-inet", "-ifscope", phys, "1.1.1.1")
 	netstat, err := exec.LookPath("netstat")
 	if err != nil {
 		t.Logf("%s, look up netstat: %v", when, err)

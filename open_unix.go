@@ -143,7 +143,7 @@ func openLocal(ctx context.Context, cfg Config) (*Device, error) {
 	name, err := dev.Name()
 	var warnings []string
 	if err == nil {
-		warnings, err = configure(ctx, runtime.GOOS, defaultTools(runtime.GOOS), name, cfg, runCommand)
+		warnings, err = configure(ctx, defaultTools(), name, cfg, runCommand)
 	}
 	if err != nil {
 		dev.Close()

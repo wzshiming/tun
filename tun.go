@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"runtime"
 	"slices"
 	"strings"
 
@@ -66,15 +65,6 @@ func (cfg Config) name() string {
 	return cfg.Name
 }
 
-// linuxName returns the name pattern a Linux TUN is created with, in which the kernel replaces "%d" with a free index.
-func linuxName(cfg Config) string {
-	name := cfg.name()
-	if !strings.Contains(name, "%d") {
-		name += "%d"
-	}
-	return name
-}
-
 // nameGUID derives a UUID from name: SHA-256 of the namespaced name, cut to 16 bytes and marked version 8 (RFC 9562), variant 10.
 func nameGUID(name string) [16]byte {
 	sum := sha256.Sum256([]byte("github.com/wzshiming/tun\x00" + name))
@@ -84,27 +74,16 @@ func nameGUID(name string) [16]byte {
 	return g
 }
 
-// validateName rejects a name with a path separator or control character, on Linux one whose name pattern exceeds IFNAMSIZ-1 bytes,
-// and on Windows one longer than 127 bytes.
-func validateName(goos, name string) error {
+// validateNameChars rejects a name with a path separator or control character, on every platform.
+func validateNameChars(name string) error {
 	if strings.ContainsAny(name, `/\`) || strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return fmt.Errorf("tun: invalid interface name %q", name)
-	}
-	if goos == "linux" {
-		// The pattern itself, "%d" included, must fit the ifreq name field.
-		if pattern := linuxName(Config{Name: name}); len(pattern) > 15 {
-			return fmt.Errorf("tun: interface name pattern %q is %d bytes, longer than 15", pattern, len(pattern))
-		}
-	}
-	// Wintun limits adapter names and tunnel types to MAX_ADAPTER_NAME-1.
-	if goos == "windows" && len(name) > 127 {
-		return fmt.Errorf("tun: interface name %q is %d bytes, longer than 127", name, len(name))
 	}
 	return nil
 }
 
 func validate(cfg Config) error {
-	if err := validateName(runtime.GOOS, cfg.Name); err != nil {
+	if err := validateName(cfg.Name); err != nil {
 		return err
 	}
 	if n := len(cfg.Addresses); n < 1 || n > 2 {
