@@ -23,6 +23,7 @@ var CacheDir = func() (string, error) {
 // wintunLocation splits where the wintun.dll of goarch whose bytes are dll goes under cacheDir into the unchecked root and the directories below it.
 func wintunLocation(cacheDir, goarch string, dll []byte) (root string, sub []string) {
 	sum := sha256.Sum256(dll)
+	cacheDir = filepath.Clean(cacheDir)
 	return filepath.Dir(cacheDir), []string{filepath.Base(cacheDir), "wintun", goarch + "-" + hex.EncodeToString(sum[:])[:16]}
 }
 

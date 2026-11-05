@@ -127,6 +127,14 @@ func TestWintunLocationKeysTheDLLByArchAndHashUnderCacheDir(t *testing.T) {
 	}
 }
 
+func TestWintunLocationIgnoresATrailingSeparatorOnCacheDir(t *testing.T) {
+	cache := filepath.Join("user-cache", "app") + string(filepath.Separator)
+	root, sub := wintunLocation(cache, "arm64", nil)
+	if root != "user-cache" || len(sub) == 0 || sub[0] != "app" {
+		t.Errorf("wintunLocation(%q) = %q, %q; want user-cache, [app ...]", cache, root, sub)
+	}
+}
+
 func TestProvisionFileChecksEachOwnedDirectoryAndTheFileButNotTheRoot(t *testing.T) {
 	root := t.TempDir()
 	var checked []string
