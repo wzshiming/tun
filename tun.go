@@ -84,15 +84,15 @@ func nameGUID(name string) [16]byte {
 	return g
 }
 
-// validateName rejects a name with a path separator or control character, and on Linux one whose interface name could exceed IFNAMSIZ-1 bytes.
+// validateName rejects a name with a path separator or control character, and on Linux one whose name pattern exceeds IFNAMSIZ-1 bytes.
 func validateName(goos, name string) error {
 	if strings.ContainsAny(name, `/\`) || strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return fmt.Errorf("tun: invalid interface name %q", name)
 	}
 	if goos == "linux" {
-		// The kernel fills "%d" in with at least one digit.
-		if n := len(strings.Replace(linuxName(Config{Name: name}), "%d", "0", 1)); n > 15 {
-			return fmt.Errorf("tun: interface name %q is %d bytes, longer than 15", name, n)
+		// The pattern itself, "%d" included, must fit the ifreq name field.
+		if pattern := linuxName(Config{Name: name}); len(pattern) > 15 {
+			return fmt.Errorf("tun: interface name pattern %q is %d bytes, longer than 15", pattern, len(pattern))
 		}
 	}
 	return nil
