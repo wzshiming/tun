@@ -133,6 +133,14 @@ func (c *logConn) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// CloseWrite lets the stack half-close the flow instead of closing both ends at the first EOF.
+func (c *logConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return errors.ErrUnsupported
+}
+
 func (c *logConn) Close() error {
 	err := c.Conn.Close()
 	c.once.Do(func() {
