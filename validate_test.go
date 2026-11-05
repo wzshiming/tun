@@ -20,6 +20,8 @@ func TestValidateName(t *testing.T) {
 		{"linux", "abcdefghijklmno", true},
 		{"linux", "abcdefghijklmn%d", true},
 		{"windows", "abcdefghijklmnopqrstuvwxyz", false},
+		{"windows", strings.Repeat("a", 127), false},
+		{"windows", strings.Repeat("a", 128), true},
 		{"darwin", "abcdefghijklmnopqrstuvwxyz", false},
 		{"linux", "a/b", true},
 		{"windows", `a\b`, true},

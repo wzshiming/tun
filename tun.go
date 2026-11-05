@@ -84,7 +84,8 @@ func nameGUID(name string) [16]byte {
 	return g
 }
 
-// validateName rejects a name with a path separator or control character, and on Linux one whose name pattern exceeds IFNAMSIZ-1 bytes.
+// validateName rejects a name with a path separator or control character, on Linux one whose name pattern exceeds IFNAMSIZ-1 bytes,
+// and on Windows one longer than 127 bytes.
 func validateName(goos, name string) error {
 	if strings.ContainsAny(name, `/\`) || strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return fmt.Errorf("tun: invalid interface name %q", name)
@@ -94,6 +95,10 @@ func validateName(goos, name string) error {
 		if pattern := linuxName(Config{Name: name}); len(pattern) > 15 {
 			return fmt.Errorf("tun: interface name pattern %q is %d bytes, longer than 15", pattern, len(pattern))
 		}
+	}
+	// Wintun limits adapter names and tunnel types to MAX_ADAPTER_NAME-1.
+	if goos == "windows" && len(name) > 127 {
+		return fmt.Errorf("tun: interface name %q is %d bytes, longer than 127", name, len(name))
 	}
 	return nil
 }
