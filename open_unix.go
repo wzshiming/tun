@@ -20,12 +20,12 @@ import (
 
 var createTUN = func(name string, mtu int) (wgtun.Device, error) { return wgtun.CreateTUN(name, mtu) }
 
-// elevate returns the command that asks for administrator privileges and runs exe's tun-helper on socket as root.
+// elevate returns the command that asks for administrator privileges and runs exe's HelperCommand on socket as root.
 var elevate = func(ctx context.Context, exe, socket string) *exec.Cmd {
 	if runtime.GOOS == "darwin" {
 		return exec.CommandContext(ctx, "/usr/bin/osascript", "-e", appleScript(exe, socket))
 	}
-	return exec.CommandContext(ctx, "/usr/bin/pkexec", exe, "tun-helper", socket)
+	return exec.CommandContext(ctx, "/usr/bin/pkexec", exe, HelperCommand, socket)
 }
 
 // Open prompts for administrator privileges unless the process is root.

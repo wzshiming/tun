@@ -11,6 +11,9 @@ import (
 	wgtun "golang.zx2c4.com/wireguard/tun"
 )
 
+// HelperCommand is the subcommand Open runs the privileged helper as; the program must dispatch os.Args[1] == HelperCommand to Helper(os.Args[2:]).
+const HelperCommand = "tun-helper"
+
 // Config describes the TUN to open.
 type Config struct {
 	// Addresses are the TUN's own addresses with their subnets: one or two, at most one per family.

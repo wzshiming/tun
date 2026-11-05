@@ -23,6 +23,12 @@ func ttPrefixes(s ...string) []netip.Prefix {
 	return prefixes
 }
 
+func TestHelperCommandIsTunHelper(t *testing.T) {
+	if HelperCommand != "tun-helper" {
+		t.Errorf("HelperCommand = %q, want tun-helper", HelperCommand)
+	}
+}
+
 func TestDefaultToolsLinuxIPIsAbsoluteOrEmpty(t *testing.T) {
 	ip := defaultTools("linux").ip
 	if ip == "" {

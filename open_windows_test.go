@@ -102,7 +102,7 @@ func TestOpenElevatesTestBinaryAndReturnsDenied(t *testing.T) {
 		t.Fatalf("elevate called %d times, want once", len(*calls))
 	}
 	got := (*calls)[0]
-	if len(got) != 4 || got[0] != exe || got[1] != "tun-helper" ||
+	if len(got) != 4 || got[0] != exe || got[1] != HelperCommand ||
 		!regexp.MustCompile(`^127\.0\.0\.1:\d+$`).MatchString(got[2]) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(got[3]) {
 		t.Errorf("elevate got %q, want [%s tun-helper 127.0.0.1:<port> <64 hex>]", got, exe)
 	}

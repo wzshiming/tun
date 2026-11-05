@@ -254,7 +254,7 @@ func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx c
 	launched := make(chan error, 1)
 	exited := make(chan error, 1)
 	go func() {
-		proc, err := launch(ctx, exe, []string{"tun-helper", ln.Addr().String(), token})
+		proc, err := launch(ctx, exe, []string{HelperCommand, ln.Addr().String(), token})
 		launched <- err
 		if err != nil {
 			return

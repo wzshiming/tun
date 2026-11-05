@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-// Helper runs the tun-helper subcommand that Open launches as root.
+// Helper runs the HelperCommand subcommand that Open launches as root.
 func Helper(args []string) int {
 	if len(args) != 1 || !filepath.IsAbs(args[0]) {
-		fmt.Fprintln(os.Stderr, "usage: tun-helper <absolute unix socket path>")
+		fmt.Fprintln(os.Stderr, "usage: "+HelperCommand+" <absolute unix socket path>")
 		return 2
 	}
 	if os.Geteuid() != 0 {

@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-// Helper runs the tun-helper subcommand that Open launches elevated.
+// Helper runs the HelperCommand subcommand that Open launches elevated.
 func Helper(args []string) int {
-	const usage = "usage: tun-helper <127.0.0.1:port> <token>"
+	const usage = "usage: " + HelperCommand + " <127.0.0.1:port> <token>"
 	if len(args) != 2 {
 		fmt.Fprintln(os.Stderr, usage)
 		return 2

@@ -4,6 +4,8 @@ package tun
 
 import (
 	"errors"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,6 +16,22 @@ func TestAppleScriptQuotesBothPaths(t *testing.T) {
 	const want = `do shell script quoted form of "/Applications/My App.app/x" & " tun-helper " & quoted form of "/tmp/a'b\"c\\d/s" with administrator privileges`
 	if got != want {
 		t.Errorf("appleScript =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestElevateRunsTheHelperCommand(t *testing.T) {
+	cmd := elevate(t.Context(), "/x/app", "/tmp/s")
+	var want []string
+	if runtime.GOOS == "darwin" {
+		want = []string{"/usr/bin/osascript", "-e", appleScript("/x/app", "/tmp/s")}
+		if !strings.Contains(want[2], `" `+HelperCommand+` "`) {
+			t.Errorf("appleScript = %s, want it to run %s", want[2], HelperCommand)
+		}
+	} else {
+		want = []string{"/usr/bin/pkexec", "/x/app", HelperCommand, "/tmp/s"}
+	}
+	if !slices.Equal(cmd.Args, want) {
+		t.Errorf("elevate args = %q, want %q", cmd.Args, want)
 	}
 }
 

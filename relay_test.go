@@ -411,7 +411,7 @@ func TestOpenViaRelayReturnsRelayedDevice(t *testing.T) {
 		t.Fatalf("openViaRelay: %v", err)
 	}
 	defer dev.Close()
-	if len(args) != 4 || args[0] != "/x/app.exe" || args[1] != "tun-helper" ||
+	if len(args) != 4 || args[0] != "/x/app.exe" || args[1] != HelperCommand ||
 		!regexp.MustCompile(`^127\.0\.0\.1:\d+$`).MatchString(args[2]) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(args[3]) {
 		t.Fatalf("launch got %q, want [/x/app.exe tun-helper 127.0.0.1:<port> <64 hex>]", args)
 	}

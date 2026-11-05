@@ -7,9 +7,9 @@ import (
 
 var appleQuote = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 
-// appleScript runs exe's tun-helper on sock as root once the user approves the administrator prompt.
+// appleScript runs exe's HelperCommand on sock as root once the user approves the administrator prompt.
 func appleScript(exe, sock string) string {
-	return `do shell script quoted form of "` + appleQuote.Replace(exe) + `" & " tun-helper " & quoted form of "` + appleQuote.Replace(sock) + `" with administrator privileges`
+	return `do shell script quoted form of "` + appleQuote.Replace(exe) + `" & " ` + HelperCommand + ` " & quoted form of "` + appleQuote.Replace(sock) + `" with administrator privileges`
 }
 
 // classifyExit explains why the launcher of the helper exited without the helper connecting.
