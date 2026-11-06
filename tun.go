@@ -11,6 +11,8 @@ import (
 
 	"go4.org/netipx"
 	wgtun "golang.zx2c4.com/wireguard/tun"
+
+	"github.com/wzshiming/tun/internal/elevate"
 )
 
 // HelperCommand is the subcommand Open runs the privileged helper as; the program must dispatch os.Args[1] == HelperCommand to Helper(os.Args[2:]).
@@ -39,7 +41,7 @@ type Device struct {
 }
 
 // ErrDenied reports that the user declined the administrator prompt.
-var ErrDenied = errors.New("tun: administrator privileges denied")
+var ErrDenied = elevate.ErrDenied
 
 // ErrUnsupported reports a platform without TUN support.
 var ErrUnsupported = errors.ErrUnsupported

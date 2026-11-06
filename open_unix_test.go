@@ -3,64 +3,49 @@
 package tun
 
 import (
+	"context"
 	"errors"
-	"runtime"
-	"slices"
-	"strconv"
-	"strings"
+	"os/exec"
+	"path/filepath"
 	"testing"
+
+	"github.com/wzshiming/tun/internal/elevate"
 )
 
-func TestAppleScriptQuotesBothPaths(t *testing.T) {
-	got := appleScript("/Applications/My App.app/x", `/tmp/a'b"c\d/s`)
-	const want = `do shell script quoted form of "/Applications/My App.app/x" & " tun-helper " & quoted form of "/tmp/a'b\"c\\d/s" with administrator privileges`
-	if got != want {
-		t.Errorf("appleScript =\n%s\nwant\n%s", got, want)
+// ttUnixLaunchSwap makes the process look unprivileged and routes elevate.Launch to fake; it returns the recorded launches.
+func ttUnixLaunchSwap(t *testing.T, fake func(ctx context.Context, exe string, args []string) *exec.Cmd) *[][]string {
+	t.Helper()
+	prevLaunch, prevIsElevated := elevate.Launch, elevate.IsElevated
+	t.Cleanup(func() { elevate.Launch, elevate.IsElevated = prevLaunch, prevIsElevated })
+	var calls [][]string
+	elevate.IsElevated = func() bool { return false }
+	elevate.Launch = func(ctx context.Context, exe string, args []string) *exec.Cmd {
+		calls = append(calls, append([]string{exe}, args...))
+		return fake(ctx, exe, args)
+	}
+	return &calls
+}
+
+func TestOpenLaunchesHelperCommandOnTheSocket(t *testing.T) {
+	calls := ttUnixLaunchSwap(t, func(ctx context.Context, _ string, _ []string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
+	})
+	Open(t.Context(), ttDefaultConfig())
+	if len(*calls) != 1 {
+		t.Fatalf("Launch called %d times, want once", len(*calls))
+	}
+	got := (*calls)[0]
+	if len(got) != 3 || got[1] != HelperCommand || !filepath.IsAbs(got[2]) {
+		t.Errorf("Launch got %q, want [<exe> %s <absolute socket>]", got, HelperCommand)
 	}
 }
 
-func TestElevateRunsTheHelperCommand(t *testing.T) {
-	cmd := elevate(t.Context(), "/x/app", "/tmp/s")
-	var want []string
-	if runtime.GOOS == "darwin" {
-		want = []string{"/usr/bin/osascript", "-e", appleScript("/x/app", "/tmp/s")}
-		if !strings.Contains(want[2], `" `+HelperCommand+` "`) {
-			t.Errorf("appleScript = %s, want it to run %s", want[2], HelperCommand)
-		}
-	} else {
-		want = []string{"/usr/bin/pkexec", "/x/app", HelperCommand, "/tmp/s"}
-	}
-	if !slices.Equal(cmd.Args, want) {
-		t.Errorf("elevate args = %q, want %q", cmd.Args, want)
-	}
-}
-
-func TestClassifyExit(t *testing.T) {
-	// The generic rows' stderr holds no digits, so finding the code proves it is reported.
-	for _, tc := range []struct {
-		name   string
-		goos   string
-		code   int
-		stderr string
-		denied bool
-	}{
-		{"darwin user canceled", "darwin", 1, "0:156: execution error: User canceled. (-128)\n", true},
-		{"darwin other failure", "darwin", 1, "tun-helper: create tun: operation not permitted\n", false},
-		{"linux 126", "linux", 126, "Error executing command as another user: Request dismissed\n", true},
-		{"linux 127", "linux", 127, "Error executing command as another user: Not authorized\n", true},
-		{"linux 1", "linux", 1, "tun-helper: create tun: operation not permitted\n", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := classifyExit(tc.goos, tc.code, tc.stderr)
-			if tc.denied {
-				if !errors.Is(err, ErrDenied) {
-					t.Errorf("classifyExit = %v, want ErrDenied", err)
-				}
-				return
-			}
-			if err == nil || errors.Is(err, ErrDenied) || !strings.Contains(err.Error(), strconv.Itoa(tc.code)) {
-				t.Errorf("classifyExit = %v, want a generic error containing exit code %d", err, tc.code)
-			}
-		})
+func TestOpenReturnsErrDeniedWhenThePromptIsDeclined(t *testing.T) {
+	// The launcher exits as osascript does on a canceled prompt and as pkexec does on a dismissed one.
+	ttUnixLaunchSwap(t, func(ctx context.Context, _ string, _ []string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "echo 'execution error: User canceled. (-128)' >&2; exit 126")
+	})
+	if _, err := Open(t.Context(), ttDefaultConfig()); !errors.Is(err, ErrDenied) {
+		t.Errorf("Open = %v, want ErrDenied", err)
 	}
 }

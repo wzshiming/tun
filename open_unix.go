@@ -9,31 +9,23 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
 	wgtun "golang.zx2c4.com/wireguard/tun"
+
+	"github.com/wzshiming/tun/internal/elevate"
 )
 
 var createTUN = func(name string, mtu int) (wgtun.Device, error) { return wgtun.CreateTUN(name, mtu) }
-
-// elevate returns the command that asks for administrator privileges and runs exe's HelperCommand on socket as root.
-var elevate = func(ctx context.Context, exe, socket string) *exec.Cmd {
-	if runtime.GOOS == "darwin" {
-		return exec.CommandContext(ctx, "/usr/bin/osascript", "-e", appleScript(exe, socket))
-	}
-	return exec.CommandContext(ctx, "/usr/bin/pkexec", exe, HelperCommand, socket)
-}
 
 // Open prompts for administrator privileges unless the process is root.
 func Open(ctx context.Context, cfg Config) (*Device, error) {
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
-	if os.Geteuid() == 0 {
+	if elevate.IsElevated() {
 		return openLocal(ctx, cfg)
 	}
 
@@ -74,7 +66,7 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := elevate(cctx, exe, sock)
+	cmd := elevate.Launch(cctx, exe, []string{HelperCommand, sock})
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
@@ -97,7 +89,7 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 		case ctx.Err() != nil:
 			return nil, ctx.Err()
 		case errors.Is(err, net.ErrClosed):
-			return nil, classifyExit(runtime.GOOS, cmd.ProcessState.ExitCode(), stderr.String())
+			return nil, elevate.ClassifyExit(cmd.ProcessState.ExitCode(), stderr.String())
 		}
 		return nil, fmt.Errorf("tun: waiting for the tun helper: %w", err)
 	}

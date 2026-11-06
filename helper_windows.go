@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/wzshiming/tun/internal/elevate"
 )
 
 // Helper runs the HelperCommand subcommand that Open launches elevated.
@@ -22,7 +24,7 @@ func Helper(args []string) int {
 		fmt.Fprintln(os.Stderr, usage)
 		return 2
 	}
-	if !isElevated() {
+	if !elevate.IsElevated() {
 		fmt.Fprintln(os.Stderr, "tun-helper: must run elevated")
 		return 2
 	}

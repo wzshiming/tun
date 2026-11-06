@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/wzshiming/tun/bypass"
+	"github.com/wzshiming/tun/internal/elevate"
 	"github.com/wzshiming/tun/stack"
 	"golang.org/x/sys/windows"
 )
@@ -41,9 +42,9 @@ func ttWinHelperGate(t *testing.T) {
 	}
 }
 
-// ttWinHelperProc is a helperProc that closes exited once the helper has exited.
+// ttWinHelperProc is an elevate.Proc that closes exited once the helper has exited.
 type ttWinHelperProc struct {
-	proc   helperProc
+	proc   elevate.Proc
 	exited chan struct{}
 }
 
@@ -52,7 +53,7 @@ func (p *ttWinHelperProc) Wait() (int, error) {
 	return p.proc.Wait()
 }
 
-// ttWinHelperCmd is a helperProc for a helper started with exec.
+// ttWinHelperCmd is an elevate.Proc for a helper started with exec.
 type ttWinHelperCmd struct{ cmd *exec.Cmd }
 
 func (c ttWinHelperCmd) Wait() (int, error) {
@@ -63,13 +64,13 @@ func (c ttWinHelperCmd) Wait() (int, error) {
 	return c.cmd.ProcessState.ExitCode(), nil
 }
 
-// ttWinHelperRecord wraps elevate as launch so the test sees the helper exit.
-func ttWinHelperRecord(t *testing.T, launch func(context.Context, string, []string) (helperProc, error)) <-chan struct{} {
+// ttWinHelperRecord swaps elevate.Launch for launch so the test sees the helper exit.
+func ttWinHelperRecord(t *testing.T, launch func(context.Context, string, []string) (elevate.Proc, error)) <-chan struct{} {
 	t.Helper()
-	prev := elevate
-	t.Cleanup(func() { elevate = prev })
+	prev := elevate.Launch
+	t.Cleanup(func() { elevate.Launch = prev })
 	exited := make(chan struct{})
-	elevate = func(ctx context.Context, exe string, args []string) (helperProc, error) {
+	elevate.Launch = func(ctx context.Context, exe string, args []string) (elevate.Proc, error) {
 		proc, err := launch(ctx, exe, args)
 		if err != nil {
 			return nil, err
@@ -81,7 +82,7 @@ func ttWinHelperRecord(t *testing.T, launch func(context.Context, string, []stri
 
 func TestE2EWindowsHelper(t *testing.T) {
 	ttWinHelperGate(t)
-	exited := ttWinHelperRecord(t, func(_ context.Context, _ string, args []string) (helperProc, error) {
+	exited := ttWinHelperRecord(t, func(_ context.Context, _ string, args []string) (elevate.Proc, error) {
 		cmd := exec.Command(os.Args[0], args...)
 		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 		if err := cmd.Start(); err != nil {
@@ -97,7 +98,7 @@ func TestE2EWindowsHelperRunas(t *testing.T) {
 	if os.Getenv("TUN_E2E_RUNAS") != "1" {
 		t.Skip("set TUN_E2E_RUNAS=1 to launch the helper through ShellExecuteEx runas")
 	}
-	exited := ttWinHelperRecord(t, elevate)
+	exited := ttWinHelperRecord(t, elevate.Launch)
 	// A UAC prompt nobody answers must fail the test instead of hanging it.
 	guard := time.AfterFunc(2*time.Minute, func() { panic("TestE2EWindowsHelperRunas still running after 2 minutes; is a UAC prompt waiting?") })
 	defer guard.Stop()

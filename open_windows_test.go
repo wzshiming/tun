@@ -7,26 +7,24 @@ import (
 	"errors"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
-	"golang.org/x/sys/windows"
-
+	"github.com/wzshiming/tun/internal/elevate"
 	"github.com/wzshiming/tun/wintun"
 )
 
-// ttWinHelperSwap makes the process look unelevated and routes elevate to fake; it returns the recorded launches.
-func ttWinHelperSwap(t *testing.T, fake func(ctx context.Context, exe string, args []string) (helperProc, error)) *[][]string {
+// ttWinHelperSwap makes the process look unelevated and routes elevate.Launch to fake; it returns the recorded launches.
+func ttWinHelperSwap(t *testing.T, fake func(ctx context.Context, exe string, args []string) (elevate.Proc, error)) *[][]string {
 	t.Helper()
-	prevElevate, prevIsElevated := elevate, isElevated
-	t.Cleanup(func() { elevate, isElevated = prevElevate, prevIsElevated })
+	prevLaunch, prevIsElevated := elevate.Launch, elevate.IsElevated
+	t.Cleanup(func() { elevate.Launch, elevate.IsElevated = prevLaunch, prevIsElevated })
 	var calls [][]string
-	isElevated = func() bool { return false }
-	elevate = func(ctx context.Context, exe string, args []string) (helperProc, error) {
+	elevate.IsElevated = func() bool { return false }
+	elevate.Launch = func(ctx context.Context, exe string, args []string) (elevate.Proc, error) {
 		calls = append(calls, append([]string{exe}, args...))
 		return fake(ctx, exe, args)
 	}
@@ -57,9 +55,9 @@ func TestHelperRejectsAddressesOtherThanLoopbackAddrPorts(t *testing.T) {
 }
 
 func TestHelperRefusesToRunUnelevated(t *testing.T) {
-	prev := isElevated
-	t.Cleanup(func() { isElevated = prev })
-	isElevated = func() bool { return false }
+	prev := elevate.IsElevated
+	t.Cleanup(func() { elevate.IsElevated = prev })
+	elevate.IsElevated = func() bool { return false }
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +74,7 @@ func TestHelperRefusesToRunUnelevated(t *testing.T) {
 }
 
 func TestOpenReturnsValidationErrorWithoutElevating(t *testing.T) {
-	calls := ttWinHelperSwap(t, func(context.Context, string, []string) (helperProc, error) { return nil, ErrDenied })
+	calls := ttWinHelperSwap(t, func(context.Context, string, []string) (elevate.Proc, error) { return nil, ErrDenied })
 	cfg := ttDefaultConfig()
 	cfg.MTU = 0
 	if _, err := Open(t.Context(), cfg); err == nil || !strings.Contains(err.Error(), "MTU") {
@@ -89,7 +87,7 @@ func TestOpenReturnsValidationErrorWithoutElevating(t *testing.T) {
 
 func TestOpenElevatesTestBinaryAndReturnsDenied(t *testing.T) {
 	ttWinHelperNeedWintun(t)
-	calls := ttWinHelperSwap(t, func(context.Context, string, []string) (helperProc, error) { return nil, ErrDenied })
+	calls := ttWinHelperSwap(t, func(context.Context, string, []string) (elevate.Proc, error) { return nil, ErrDenied })
 	if _, err := Open(t.Context(), ttDefaultConfig()); !errors.Is(err, ErrDenied) {
 		t.Errorf("Open = %v, want ErrDenied", err)
 	}
@@ -145,7 +143,7 @@ func TestOpenRelaysThroughHelper(t *testing.T) {
 
 func TestOpenReportsHelperExitCode(t *testing.T) {
 	ttWinHelperNeedWintun(t)
-	ttWinHelperSwap(t, func(context.Context, string, []string) (helperProc, error) {
+	ttWinHelperSwap(t, func(context.Context, string, []string) (elevate.Proc, error) {
 		proc := &ttRelayProc{done: make(chan struct{}), code: 3}
 		close(proc.done)
 		return proc, nil
@@ -159,7 +157,7 @@ func TestOpenReturnsCtxErrWhileWaiting(t *testing.T) {
 	ttWinHelperNeedWintun(t)
 	prompt := make(chan struct{})
 	t.Cleanup(func() { close(prompt) })
-	ttWinHelperSwap(t, func(context.Context, string, []string) (helperProc, error) {
+	ttWinHelperSwap(t, func(context.Context, string, []string) (elevate.Proc, error) {
 		<-prompt
 		return nil, ErrDenied
 	})
@@ -167,29 +165,5 @@ func TestOpenReturnsCtxErrWhileWaiting(t *testing.T) {
 	time.AfterFunc(50*time.Millisecond, cancel)
 	if _, err := Open(ctx, ttDefaultConfig()); !errors.Is(err, context.Canceled) {
 		t.Errorf("Open = %v, want context.Canceled", err)
-	}
-}
-
-func TestElevateErrorMapsCancelledToDenied(t *testing.T) {
-	if err := elevateError(windows.ERROR_CANCELLED); !errors.Is(err, ErrDenied) {
-		t.Errorf("elevateError(ERROR_CANCELLED) = %v, want ErrDenied", err)
-	}
-	if err := elevateError(windows.ERROR_FILE_NOT_FOUND); errors.Is(err, ErrDenied) || !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-		t.Errorf("elevateError(ERROR_FILE_NOT_FOUND) = %v, want it wrapped and not ErrDenied", err)
-	}
-}
-
-func TestWinProcWaitReturnsExitCode(t *testing.T) {
-	cmd := exec.Command(os.Getenv("ComSpec"), "/c", "exit 3")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer cmd.Wait()
-	h, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(cmd.Process.Pid))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code, err := winProc(h).Wait(); code != 3 || err != nil {
-		t.Errorf("Wait = %d, %v, want 3, nil", code, err)
 	}
 }

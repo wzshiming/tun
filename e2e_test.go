@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/wzshiming/tun/bypass"
+	"github.com/wzshiming/tun/internal/elevate"
 	"github.com/wzshiming/tun/stack"
 )
 
@@ -65,10 +66,10 @@ func TestE2EHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("look up sudo: %v", err)
 	}
-	prev := elevate
-	t.Cleanup(func() { elevate = prev })
-	elevate = func(ctx context.Context, _, socket string) *exec.Cmd {
-		return exec.CommandContext(ctx, sudo, "-n", "env", "TUN_E2E_SOCKET="+socket, os.Args[0], "-test.run=^TestE2EHelperChild$")
+	prev := elevate.Launch
+	t.Cleanup(func() { elevate.Launch = prev })
+	elevate.Launch = func(ctx context.Context, _ string, args []string) *exec.Cmd {
+		return exec.CommandContext(ctx, sudo, "-n", "env", "TUN_E2E_SOCKET="+args[1], os.Args[0], "-test.run=^TestE2EHelperChild$")
 	}
 
 	cfg := ttE2EConfig()
