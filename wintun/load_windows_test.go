@@ -194,7 +194,8 @@ func TestLoadRefusesAJunctionAtAnOwnedDirectory(t *testing.T) {
 				t.Fatal(err)
 			}
 			ttWintunJunction(t, filepath.Join(parent, name), target)
-			ttWintunWantRefused(t, Load(), target, *loaded)
+			err := Load()
+			ttWintunWantRefused(t, err, target, *loaded)
 		})
 	}
 }
@@ -206,7 +207,8 @@ func TestLoadRefusesAJunctionAtTheDLL(t *testing.T) {
 		t.Fatal(err)
 	}
 	ttWintunJunction(t, path, target)
-	ttWintunWantRefused(t, Load(), target, *loaded)
+	err := Load()
+	ttWintunWantRefused(t, err, target, *loaded)
 }
 
 func TestLoadAcceptsARedirectedUserCache(t *testing.T) {
