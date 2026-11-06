@@ -1,6 +1,4 @@
-//go:build windows
-
-package tun
+package elevate
 
 import (
 	"context"
@@ -39,7 +37,10 @@ type shellExecuteInfo struct {
 
 var procShellExecuteExW = windows.NewLazySystemDLL("shell32.dll").NewProc("ShellExecuteExW")
 
-// winProc is the handle of a process launched by elevate.
+// IsElevated reports whether the process token is elevated.
+var IsElevated = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
+
+// winProc is the handle of a process launched by Launch.
 type winProc windows.Handle
 
 func (p winProc) Wait() (int, error) {
@@ -55,19 +56,19 @@ func (p winProc) Wait() (int, error) {
 	return int(code), nil
 }
 
-// elevate runs exe with args elevated after the user approves the UAC prompt, which it waits for and which ctx cannot cancel.
-var elevate = func(ctx context.Context, exe string, args []string) (helperProc, error) {
+// shellExecuteInfoFor describes running exe with args through the runas verb, hidden and returning the process handle.
+func shellExecuteInfoFor(exe string, args []string) (shellExecuteInfo, error) {
 	verb, err := windows.UTF16PtrFromString("runas")
 	if err != nil {
-		return nil, err
+		return shellExecuteInfo{}, err
 	}
 	file, err := windows.UTF16PtrFromString(exe)
 	if err != nil {
-		return nil, err
+		return shellExecuteInfo{}, err
 	}
 	params, err := windows.UTF16PtrFromString(windows.ComposeCommandLine(args))
 	if err != nil {
-		return nil, err
+		return shellExecuteInfo{}, err
 	}
 	info := shellExecuteInfo{
 		fMask:      seeMaskNoCloseProcess | seeMaskNoAsync | seeMaskFlagNoUI,
@@ -77,6 +78,15 @@ var elevate = func(ctx context.Context, exe string, args []string) (helperProc, 
 		show:       windows.SW_HIDE,
 	}
 	info.cbSize = uint32(unsafe.Sizeof(info))
+	return info, nil
+}
+
+// Launch runs exe with args elevated after the user approves the UAC prompt, which it waits for and which ctx cannot cancel.
+var Launch = func(ctx context.Context, exe string, args []string) (Proc, error) {
+	info, err := shellExecuteInfoFor(exe, args)
+	if err != nil {
+		return nil, err
+	}
 
 	// ShellExecuteEx may use COM, which wants an initialized apartment on the calling thread.
 	runtime.LockOSThread()

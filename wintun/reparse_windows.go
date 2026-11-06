@@ -1,4 +1,4 @@
-package tun
+package wintun
 
 import (
 	"errors"

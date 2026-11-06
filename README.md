@@ -18,7 +18,6 @@ go get github.com/wzshiming/tun
 - `const HelperCommand = "tun-helper"` and `func Helper(args []string) int` — the helper subcommand and its entry point; the return value is the exit code.
 - `func CaptureRoutes(cfg Config) []netip.Prefix` — the routes `Open` captures.
 - `var ErrDenied error` — the privilege prompt was refused. `var ErrUnsupported error` — the platform is not supported.
-- `var CacheDir func() (string, error)` — Windows only: where the embedded `wintun.dll` is extracted (default `os.UserCacheDir()/tun`).
 
 ### `stack` — the userspace network stack
 
@@ -31,6 +30,12 @@ go get github.com/wzshiming/tun
 
 - `func NewDialer(capture []netip.Prefix) *net.Dialer` — a dialer that binds connections to captured destinations onto the default-route interface.
 - `func DefaultInterface(ipv6 bool) (*net.Interface, error)` and `var ErrNoDefaultRoute error`.
+
+### `wintun` — the embedded Wintun DLL
+
+- `const Embedded bool` — Windows only: whether this build carries a `wintun.dll` (amd64 and arm64).
+- `var CacheDir func() (string, error)` — where the embedded `wintun.dll` is extracted on Windows (default `os.UserCacheDir()/tun`).
+- `func Load() error` — Windows only: extracts the embedded `wintun.dll` under `CacheDir()`, verifies it and loads it once per process; wraps `errors.ErrUnsupported` when none is embedded. The process that creates the adapter, `Open`'s or its elevated helper, calls it.
 
 ## Example
 
@@ -78,7 +83,7 @@ A process running as root/administrator opens the device directly. Otherwise `Op
 
 ### Wintun
 
-The module embeds the unmodified Wintun 0.14.1 DLLs for amd64 and arm64, made by WireGuard LLC and distributed under the license in [wintun/LICENSE.txt](wintun/LICENSE.txt). The DLL is extracted under `CacheDir()` and verified before it is loaded. Windows installs the Wintun driver on the first `Open`.
+The module embeds the unmodified Wintun 0.14.1 DLLs for amd64 and arm64, made by WireGuard LLC and distributed under the license in [wintun/bin/LICENSE.txt](wintun/bin/LICENSE.txt). The DLL is extracted under `wintun.CacheDir()` and verified before it is loaded. Windows installs the Wintun driver on the first `Open`.
 
 ## What is captured
 
@@ -110,16 +115,17 @@ It exits 0 on SIGINT/SIGTERM once the device is open and 1 on any error; a SIGIN
 
 ## End-to-end tests
 
-The e2e tests need the `e2e` build tag and `TUN_E2E=1`, and they change the machine's network configuration.
+The end-to-end tests in `./e2e` open real TUN devices, change the machine's routes, bind sockets to its default interface and load the real `wintun.dll`. Every test skips unless `TUN_E2E=1`; with it set, each runs when the process has the privileges it needs and skips otherwise. The test binary is its own helper.
 
 ```sh
-go test -c -tags e2e -o tun-e2e.test .
-TUN_E2E=1 ./tun-e2e.test -test.v -test.run '^TestE2E'            # TestE2EHelper: elevates itself with sudo -n
-sudo -n env TUN_E2E=1 ./tun-e2e.test -test.v -test.run '^TestE2E' # TestE2ERoot
+TUN_E2E=1 go test ./e2e -v                          # TestE2EHelper: starts its helper with sudo -n
+go test -c -o tun-e2e.test ./e2e
+sudo -n env TUN_E2E=1 ./tun-e2e.test -test.v        # TestE2ERoot: needs root and an IPv4 default route
 ```
 
-On Windows, `TestE2EWindowsLocal` and `TestE2EWindowsHelper` run with `TUN_E2E=1`; `TestE2EWindowsHelperRunas` additionally needs `TUN_E2E_RUNAS=1`.
+- **macOS and Linux**: `TestE2EHelper` runs as a normal user and starts its helper with `sudo -n`, so it skips unless passwordless `sudo` is available; `TestE2ERoot` runs as root. The bypass test needs a default route, and on Linux before 5.7 root.
+- **Windows**: amd64 or arm64. `TestE2EWindowsLocal` and `TestE2EWindowsHelper` need an elevated prompt; `TestE2EWindowsHelperRunas` additionally needs `TUN_E2E_RUNAS=1`, as it goes through UAC. `TestE2EWintunLoad` and the bypass tests need no elevation.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The embedded Wintun DLLs are covered by [wintun/LICENSE.txt](wintun/LICENSE.txt).
+MIT, see [LICENSE](LICENSE). The embedded Wintun DLLs are covered by [wintun/bin/LICENSE.txt](wintun/bin/LICENSE.txt).

@@ -7,20 +7,19 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/sys/windows"
+	"github.com/wzshiming/tun/internal/elevate"
+	"github.com/wzshiming/tun/wintun"
 )
-
-var isElevated = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
 
 // Open prompts for administrator privileges through UAC unless the process is elevated.
 func Open(ctx context.Context, cfg Config) (*Device, error) {
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
-	if !wintunEmbedded {
+	if !wintun.Embedded {
 		return nil, ErrUnsupported
 	}
-	if isElevated() {
+	if elevate.IsElevated() {
 		return openLocal(ctx, cfg)
 	}
 	return openViaHelper(ctx, cfg)
@@ -35,5 +34,5 @@ func openViaHelper(ctx context.Context, cfg Config) (*Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	return openViaRelay(ctx, cfg, exe, elevate)
+	return openViaRelay(ctx, cfg, exe, elevate.Launch)
 }

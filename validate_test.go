@@ -7,32 +7,26 @@ import (
 )
 
 func TestValidateName(t *testing.T) {
-	for _, tc := range []struct {
-		goos, name string
-		wantErr    bool
-	}{
-		{"linux", "", false},
-		{"linux", "wg", false},
-		{"linux", "wg%d", false},
-		{"linux", "abcdefghijklm", false},
-		{"linux", "abcdefghijklmn", true},
-		{"linux", "abcdefghijklm%d", false},
-		{"linux", "abcdefghijklmno", true},
-		{"linux", "abcdefghijklmn%d", true},
-		{"windows", "abcdefghijklmnopqrstuvwxyz", false},
-		{"windows", strings.Repeat("a", 127), false},
-		{"windows", strings.Repeat("a", 128), true},
-		{"darwin", "abcdefghijklmnopqrstuvwxyz", false},
-		{"linux", "a/b", true},
-		{"windows", `a\b`, true},
-		{"windows", "a/b", true},
-		{"darwin", "a\x00b", true},
-		{"windows", "a\nb", true},
-		{"linux", "a\x7fb", true},
-	} {
-		err := validateName(tc.goos, tc.name)
+	ttCheckValidateName(t, []ttNameCase{
+		{"a/b", true},
+		{`a\b`, true},
+		{"a\x00b", true},
+		{"a\nb", true},
+		{"a\x7fb", true},
+	})
+}
+
+type ttNameCase struct {
+	name    string
+	wantErr bool
+}
+
+func ttCheckValidateName(t *testing.T, cases []ttNameCase) {
+	t.Helper()
+	for _, tc := range cases {
+		err := validateName(tc.name)
 		if (err != nil) != tc.wantErr {
-			t.Errorf("validateName(%s, %q) = %v, want error %t", tc.goos, tc.name, err, tc.wantErr)
+			t.Errorf("validateName(%q) = %v, want error %t", tc.name, err, tc.wantErr)
 		}
 	}
 }

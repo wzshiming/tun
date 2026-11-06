@@ -1,4 +1,4 @@
-package tun
+package wintun
 
 import (
 	"crypto/sha256"
@@ -117,21 +117,21 @@ func TestCacheDirDefaultsToTunUnderTheUserCache(t *testing.T) {
 	}
 }
 
-func TestWintunLocationKeysTheDLLByArchAndHashUnderCacheDir(t *testing.T) {
+func TestLocationKeysTheDLLByArchAndHashUnderCacheDir(t *testing.T) {
 	dll := []byte("dll bytes")
 	sum := sha256.Sum256(dll)
 	cache := filepath.Join("user-cache", "app")
-	root, sub := wintunLocation(cache, "arm64", dll)
+	root, sub := location(cache, "arm64", dll)
 	if want := []string{"app", "wintun", "arm64-" + hex.EncodeToString(sum[:])[:16]}; root != "user-cache" || !slices.Equal(sub, want) {
-		t.Errorf("wintunLocation = %q, %q; want user-cache, %q", root, sub, want)
+		t.Errorf("location = %q, %q; want user-cache, %q", root, sub, want)
 	}
 }
 
-func TestWintunLocationIgnoresATrailingSeparatorOnCacheDir(t *testing.T) {
+func TestLocationIgnoresATrailingSeparatorOnCacheDir(t *testing.T) {
 	cache := filepath.Join("user-cache", "app") + string(filepath.Separator)
-	root, sub := wintunLocation(cache, "arm64", nil)
+	root, sub := location(cache, "arm64", nil)
 	if root != "user-cache" || len(sub) == 0 || sub[0] != "app" {
-		t.Errorf("wintunLocation(%q) = %q, %q; want user-cache, [app ...]", cache, root, sub)
+		t.Errorf("location(%q) = %q, %q; want user-cache, [app ...]", cache, root, sub)
 	}
 }
 

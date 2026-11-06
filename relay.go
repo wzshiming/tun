@@ -17,6 +17,8 @@ import (
 	"time"
 
 	wgtun "golang.zx2c4.com/wireguard/tun"
+
+	"github.com/wzshiming/tun/internal/elevate"
 )
 
 // packetMax bounds the payload of a packet frame.
@@ -33,12 +35,6 @@ var helperExitTimeout = 5 * time.Second
 
 // helperTokenTimeout bounds how long a connection to the relay listener may take to present the token.
 const helperTokenTimeout = 10 * time.Second
-
-// helperProc is a launched tun-helper.
-type helperProc interface {
-	// Wait blocks until the helper exits, returns its exit code and releases the process.
-	Wait() (int, error)
-}
 
 // relayDevice is a wgtun.Device whose packets travel as frames over a connection to a tun-helper.
 type relayDevice struct {
@@ -235,7 +231,7 @@ func acceptHelper(ln net.Listener, token string, tokenTimeout time.Duration, fou
 
 // openViaRelay launches exe's tun-helper and returns a Device relaying the packets of the TUN the helper opens.
 // launch may block on a prompt that cannot be cancelled, so ctx ends the wait without it.
-func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx context.Context, exe string, args []string) (helperProc, error)) (*Device, error) {
+func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx context.Context, exe string, args []string) (elevate.Proc, error)) (*Device, error) {
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
