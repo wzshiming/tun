@@ -59,9 +59,7 @@ jobs:
         shell: bash
         run: |
           TUN_E2E=1 "$RUNNER_TEMP/tun-e2e.test" -test.v -test.timeout 6m | tee "$RUNNER_TEMP/tun-e2e-user.log"
-          want=TestE2EHelper
-          if [ "$RUNNER_OS" = macOS ]; then want="$want TestE2EBypassBindsUDPToIPv4DefaultInterface"; fi
-          for t in $want; do
+          for t in TestE2EHelper TestE2EBypassBindsUDPToIPv4DefaultInterface; do
             grep -qF -- "--- PASS: $t (" "$RUNNER_TEMP/tun-e2e-user.log" || { echo "$t did not pass"; exit 1; }
           done
       - name: E2E root
