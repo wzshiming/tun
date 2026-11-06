@@ -46,28 +46,39 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Vet e2e
-        run: go vet -tags e2e . ./bypass ./stack
       - name: Build e2e test binary
         if: runner.os != 'Windows'
-        run: go test -c -race -tags e2e -o "$RUNNER_TEMP/tun-e2e.test" .
+        run: go test -c -race -o "$RUNNER_TEMP/tun-e2e.test" ./e2e
       - name: Build e2e test binary (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: go test -c -race -tags e2e -o "$RUNNER_TEMP/tun-e2e.test.exe" .
+        run: go test -c -race -o "$RUNNER_TEMP/tun-e2e.test.exe" ./e2e
+      # Each run fails unless the tests it must run report PASS, so a test skipped by mistake cannot go unnoticed.
       - name: E2E unprivileged
         if: runner.os != 'Windows'
-        run: TUN_E2E=1 "$RUNNER_TEMP/tun-e2e.test" -test.v -test.timeout 6m -test.run '^TestE2E'
+        shell: bash
+        run: |
+          TUN_E2E=1 "$RUNNER_TEMP/tun-e2e.test" -test.v -test.timeout 6m | tee "$RUNNER_TEMP/tun-e2e-user.log"
+          want=TestE2EHelper
+          if [ "$RUNNER_OS" = macOS ]; then want="$want TestE2EBypassBindsUDPToIPv4DefaultInterface"; fi
+          for t in $want; do
+            grep -qF -- "--- PASS: $t (" "$RUNNER_TEMP/tun-e2e-user.log" || { echo "$t did not pass"; exit 1; }
+          done
       - name: E2E root
         if: runner.os != 'Windows'
-        run: sudo -n env TUN_E2E=1 "$RUNNER_TEMP/tun-e2e.test" -test.v -test.timeout 6m -test.run '^TestE2E'
+        shell: bash
+        run: |
+          sudo -n env TUN_E2E=1 "$RUNNER_TEMP/tun-e2e.test" -test.v -test.timeout 6m | tee "$RUNNER_TEMP/tun-e2e-root.log"
+          for t in TestE2ERoot TestE2EBypassBindsUDPToIPv4DefaultInterface; do
+            grep -qF -- "--- PASS: $t (" "$RUNNER_TEMP/tun-e2e-root.log" || { echo "$t did not pass"; exit 1; }
+          done
       - name: E2E (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          set -o pipefail
-          TUN_E2E=1 TUN_E2E_RUNAS=1 "$RUNNER_TEMP/tun-e2e.test.exe" -test.v -test.timeout 6m -test.run '^TestE2E' | tee "$RUNNER_TEMP/tun-e2e.log"
-          for t in TestE2EWindowsLocal TestE2EWindowsHelper TestE2EWindowsHelperRunas; do
+          TUN_E2E=1 TUN_E2E_RUNAS=1 "$RUNNER_TEMP/tun-e2e.test.exe" -test.v -test.timeout 6m | tee "$RUNNER_TEMP/tun-e2e.log"
+          for t in TestE2EWindowsLocal TestE2EWindowsHelper TestE2EWindowsHelperRunas TestE2EWintunLoad \
+            TestE2EBypassDefaultInterfaceIsUpAndNotLoopback TestE2EBypassBindsUDPToIPv4DefaultInterface; do
             grep -qF -- "--- PASS: $t (" "$RUNNER_TEMP/tun-e2e.log" || { echo "$t did not pass"; exit 1; }
           done
       - name: Network state

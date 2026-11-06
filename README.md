@@ -115,15 +115,16 @@ It exits 0 on SIGINT/SIGTERM once the device is open and 1 on any error; a SIGIN
 
 ## End-to-end tests
 
-The e2e tests need the `e2e` build tag and `TUN_E2E=1`, and they change the machine's network configuration.
+The end-to-end tests in `./e2e` open real TUN devices, change the machine's routes, bind sockets to its default interface and load the real `wintun.dll`. Every test skips unless `TUN_E2E=1`; with it set, each runs when the process has the privileges it needs and skips otherwise. The test binary is its own helper.
 
 ```sh
-go test -c -tags e2e -o tun-e2e.test .
-TUN_E2E=1 ./tun-e2e.test -test.v -test.run '^TestE2E'            # TestE2EHelper: elevates itself with sudo -n
-sudo -n env TUN_E2E=1 ./tun-e2e.test -test.v -test.run '^TestE2E' # TestE2ERoot
+TUN_E2E=1 go test ./e2e -v                          # TestE2EHelper: starts its helper with sudo -n
+go test -c -o tun-e2e.test ./e2e
+sudo -n env TUN_E2E=1 ./tun-e2e.test -test.v        # TestE2ERoot: needs root and an IPv4 default route
 ```
 
-On Windows, `TestE2EWindowsLocal` and `TestE2EWindowsHelper` run with `TUN_E2E=1`; `TestE2EWindowsHelperRunas` additionally needs `TUN_E2E_RUNAS=1`.
+- **macOS and Linux**: `TestE2EHelper` runs as a normal user and needs passwordless `sudo`; `TestE2ERoot` runs as root. The bypass test needs a default route, and on Linux before 5.7 root.
+- **Windows**: amd64 or arm64. `TestE2EWindowsLocal` and `TestE2EWindowsHelper` need an elevated prompt; `TestE2EWindowsHelperRunas` additionally needs `TUN_E2E_RUNAS=1`, as it goes through UAC. `TestE2EWintunLoad` and the bypass tests need no elevation. The tests extract `wintun.dll` under `%TEMP%\tun-e2e`.
 
 ## License
 
