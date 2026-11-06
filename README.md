@@ -124,7 +124,7 @@ sudo -n env TUN_E2E=1 ./tun-e2e.test -test.v        # TestE2ERoot: needs root an
 ```
 
 - **macOS and Linux**: `TestE2EHelper` runs as a normal user and needs passwordless `sudo`; `TestE2ERoot` runs as root. The bypass test needs a default route, and on Linux before 5.7 root.
-- **Windows**: amd64 or arm64. `TestE2EWindowsLocal` and `TestE2EWindowsHelper` need an elevated prompt; `TestE2EWindowsHelperRunas` additionally needs `TUN_E2E_RUNAS=1`, as it goes through UAC. `TestE2EWintunLoad` and the bypass tests need no elevation. The tests extract `wintun.dll` under `%TEMP%\tun-e2e`.
+- **Windows**: amd64 or arm64. `TestE2EWindowsLocal` and `TestE2EWindowsHelper` need an elevated prompt; `TestE2EWindowsHelperRunas` additionally needs `TUN_E2E_RUNAS=1`, as it goes through UAC. `TestE2EWintunLoad` and the bypass tests need no elevation.
 
 ## License
 

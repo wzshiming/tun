@@ -4,20 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
 
 	"github.com/wzshiming/tun/wintun"
 )
-
-// ttWintunCache is the CacheDir of this whole binary, the helper it launches included, set before any wintun.Load.
-var ttWintunCache = filepath.Join(os.TempDir(), "tun-e2e")
-
-func init() {
-	wintun.CacheDir = func() (string, error) { return ttWintunCache, nil }
-}
 
 // TestE2EWintunLoad holds whether or not an earlier test loaded wintun.dll, as Load runs once per process.
 func TestE2EWintunLoad(t *testing.T) {
@@ -47,19 +39,24 @@ func TestE2EWintunLoad(t *testing.T) {
 	}
 	path := windows.UTF16ToString(buf[:n])
 	t.Logf("wintun.dll loaded from %s", path)
-	if base, dir := filepath.Base(path), filepath.Base(filepath.Dir(path)); !strings.EqualFold(base, "wintun.dll") || !strings.HasPrefix(dir, runtime.GOARCH+"-") {
-		t.Errorf("loaded %s, want <CacheDir>\\wintun\\%s-<hash>\\wintun.dll", path, runtime.GOARCH)
-	}
-	// The loaded path is the final one, which may spell the cache directory differently, such as without 8.3 short names.
-	got, err := os.Stat(filepath.Dir(filepath.Dir(path)))
+	got, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := os.Stat(filepath.Join(ttWintunCache, "wintun"))
+	cache, err := wintun.CacheDir()
 	if err != nil {
-		t.Fatalf("CacheDir holds no wintun directory: %v", err)
+		t.Fatalf("CacheDir: %v", err)
 	}
-	if !os.SameFile(got, want) {
-		t.Errorf("loaded %s, want it under %s", path, filepath.Join(ttWintunCache, "wintun"))
+	// The loaded path is the final one, which may spell the cache directory differently, such as without 8.3 short names.
+	pattern := filepath.Join(cache, "wintun", runtime.GOARCH+"-*", "wintun.dll")
+	candidates, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatal(err)
 	}
+	for _, candidate := range candidates {
+		if want, err := os.Stat(candidate); err == nil && os.SameFile(got, want) {
+			return
+		}
+	}
+	t.Errorf("loaded %s, want the file %s", path, pattern)
 }
