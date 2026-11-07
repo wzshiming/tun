@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wzshiming/elevate"
 	wgtun "golang.zx2c4.com/wireguard/tun"
 
 	"github.com/wzshiming/tun/internal/hook"
@@ -87,6 +88,12 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 		case ctx.Err() != nil:
 			return nil, ctx.Err()
 		case errors.Is(err, net.ErrClosed):
+			if errors.Is(waitErr, ErrDenied) {
+				return nil, ErrDenied
+			}
+			if _, ok := errors.AsType[*elevate.ExitError](waitErr); ok {
+				return nil, fmt.Errorf("tun: %w", waitErr)
+			}
 			if waitErr == nil {
 				waitErr = errors.New("exited before connecting")
 			}

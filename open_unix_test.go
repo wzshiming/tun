@@ -44,8 +44,8 @@ func TestOpenLaunchesHelperCommandOnTheSocket(t *testing.T) {
 
 func TestOpenReturnsErrDeniedWhenThePromptIsDeclined(t *testing.T) {
 	ttUnixLaunchSwap(t, elevate.ErrDenied)
-	if _, err := Open(t.Context(), ttDefaultConfig()); !errors.Is(err, ErrDenied) {
-		t.Errorf("Open = %v, want ErrDenied", err)
+	if _, err := Open(t.Context(), ttDefaultConfig()); err != ErrDenied {
+		t.Errorf("Open = %v, want ErrDenied itself", err)
 	}
 }
 
@@ -55,12 +55,27 @@ func TestOpenReportsHelperExitCodeAndStderr(t *testing.T) {
 	if _, ok := errors.AsType[*elevate.ExitError](err); !ok || !strings.Contains(err.Error(), "7") || !strings.Contains(err.Error(), "boom") {
 		t.Errorf("Open = %v, want an *elevate.ExitError naming exit code 7 and stderr boom", err)
 	}
+	if err != nil && strings.Contains(err.Error(), "tun helper: elevate:") {
+		t.Errorf("Open = %q, want a single prefix before elevate's", err)
+	}
+}
+
+func TestOpenReturnsTheLaunchError(t *testing.T) {
+	ttUnixLaunchSwap(t, nil)
+	launchErr := errors.New("no launcher")
+	hook.Launch = func(context.Context, string, []string) (elevate.Proc, error) { return nil, launchErr }
+	if _, err := Open(t.Context(), ttDefaultConfig()); !errors.Is(err, launchErr) {
+		t.Errorf("Open = %v, want the launch error", err)
+	}
 }
 
 func TestOpenFailsWhenTheHelperExitsCleanlyWithoutConnecting(t *testing.T) {
 	ttUnixLaunchSwap(t, nil)
-	if dev, err := Open(t.Context(), ttDefaultConfig()); err == nil {
+	dev, err := Open(t.Context(), ttDefaultConfig())
+	if err == nil {
 		dev.Close()
-		t.Error("Open = nil error after the helper exited 0 without connecting, want one")
+	}
+	if err == nil || !strings.Contains(err.Error(), "exited before connecting") {
+		t.Errorf("Open = %v after the helper exited 0 without connecting, want an error saying it exited before connecting", err)
 	}
 }
