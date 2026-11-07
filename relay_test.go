@@ -659,9 +659,7 @@ func TestOpenViaRelayReturnsErrDeniedFromWait(t *testing.T) {
 func TestOpenViaRelayReturnsOnCancelDuringPrompt(t *testing.T) {
 	prompt := make(chan struct{})
 	t.Cleanup(func() { close(prompt) })
-	prompting := make(chan struct{})
 	ttRelaySwapLaunch(t, func(context.Context, string, []string) (elevate.Proc, error) {
-		close(prompting)
 		<-prompt
 		return nil, ErrDenied
 	})
@@ -680,8 +678,6 @@ func TestOpenViaRelayReturnsOnCancelDuringPrompt(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("openViaRelay still blocked 5s after cancel")
 	}
-	// Orders openViaRelay's read of hook.Launch before the cleanup restores it.
-	<-prompting
 }
 
 func TestOpenViaRelayUsesTheLauncherInstalledAtCallTime(t *testing.T) {
