@@ -18,6 +18,7 @@ type ttRingFake struct {
 	allocErrs []error // returned by successive allocate calls; nil means success
 	ended     bool    // receive and allocate return errRingEnded
 	endCalls  int
+	released  int // release zeroes the packet, as the ring may reuse it
 	waiting   chan struct{} // receives a value each time wait blocks
 	woken     chan struct{}
 	wakeOnce  sync.Once
@@ -41,7 +42,12 @@ func (r *ttRingFake) receive() ([]byte, error) {
 	return p, nil
 }
 
-func (r *ttRingFake) release([]byte) {}
+func (r *ttRingFake) release(p []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.released++
+	clear(p)
+}
 
 func (r *ttRingFake) allocate(n int) ([]byte, error) {
 	r.mu.Lock()
@@ -91,6 +97,9 @@ func TestRingDeviceReadReturnsPacketAndSize(t *testing.T) {
 	}
 	if got := string(bufs[0][16 : 16+sizes[0]]); got != "ping" {
 		t.Errorf("Read packet = %q, want ping", got)
+	}
+	if ring.released != 1 {
+		t.Errorf("released %d packets, want 1", ring.released)
 	}
 }
 
