@@ -18,7 +18,7 @@ type ttRingFake struct {
 	allocErrs []error // returned by successive allocate calls; nil means success
 	ended     bool    // receive and allocate return errRingEnded
 	endCalls  int
-	released  int // release zeroes the packet, as the ring may reuse it
+	released  int           // release zeroes the packet, as the ring may reuse it
 	waiting   chan struct{} // receives a value each time wait blocks
 	woken     chan struct{}
 	wakeOnce  sync.Once
