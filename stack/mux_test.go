@@ -104,11 +104,27 @@ func TestMuxHandlePanics(t *testing.T) {
 	}
 }
 
-func TestDefaultMuxRegistersRelayAndDNSOnly(t *testing.T) {
+func TestDefaultMuxRegistersRelayDNSAndUDPRelay(t *testing.T) {
 	d := &fakeDialer{}
-	want := map[muxKey]Handler{{"tcp", 0}: &Relay{Dialer: d}, {"udp", 53}: &DNS{Dialer: d}}
+	want := map[muxKey]Handler{{"tcp", 0}: &Relay{Dialer: d}, {"udp", 53}: &DNS{Dialer: d}, {"udp", 0}: &Relay{Dialer: d}}
 	if got := DefaultMux(d).handlers; !reflect.DeepEqual(got, want) {
-		t.Fatalf("DefaultMux registers %v, want exactly tcp/0 Relay and udp/53 DNS over its dialer", got)
+		t.Fatalf("DefaultMux registers %v, want exactly tcp/0 Relay, udp/53 DNS and udp/0 Relay over its dialer", got)
+	}
+}
+
+func TestDefaultMuxRoutesUDPByPort(t *testing.T) {
+	for _, tc := range []struct{ name, target, network string }{
+		{"port 53 to DNS over tcp", "10.0.0.53:53", "tcp"},
+		{"other port to Relay over udp", "10.0.0.9:5000", "udp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testServe(t, Options{Addresses: testAddresses})
+			testSend(t, env.dialUDP(t, tc.target), "datagram")
+			env.nextTarget(t)
+			if dials := env.dialer.recorded(); len(dials) != 1 || dials[0].network != tc.network || dials[0].address != tc.target {
+				t.Fatalf("DefaultMux dialed %+v for UDP to %s, want one %s dial", dials, tc.target, tc.network)
+			}
+		})
 	}
 }
 

@@ -52,11 +52,12 @@ func NewMux() *Mux {
 	return &Mux{handlers: make(map[muxKey]Handler)}
 }
 
-// DefaultMux returns a Mux relaying every TCP connection and the DNS flows to UDP port 53 through dialer.
+// DefaultMux returns a Mux relaying every TCP connection and UDP flow through dialer, the DNS flows to UDP port 53 over TCP.
 func DefaultMux(dialer Dialer) *Mux {
 	m := NewMux()
 	m.Handle("tcp", 0, &Relay{Dialer: dialer})
 	m.Handle("udp", 53, &DNS{Dialer: dialer})
+	m.Handle("udp", 0, &Relay{Dialer: dialer})
 	return m
 }
 

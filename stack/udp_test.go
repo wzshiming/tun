@@ -28,7 +28,12 @@ func TestServeNilHandlerAnswersUDPWithPortUnreachable(t *testing.T) {
 }
 
 func TestUDPWithoutHandlerIsDropped(t *testing.T) {
-	env := testServe(t, Options{Addresses: testAddresses})
+	env := testServeWith(t, Options{Addresses: testAddresses}, func(d *fakeDialer) Handler {
+		m := NewMux()
+		m.Handle("tcp", 0, &Relay{Dialer: d})
+		m.Handle("udp", 53, &DNS{Dialer: d})
+		return m
+	})
 	conn := env.dialUDP(t, "10.0.0.9:1234")
 	testSend(t, conn, "not dns")
 	var netErr net.Error
