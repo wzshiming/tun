@@ -9,10 +9,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/wzshiming/elevate"
 	"go4.org/netipx"
 	wgtun "golang.zx2c4.com/wireguard/tun"
-
-	"github.com/wzshiming/tun/internal/elevate"
 )
 
 // HelperCommand is the subcommand Open runs the privileged helper as; the program must dispatch os.Args[1] == HelperCommand to Helper(os.Args[2:]).

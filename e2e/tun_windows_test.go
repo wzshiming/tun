@@ -13,27 +13,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wzshiming/elevate"
 	"golang.org/x/sys/windows"
-	wgtun "golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/bypass"
-	"github.com/wzshiming/tun/internal/elevate"
-	"github.com/wzshiming/tun/wintun"
+	"github.com/wzshiming/tun/internal/hook"
 )
 
 // ttWinBypass keeps the runner's private networks off the TUN.
 var ttWinBypass = ttPrefixes("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")
 
-// ttWinGate skips unless TUN_E2E=1, the build embeds wintun.dll and the process is elevated.
+// ttWinGate skips unless TUN_E2E=1 and the process is elevated.
 func ttWinGate(t *testing.T) {
 	t.Helper()
 	ttGate(t)
-	if !wintun.Embedded {
-		t.Skip("this build embeds no wintun.dll")
-	}
-	if !elevate.IsElevated() {
+	if !hook.IsElevated() {
 		t.Skip("needs an elevated process")
 	}
 }
@@ -76,11 +72,11 @@ func TestE2EWindowsLocal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InterfaceByName(%s): %v", dev.Interface, err)
 	}
-	native, ok := dev.Device.(*wgtun.NativeTun)
+	luider, ok := dev.Device.(interface{ LUID() uint64 })
 	if !ok {
-		t.Fatalf("device is %T, want *wgtun.NativeTun", dev.Device)
+		t.Fatalf("device is %T, want one with a LUID method", dev.Device)
 	}
-	luid := winipcfg.LUID(native.LUID())
+	luid := winipcfg.LUID(luider.LUID())
 	rows, err := winipcfg.GetIPForwardTable2(windows.AF_INET)
 	if err != nil {
 		t.Fatalf("GetIPForwardTable2: %v", err)
@@ -117,30 +113,19 @@ type ttWinHelperProc struct {
 	exited chan struct{}
 }
 
-func (p *ttWinHelperProc) Wait() (int, error) {
+func (p *ttWinHelperProc) Wait() error {
 	defer close(p.exited)
 	return p.proc.Wait()
-}
-
-// ttWinHelperCmd is an elevate.Proc for a helper started with exec.
-type ttWinHelperCmd struct{ cmd *exec.Cmd }
-
-func (c ttWinHelperCmd) Wait() (int, error) {
-	err := c.cmd.Wait()
-	if _, ok := errors.AsType[*exec.ExitError](err); err != nil && !ok {
-		return -1, err
-	}
-	return c.cmd.ProcessState.ExitCode(), nil
 }
 
 // ttWinHelperRecord makes Open take the helper path, launched through launch, so the test sees the helper exit.
 func ttWinHelperRecord(t *testing.T, launch func(context.Context, string, []string) (elevate.Proc, error)) <-chan struct{} {
 	t.Helper()
-	prevLaunch, prevElevated := elevate.Launch, elevate.IsElevated
-	t.Cleanup(func() { elevate.Launch, elevate.IsElevated = prevLaunch, prevElevated })
+	prevLaunch, prevElevated := hook.Launch, hook.IsElevated
+	t.Cleanup(func() { hook.Launch, hook.IsElevated = prevLaunch, prevElevated })
 	exited := make(chan struct{})
-	elevate.IsElevated = func() bool { return false }
-	elevate.Launch = func(ctx context.Context, exe string, args []string) (elevate.Proc, error) {
+	hook.IsElevated = func() bool { return false }
+	hook.Launch = func(ctx context.Context, exe string, args []string) (elevate.Proc, error) {
 		proc, err := launch(ctx, exe, args)
 		if err != nil {
 			return nil, err
@@ -150,7 +135,7 @@ func ttWinHelperRecord(t *testing.T, launch func(context.Context, string, []stri
 	return exited
 }
 
-// TestE2EWindowsHelper swaps elevate.Launch and elevate.IsElevated, so it must not run in parallel.
+// TestE2EWindowsHelper swaps hook.Launch and hook.IsElevated, so it must not run in parallel.
 func TestE2EWindowsHelper(t *testing.T) {
 	ttWinGate(t)
 	exited := ttWinHelperRecord(t, func(_ context.Context, exe string, args []string) (elevate.Proc, error) {
@@ -159,18 +144,18 @@ func TestE2EWindowsHelper(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			return nil, err
 		}
-		return ttWinHelperCmd{cmd}, nil
+		return ttExecProc{cmd}, nil
 	})
 	ttWinHelperRun(t, exited)
 }
 
-// TestE2EWindowsHelperRunas swaps elevate.Launch and elevate.IsElevated, so it must not run in parallel.
+// TestE2EWindowsHelperRunas swaps hook.Launch and hook.IsElevated, so it must not run in parallel.
 func TestE2EWindowsHelperRunas(t *testing.T) {
 	ttWinGate(t)
 	if os.Getenv("TUN_E2E_RUNAS") != "1" {
 		t.Skip("set TUN_E2E_RUNAS=1 to launch the helper through ShellExecuteEx runas")
 	}
-	exited := ttWinHelperRecord(t, elevate.Launch)
+	exited := ttWinHelperRecord(t, hook.Launch)
 	// A UAC prompt nobody answers must fail the test instead of hanging it.
 	guard := time.AfterFunc(2*time.Minute, func() { panic("TestE2EWindowsHelperRunas still running after 2 minutes; is a UAC prompt waiting?") })
 	defer guard.Stop()

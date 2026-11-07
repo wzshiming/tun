@@ -3,7 +3,6 @@
 package tun
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net"
@@ -11,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/wzshiming/tun/internal/elevate"
+	"github.com/wzshiming/tun/internal/hook"
 )
 
 // Helper runs the HelperCommand subcommand that Open launches as root.
@@ -20,7 +19,7 @@ func Helper(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: "+HelperCommand+" <absolute unix socket path>")
 		return 2
 	}
-	if !elevate.IsElevated() {
+	if !hook.IsElevated() {
 		fmt.Fprintln(os.Stderr, "tun-helper: must run as root")
 		return 2
 	}
@@ -33,26 +32,9 @@ func Helper(args []string) int {
 	}
 	conn := c.(*net.UnixConn)
 	defer conn.Close()
-
-	var req request
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	if err := readFrame(conn, &req); err != nil {
-		fmt.Fprintln(os.Stderr, "tun-helper: read request:", err)
-		return 1
-	}
-	cfg := req.config()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	var dev *Device
-	err = validate(cfg)
-	if err == nil {
-		dev, err = openLocal(ctx, cfg)
-	}
-	// A client that stops reading must not stall the root helper.
-	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "tun-helper:", err)
-		sendReply(conn, reply{Error: err.Error()}, nil)
+	conn.SetDeadline(time.Now().Add(helperDeadline))
+	dev := openRequested(conn, openLocal)
+	if dev == nil {
 		return 1
 	}
 	if err := sendReply(conn, reply{Name: dev.Interface, Warnings: dev.Warnings}, dev.File()); err != nil {
@@ -61,7 +43,6 @@ func Helper(args []string) int {
 		return 1
 	}
 	// Open closes the connection once it holds the descriptor.
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	io.Copy(io.Discard, conn)
 	return 0
 }

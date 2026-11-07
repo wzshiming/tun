@@ -16,9 +16,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wzshiming/elevate"
 	wgtun "golang.zx2c4.com/wireguard/tun"
 
-	"github.com/wzshiming/tun/internal/elevate"
+	"github.com/wzshiming/tun/internal/hook"
 )
 
 // packetMax bounds the payload of a packet frame.
@@ -27,7 +28,7 @@ const packetMax = 65535
 // pumpOffset is the headroom pump keeps in front of each packet, enough for a Linux TUN's virtio-net header.
 const pumpOffset = 16
 
-// relayConnectTimeout bounds the wait for the helper to connect once it is launched.
+// relayConnectTimeout bounds the wait for the helper to connect once it is launched, and then for its reply.
 var relayConnectTimeout = 60 * time.Second
 
 // helperExitTimeout bounds how long closing a relayed device waits for the helper to remove its adapter and exit.
@@ -35,6 +36,9 @@ var helperExitTimeout = 5 * time.Second
 
 // helperTokenTimeout bounds how long a connection to the relay listener may take to present the token.
 const helperTokenTimeout = 10 * time.Second
+
+// helperDeadline bounds each exchange between the tun-helper and its parent.
+const helperDeadline = 10 * time.Second
 
 // relayDevice is a wgtun.Device whose packets travel as frames over a connection to a tun-helper.
 type relayDevice struct {
@@ -230,8 +234,8 @@ func acceptHelper(ln net.Listener, token string, tokenTimeout time.Duration, fou
 }
 
 // openViaRelay launches exe's tun-helper and returns a Device relaying the packets of the TUN the helper opens.
-// launch may block on a prompt that cannot be cancelled, so ctx ends the wait without it.
-func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx context.Context, exe string, args []string) (elevate.Proc, error)) (*Device, error) {
+// hook.Launch may block on a prompt that cannot be cancelled, so ctx ends the wait without it.
+func openViaRelay(ctx context.Context, cfg Config, exe string) (*Device, error) {
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -242,6 +246,7 @@ func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx c
 		return nil, err
 	}
 
+	launch := hook.Launch
 	done := make(chan struct{})
 	defer close(done)
 	found := make(chan net.Conn)
@@ -250,12 +255,17 @@ func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx c
 	launched := make(chan error, 1)
 	exited := make(chan error, 1)
 	go func() {
-		proc, err := launch(ctx, exe, []string{HelperCommand, ln.Addr().String(), token})
+		// Wait must report the helper's real exit, which Close waits for, so the launch outlives ctx.
+		proc, err := launch(context.WithoutCancel(ctx), exe, []string{HelperCommand, ln.Addr().String(), token})
 		launched <- err
 		if err != nil {
 			return
 		}
-		code, err := proc.Wait()
+		err = proc.Wait()
+		code := 0
+		if ee, ok := errors.AsType[*elevate.ExitError](err); ok {
+			code, err = ee.Code, nil
+		}
 		if err == nil {
 			err = fmt.Errorf("tun: tun helper exited with code %d before connecting", code)
 		}
@@ -283,7 +293,7 @@ func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx c
 	ln.Close()
 
 	var rep reply
-	conn.SetDeadline(time.Now().Add(60 * time.Second))
+	conn.SetDeadline(time.Now().Add(relayConnectTimeout))
 	err = writeFrame(conn, newRequest(cfg))
 	if err == nil {
 		err = readFrame(conn, &rep)
@@ -304,29 +314,13 @@ func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx c
 // serveHelper is the tun-helper side of openViaRelay: it opens the requested TUN with open and relays its packets over conn until either ends.
 func serveHelper(conn net.Conn, token string, open func(context.Context, Config) (*Device, error)) int {
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	conn.SetDeadline(time.Now().Add(helperDeadline))
 	if _, err := io.WriteString(conn, token); err != nil {
 		fmt.Fprintln(os.Stderr, "tun-helper: send token:", err)
 		return 1
 	}
-	var req request
-	if err := readFrame(conn, &req); err != nil {
-		fmt.Fprintln(os.Stderr, "tun-helper: read request:", err)
-		return 1
-	}
-	cfg := req.config()
-	var dev *Device
-	err := validate(cfg)
-	if err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		dev, err = open(ctx, cfg)
-		cancel()
-	}
-	// A client that stops reading must not stall the elevated helper.
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "tun-helper:", err)
-		writeFrame(conn, reply{Error: err.Error()})
+	dev := openRequested(conn, open)
+	if dev == nil {
 		return 1
 	}
 	defer dev.Close()

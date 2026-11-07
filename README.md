@@ -23,19 +23,13 @@ go get github.com/wzshiming/tun
 
 - `type Dialer interface { DialContext(ctx context.Context, network, address string) (net.Conn, error) }`
 - `type Options struct { MTU int; Addresses []netip.Prefix; DNSIdle time.Duration }`
-- `func Serve(ctx context.Context, dev tun.Device, dialer Dialer, opts Options) error` — relays every captured flow through `dialer`; returns when `ctx` ends or the device fails, and closes the device.
+- `func Serve(ctx context.Context, dev wgtun.Device, dialer Dialer, opts Options) error` — relays every captured flow of `dev`, a `golang.zx2c4.com/wireguard/tun` device such as `(*tun.Device).Device`, through `dialer`; returns when `ctx` ends or the device fails, and closes the device.
 - `func ClientAddr(ctx context.Context) net.Addr` — inside `DialContext`, the captured flow's source (`*net.TCPAddr` or `*net.UDPAddr`), nil when absent.
 
 ### `bypass` — escaping the TUN
 
 - `func NewDialer(capture []netip.Prefix) *net.Dialer` — a dialer that binds connections to captured destinations onto the default-route interface.
 - `func DefaultInterface(ipv6 bool) (*net.Interface, error)` and `var ErrNoDefaultRoute error`.
-
-### `wintun` — the embedded Wintun DLL
-
-- `const Embedded bool` — Windows only: whether this build carries a `wintun.dll` (amd64 and arm64).
-- `var CacheDir func() (string, error)` — where the embedded `wintun.dll` is extracted on Windows (default `os.UserCacheDir()/tun`).
-- `func Load() error` — Windows only: extracts the embedded `wintun.dll` under `CacheDir()`, verifies it and loads it once per process; wraps `errors.ErrUnsupported` when none is embedded. The process that creates the adapter, `Open`'s or its elevated helper, calls it.
 
 ## Example
 
@@ -83,7 +77,7 @@ A process running as root/administrator opens the device directly. Otherwise `Op
 
 ### Wintun
 
-The module embeds the unmodified Wintun 0.14.1 DLLs for amd64 and arm64, made by WireGuard LLC and distributed under the license in [wintun/bin/LICENSE.txt](wintun/bin/LICENSE.txt). The DLL is extracted under `wintun.CacheDir()` and verified before it is loaded. Windows installs the Wintun driver on the first `Open`.
+Windows builds embed the unmodified Wintun 0.14.1 DLL, made by WireGuard LLC, through [github.com/wzshiming/wintun](https://github.com/wzshiming/wintun), which loads it in memory, so no file is written. The DLL is distributed under the license in that module's [embedded/LICENSE.txt](https://github.com/wzshiming/wintun/blob/master/embedded/LICENSE.txt). Windows installs the Wintun driver on the first `Open`.
 
 ## What is captured
 
@@ -115,7 +109,7 @@ It exits 0 on SIGINT/SIGTERM once the device is open and 1 on any error; a SIGIN
 
 ## End-to-end tests
 
-The end-to-end tests in `./e2e` open real TUN devices, change the machine's routes, bind sockets to its default interface and load the real `wintun.dll`. Every test skips unless `TUN_E2E=1`; with it set, each runs when the process has the privileges it needs and skips otherwise. The test binary is its own helper.
+The end-to-end tests in `./e2e` open real TUN devices, a Wintun adapter on Windows, change the machine's routes and bind sockets to its default interface. Every test skips unless `TUN_E2E=1`; with it set, each runs when the process has the privileges it needs and skips otherwise. The test binary is its own helper.
 
 ```sh
 TUN_E2E=1 go test ./e2e -v                          # TestE2EHelper: starts its helper with sudo -n
@@ -124,8 +118,8 @@ sudo -n env TUN_E2E=1 ./tun-e2e.test -test.v        # TestE2ERoot: needs root an
 ```
 
 - **macOS and Linux**: `TestE2EHelper` runs as a normal user and starts its helper with `sudo -n`, so it skips unless passwordless `sudo` is available; `TestE2ERoot` runs as root. The bypass test needs a default route, and on Linux before 5.7 root.
-- **Windows**: amd64 or arm64. `TestE2EWindowsLocal` and `TestE2EWindowsHelper` need an elevated prompt; `TestE2EWindowsHelperRunas` additionally needs `TUN_E2E_RUNAS=1`, as it goes through UAC. `TestE2EWintunLoad` and the bypass tests need no elevation.
+- **Windows**: 386, amd64 or arm64. `TestE2EWindowsLocal` and `TestE2EWindowsHelper` need an elevated process; `TestE2EWindowsHelperRunas` additionally needs `TUN_E2E_RUNAS=1`, as it goes through UAC. The bypass tests need no elevation.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The embedded Wintun DLLs are covered by [wintun/bin/LICENSE.txt](wintun/bin/LICENSE.txt).
+MIT, see [LICENSE](LICENSE). The embedded Wintun DLL is covered by its own license, see [Wintun](#wintun).

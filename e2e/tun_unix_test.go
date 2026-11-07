@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
 	"runtime"
 	"slices"
@@ -15,15 +16,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wzshiming/elevate"
+
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/bypass"
-	"github.com/wzshiming/tun/internal/elevate"
+	"github.com/wzshiming/tun/internal/hook"
 )
 
-// TestE2EHelper swaps elevate.Launch, so it must not run in parallel.
+// TestE2EHelper swaps hook.Launch, so it must not run in parallel.
 func TestE2EHelper(t *testing.T) {
 	ttGate(t)
-	if elevate.IsElevated() {
+	if hook.IsElevated() {
 		t.Skip("runs unprivileged")
 	}
 	sudo, err := exec.LookPath("sudo")
@@ -36,10 +39,15 @@ func TestE2EHelper(t *testing.T) {
 	if err != nil {
 		t.Skipf("starts its helper with sudo -n, which needs passwordless sudo: %v", err)
 	}
-	prev := elevate.Launch
-	t.Cleanup(func() { elevate.Launch = prev })
-	elevate.Launch = func(ctx context.Context, exe string, args []string) *exec.Cmd {
-		return exec.CommandContext(ctx, sudo, append([]string{"-n", exe}, args...)...)
+	prev := hook.Launch
+	t.Cleanup(func() { hook.Launch = prev })
+	hook.Launch = func(ctx context.Context, exe string, args []string) (elevate.Proc, error) {
+		cmd := exec.CommandContext(ctx, sudo, append([]string{"-n", exe}, args...)...)
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			return nil, err
+		}
+		return ttExecProc{cmd}, nil
 	}
 
 	// Bypassing everything else keeps the runner's own traffic off the TUN.
@@ -117,14 +125,14 @@ func TestE2EHelper(t *testing.T) {
 
 func TestE2ERoot(t *testing.T) {
 	ttGate(t)
-	if !elevate.IsElevated() {
+	if !hook.IsElevated() {
 		t.Skip("needs root")
 	}
 	phys, err := bypass.DefaultInterface(false)
 	if err != nil {
 		t.Skipf("no IPv4 default route for the bypass dialer: %v", err)
 	}
-	// The embedded default no_proxy entries.
+	// Loopback, the private ranges, IPv6 link-local and ULA stay off the TUN.
 	cfg := ttConfig(ttPrefixes("127.0.0.1/32", "::1/128", "192.168.0.0/16", "10.0.0.0/8", "fe80::/64", "fd00::/8"))
 	capture := tun.CaptureRoutes(cfg)
 	if len(capture) <= 50 {

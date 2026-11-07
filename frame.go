@@ -1,11 +1,15 @@
 package tun
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
+	"os"
+	"time"
 )
 
 // frameMax bounds the JSON payload of a frame.
@@ -61,4 +65,29 @@ func readFrame(r io.Reader, v any) error {
 		return err
 	}
 	return json.Unmarshal(payload, v)
+}
+
+// openRequested opens the TUN conn requests, or replies with the error and returns nil.
+func openRequested(conn net.Conn, open func(context.Context, Config) (*Device, error)) *Device {
+	var req request
+	if err := readFrame(conn, &req); err != nil {
+		fmt.Fprintln(os.Stderr, "tun-helper: read request:", err)
+		return nil
+	}
+	cfg := req.config()
+	var dev *Device
+	err := validate(cfg)
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		dev, err = open(ctx, cfg)
+		cancel()
+	}
+	// A client that stops reading must not stall the elevated helper.
+	conn.SetDeadline(time.Now().Add(helperDeadline))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tun-helper:", err)
+		writeFrame(conn, reply{Error: err.Error()})
+		return nil
+	}
+	return dev
 }

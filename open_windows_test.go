@@ -13,29 +13,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wzshiming/tun/internal/elevate"
-	"github.com/wzshiming/tun/wintun"
+	"github.com/wzshiming/elevate"
+
+	"github.com/wzshiming/tun/internal/hook"
 )
 
-// ttWinHelperSwap makes the process look unelevated and routes elevate.Launch to fake; it returns the recorded launches.
+// ttWinHelperSwap makes the process look unelevated and routes hook.Launch to fake; it returns the recorded launches.
 func ttWinHelperSwap(t *testing.T, fake func(ctx context.Context, exe string, args []string) (elevate.Proc, error)) *[][]string {
 	t.Helper()
-	prevLaunch, prevIsElevated := elevate.Launch, elevate.IsElevated
-	t.Cleanup(func() { elevate.Launch, elevate.IsElevated = prevLaunch, prevIsElevated })
+	prevLaunch, prevIsElevated := hook.Launch, hook.IsElevated
+	t.Cleanup(func() { hook.Launch, hook.IsElevated = prevLaunch, prevIsElevated })
 	var calls [][]string
-	elevate.IsElevated = func() bool { return false }
-	elevate.Launch = func(ctx context.Context, exe string, args []string) (elevate.Proc, error) {
+	hook.IsElevated = func() bool { return false }
+	hook.Launch = func(ctx context.Context, exe string, args []string) (elevate.Proc, error) {
 		calls = append(calls, append([]string{exe}, args...))
 		return fake(ctx, exe, args)
 	}
 	return &calls
-}
-
-func ttWinHelperNeedWintun(t *testing.T) {
-	t.Helper()
-	if !wintun.Embedded {
-		t.Skip("no Wintun DLL embedded for this architecture")
-	}
 }
 
 func TestHelperRejectsWrongArgCounts(t *testing.T) {
@@ -55,9 +49,9 @@ func TestHelperRejectsAddressesOtherThanLoopbackAddrPorts(t *testing.T) {
 }
 
 func TestHelperRefusesToRunUnelevated(t *testing.T) {
-	prev := elevate.IsElevated
-	t.Cleanup(func() { elevate.IsElevated = prev })
-	elevate.IsElevated = func() bool { return false }
+	prev := hook.IsElevated
+	t.Cleanup(func() { hook.IsElevated = prev })
+	hook.IsElevated = func() bool { return false }
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -86,8 +80,7 @@ func TestOpenReturnsValidationErrorWithoutElevating(t *testing.T) {
 }
 
 func TestOpenElevatesTestBinaryAndReturnsDenied(t *testing.T) {
-	ttWinHelperNeedWintun(t)
-	calls := ttWinHelperSwap(t, func(context.Context, string, []string) (elevate.Proc, error) { return nil, ErrDenied })
+	calls := ttWinHelperSwap(t, func(context.Context, string, []string) (elevate.Proc, error) { return nil, elevate.ErrDenied })
 	if _, err := Open(t.Context(), ttDefaultConfig()); !errors.Is(err, ErrDenied) {
 		t.Errorf("Open = %v, want ErrDenied", err)
 	}
@@ -109,7 +102,6 @@ func TestOpenElevatesTestBinaryAndReturnsDenied(t *testing.T) {
 }
 
 func TestOpenRelaysThroughHelper(t *testing.T) {
-	ttWinHelperNeedWintun(t)
 	fake := ttRelayNewFakeDev()
 	open := func(context.Context, Config) (*Device, error) {
 		return &Device{Device: fake, Interface: "tun", Warnings: []string{"w1"}}, nil
@@ -142,19 +134,13 @@ func TestOpenRelaysThroughHelper(t *testing.T) {
 }
 
 func TestOpenReportsHelperExitCode(t *testing.T) {
-	ttWinHelperNeedWintun(t)
-	ttWinHelperSwap(t, func(context.Context, string, []string) (elevate.Proc, error) {
-		proc := &ttRelayProc{done: make(chan struct{}), code: 3}
-		close(proc.done)
-		return proc, nil
-	})
-	if _, err := Open(t.Context(), ttDefaultConfig()); err == nil || !strings.Contains(err.Error(), "3") {
-		t.Errorf("Open = %v, want an error naming exit code 3", err)
+	ttWinHelperSwap(t, ttRelayExitedLaunch(&elevate.ExitError{Code: 7, Stderr: "boom"}))
+	if _, err := Open(t.Context(), ttDefaultConfig()); err == nil || !strings.Contains(err.Error(), "code 7") {
+		t.Errorf("Open = %v, want an error naming exit code 7", err)
 	}
 }
 
 func TestOpenReturnsCtxErrWhileWaiting(t *testing.T) {
-	ttWinHelperNeedWintun(t)
 	prompt := make(chan struct{})
 	t.Cleanup(func() { close(prompt) })
 	ttWinHelperSwap(t, func(context.Context, string, []string) (elevate.Proc, error) {
