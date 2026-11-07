@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wzshiming/elevate"
 	"go4.org/netipx"
 
 	"github.com/wzshiming/tun"
@@ -39,6 +41,17 @@ func ttGate(t *testing.T) {
 	}
 	// CreateTUN would write the interface name to the file this names.
 	os.Unsetenv("WG_TUN_NAME_FILE")
+}
+
+// ttExecProc is an elevate.Proc for a helper started with exec, mapping a non-zero exit to *elevate.ExitError.
+type ttExecProc struct{ cmd *exec.Cmd }
+
+func (p ttExecProc) Wait() error {
+	err := p.cmd.Wait()
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+		return &elevate.ExitError{Code: ee.ExitCode()}
+	}
+	return err
 }
 
 // ttConfig is the TUN every e2e test opens, with bypass as its Bypass.

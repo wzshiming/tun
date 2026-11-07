@@ -118,17 +118,6 @@ func (p *ttWinHelperProc) Wait() error {
 	return p.proc.Wait()
 }
 
-// ttWinHelperCmd is an elevate.Proc for a helper started with exec.
-type ttWinHelperCmd struct{ cmd *exec.Cmd }
-
-func (c ttWinHelperCmd) Wait() error {
-	err := c.cmd.Wait()
-	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
-		return &elevate.ExitError{Code: ee.ExitCode()}
-	}
-	return err
-}
-
 // ttWinHelperRecord makes Open take the helper path, launched through launch, so the test sees the helper exit.
 func ttWinHelperRecord(t *testing.T, launch func(context.Context, string, []string) (elevate.Proc, error)) <-chan struct{} {
 	t.Helper()
@@ -155,7 +144,7 @@ func TestE2EWindowsHelper(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			return nil, err
 		}
-		return ttWinHelperCmd{cmd}, nil
+		return ttExecProc{cmd}, nil
 	})
 	ttWinHelperRun(t, exited)
 }

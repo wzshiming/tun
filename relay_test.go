@@ -563,7 +563,7 @@ func TestOpenViaRelayPassesLaunchError(t *testing.T) {
 	}
 }
 
-func TestErrDeniedIsTheElevateSeamValue(t *testing.T) {
+func TestErrDeniedIsElevateErrDenied(t *testing.T) {
 	if ErrDenied != elevate.ErrDenied {
 		t.Errorf("ErrDenied = %p, want elevate.ErrDenied %p", ErrDenied, elevate.ErrDenied)
 	}

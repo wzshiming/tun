@@ -23,17 +23,6 @@ import (
 	"github.com/wzshiming/tun/internal/hook"
 )
 
-// ttSudoProc is an elevate.Proc for a helper started with sudo -n.
-type ttSudoProc struct{ cmd *exec.Cmd }
-
-func (p ttSudoProc) Wait() error {
-	err := p.cmd.Wait()
-	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
-		return &elevate.ExitError{Code: ee.ExitCode()}
-	}
-	return err
-}
-
 // TestE2EHelper swaps hook.Launch, so it must not run in parallel.
 func TestE2EHelper(t *testing.T) {
 	ttGate(t)
@@ -58,7 +47,7 @@ func TestE2EHelper(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			return nil, err
 		}
-		return ttSudoProc{cmd}, nil
+		return ttExecProc{cmd}, nil
 	}
 
 	// Bypassing everything else keeps the runner's own traffic off the TUN.
@@ -143,7 +132,7 @@ func TestE2ERoot(t *testing.T) {
 	if err != nil {
 		t.Skipf("no IPv4 default route for the bypass dialer: %v", err)
 	}
-	// The embedded default no_proxy entries.
+	// Loopback, the private ranges, IPv6 link-local and ULA stay off the TUN.
 	cfg := ttConfig(ttPrefixes("127.0.0.1/32", "::1/128", "192.168.0.0/16", "10.0.0.0/8", "fe80::/64", "fd00::/8"))
 	capture := tun.CaptureRoutes(cfg)
 	if len(capture) <= 50 {
