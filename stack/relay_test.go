@@ -15,6 +15,9 @@ import (
 // udpRelayQuiet is how long a client waits before concluding no reply comes.
 const udpRelayQuiet = time.Second
 
+// udpRelayIdleBound is how long a sub-second Relay.Idle may take to end a flow; the 60s default exceeds it.
+const udpRelayIdleBound = 5 * time.Second
+
 // udpRelayDialer records every dial and answers it with a UDP socket connected to a fresh loopback UDP target, or once stalled with a stalledConn.
 type udpRelayDialer struct {
 	mu      sync.Mutex
@@ -291,5 +294,54 @@ func TestRelayUDPCancelEndsFlowWithStalledRemote(t *testing.T) {
 	case <-target.dialled.closed:
 	case <-time.After(testWait):
 		t.Fatalf("Relay still held its stalled dialled conn open %v after ctx ended, want it closed", testWait)
+	}
+}
+
+// udpRelayOpen opens a flow to Relay{Idle: idle} and returns its client conn and target once the first datagram arrived.
+func udpRelayOpen(t *testing.T, idle time.Duration) (net.Conn, *udpRelayTarget) {
+	t.Helper()
+	env, dialer := udpRelayServe(t, &Relay{Idle: idle})
+	conn := env.dialUDP(t, "10.0.0.9:5000")
+	testSend(t, conn, "open")
+	target := dialer.next(t, env)
+	target.recv(t)
+	return conn, target
+}
+
+func udpRelayExpectClosed(t *testing.T, target *udpRelayTarget, what string) {
+	t.Helper()
+	select {
+	case <-target.dialled.closed:
+	case <-time.After(udpRelayIdleBound):
+		t.Fatalf("%s: dialled conn still open %v later, want Relay.Idle to close it", what, udpRelayIdleBound)
+	}
+}
+
+func TestRelayUDPFlowEndsAfterIdle(t *testing.T) {
+	_, target := udpRelayOpen(t, 200*time.Millisecond)
+	udpRelayExpectClosed(t, target, "flow idle past Relay.Idle 200ms")
+}
+
+func TestRelayUDPTrafficEitherWayExtendsIdle(t *testing.T) {
+	const idle = 500 * time.Millisecond
+	for _, direction := range []string{"from the client", "from the target"} {
+		t.Run(direction, func(t *testing.T) {
+			conn, target := udpRelayOpen(t, idle)
+			for end := time.Now().Add(3 * idle); time.Now().Before(end); time.Sleep(idle / 5) {
+				if direction == "from the client" {
+					testSend(t, conn, "keep")
+					target.recv(t)
+				} else {
+					target.send(t, []byte("keep"))
+					udpRelayClientRead(t, conn)
+				}
+				select {
+				case <-target.dialled.closed:
+					t.Fatalf("Relay closed the flow while datagrams flowed %s every %v, want each to push back Relay.Idle %v", direction, idle/5, idle)
+				default:
+				}
+			}
+			udpRelayExpectClosed(t, target, "flow idle after datagrams "+direction)
+		})
 	}
 }

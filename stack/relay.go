@@ -1,13 +1,17 @@
 package stack
 
 import (
+	"cmp"
 	"context"
 	"net"
+	"time"
 )
 
 // Relay serves a flow by dialing its target through Dialer, on the flow's network, and passing the two connections' data into each other.
 type Relay struct {
 	Dialer Dialer
+	// Idle ends a UDP flow after this long without datagrams either way; 0 means 60s.
+	Idle time.Duration
 }
 
 // ServeFlow dials a TCP flow's target before accepting, so a failed dial resets the client, then passes half-closes on and ends with ctx.
@@ -47,19 +51,21 @@ func (r *Relay) serveUDP(ctx context.Context, f Flow) {
 	defer closeBoth()
 	stop := context.AfterFunc(ctx, closeBoth)
 	defer stop()
+	touch, stopIdle := afterIdle(cmp.Or(r.Idle, 60*time.Second), closeBoth)
+	defer stopIdle()
 	replies := make(chan struct{})
 	go func() {
 		defer close(replies)
 		defer closeBoth()
-		relayDatagrams(conn, remote)
+		relayDatagrams(conn, remote, touch)
 	}()
-	relayDatagrams(remote, conn)
+	relayDatagrams(remote, conn, touch)
 	closeBoth()
 	<-replies
 }
 
-// relayDatagrams writes each datagram read from src to dst as one datagram until either fails.
-func relayDatagrams(dst, src net.Conn) {
+// relayDatagrams writes each datagram read from src to dst as one datagram, touching after each, until either fails.
+func relayDatagrams(dst, src net.Conn, touch func()) {
 	buf := make([]byte, 65535)
 	for {
 		n, err := src.Read(buf)
@@ -69,5 +75,6 @@ func relayDatagrams(dst, src net.Conn) {
 		if _, err := dst.Write(buf[:n]); err != nil {
 			return
 		}
+		touch()
 	}
 }
