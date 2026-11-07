@@ -248,6 +248,28 @@ func TestUDPFlowUnansweredIsDropped(t *testing.T) {
 	}
 }
 
+func TestRejectedUDPFlowFreesItsEndpoint(t *testing.T) {
+	served := make(chan struct{}, 4)
+	env := testServeMux(t, func(m *Mux) {
+		m.Handle("udp", 0, HandlerFunc(func(_ context.Context, f Flow) {
+			served <- struct{}{}
+			f.Reject()
+		}))
+	})
+	conn := env.dialUDP(t, "10.0.0.9:5353")
+	for i, datagram := range []string{"first", "second"} {
+		testSend(t, conn, datagram)
+		select {
+		case <-served:
+		case <-time.After(testWait):
+			t.Fatalf("datagram %d from the same client socket served no flow after the first flow was rejected, want Reject to free its endpoint", i+1)
+		}
+	}
+	if n := env.dev.unreachable.Load(); n != 0 {
+		t.Fatalf("Serve wrote %d ICMP destination unreachable for a rejected UDP flow, want none", n)
+	}
+}
+
 func TestServeClosesConnLeftOpenByServeFlow(t *testing.T) {
 	for _, network := range []string{"tcp", "udp"} {
 		t.Run(network, func(t *testing.T) {
