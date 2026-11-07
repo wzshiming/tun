@@ -18,11 +18,7 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 	if hook.IsElevated() {
 		return openLocal(ctx, cfg)
 	}
-	return openViaHelper(ctx, cfg)
-}
 
-// openViaHelper opens the TUN in an elevated tun-helper and relays its packets.
-func openViaHelper(ctx context.Context, cfg Config) (*Device, error) {
 	exe, err := os.Executable()
 	if err == nil {
 		exe, err = filepath.EvalSymlinks(exe)
