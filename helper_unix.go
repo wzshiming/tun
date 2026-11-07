@@ -32,7 +32,7 @@ func Helper(args []string) int {
 	}
 	conn := c.(*net.UnixConn)
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	conn.SetDeadline(time.Now().Add(helperDeadline))
 	dev := openRequested(conn, openLocal)
 	if dev == nil {
 		return 1

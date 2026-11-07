@@ -102,7 +102,7 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 	var rep reply
 	var f *os.File
 	if err == nil {
-		conn.SetDeadline(time.Now().Add(60 * time.Second))
+		conn.SetDeadline(time.Now().Add(relayConnectTimeout))
 		if err = writeFrame(conn, newRequest(cfg)); err == nil {
 			rep, f, err = recvReply(conn)
 		}

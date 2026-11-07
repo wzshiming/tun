@@ -28,7 +28,7 @@ const packetMax = 65535
 // pumpOffset is the headroom pump keeps in front of each packet, enough for a Linux TUN's virtio-net header.
 const pumpOffset = 16
 
-// relayConnectTimeout bounds the wait for the helper to connect once it is launched.
+// relayConnectTimeout bounds the wait for the helper to connect once it is launched, and then for its reply.
 var relayConnectTimeout = 60 * time.Second
 
 // helperExitTimeout bounds how long closing a relayed device waits for the helper to remove its adapter and exit.
@@ -36,6 +36,9 @@ var helperExitTimeout = 5 * time.Second
 
 // helperTokenTimeout bounds how long a connection to the relay listener may take to present the token.
 const helperTokenTimeout = 10 * time.Second
+
+// helperDeadline bounds each exchange between the tun-helper and its parent.
+const helperDeadline = 10 * time.Second
 
 // relayDevice is a wgtun.Device whose packets travel as frames over a connection to a tun-helper.
 type relayDevice struct {
@@ -288,7 +291,7 @@ func openViaRelay(ctx context.Context, cfg Config, exe string) (*Device, error) 
 	ln.Close()
 
 	var rep reply
-	conn.SetDeadline(time.Now().Add(60 * time.Second))
+	conn.SetDeadline(time.Now().Add(relayConnectTimeout))
 	err = writeFrame(conn, newRequest(cfg))
 	if err == nil {
 		err = readFrame(conn, &rep)
@@ -309,7 +312,7 @@ func openViaRelay(ctx context.Context, cfg Config, exe string) (*Device, error) 
 // serveHelper is the tun-helper side of openViaRelay: it opens the requested TUN with open and relays its packets over conn until either ends.
 func serveHelper(conn net.Conn, token string, open func(context.Context, Config) (*Device, error)) int {
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	conn.SetDeadline(time.Now().Add(helperDeadline))
 	if _, err := io.WriteString(conn, token); err != nil {
 		fmt.Fprintln(os.Stderr, "tun-helper: send token:", err)
 		return 1

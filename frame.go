@@ -67,7 +67,7 @@ func readFrame(r io.Reader, v any) error {
 	return json.Unmarshal(payload, v)
 }
 
-// openRequested is the tun-helper's side of a request: it opens the TUN conn asks for with open and leaves conn's deadline 10s ahead; on failure it replies with the error and returns nil.
+// openRequested opens the TUN conn requests, or replies with the error and returns nil.
 func openRequested(conn net.Conn, open func(context.Context, Config) (*Device, error)) *Device {
 	var req request
 	if err := readFrame(conn, &req); err != nil {
@@ -83,7 +83,7 @@ func openRequested(conn net.Conn, open func(context.Context, Config) (*Device, e
 		cancel()
 	}
 	// A client that stops reading must not stall the elevated helper.
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	conn.SetDeadline(time.Now().Add(helperDeadline))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tun-helper:", err)
 		writeFrame(conn, reply{Error: err.Error()})
