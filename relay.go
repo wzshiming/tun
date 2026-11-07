@@ -254,7 +254,11 @@ func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx c
 		if err != nil {
 			return
 		}
-		code, err := proc.Wait()
+		err = proc.Wait()
+		code := 0
+		if ee, ok := errors.AsType[*elevate.ExitError](err); ok {
+			code, err = ee.Code, nil
+		}
 		if err == nil {
 			err = fmt.Errorf("tun: tun helper exited with code %d before connecting", code)
 		}

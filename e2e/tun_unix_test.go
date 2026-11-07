@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
 	"runtime"
 	"slices"
@@ -19,12 +20,24 @@ import (
 
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/bypass"
+	"github.com/wzshiming/tun/internal/hook"
 )
 
-// TestE2EHelper swaps elevate.Launch, so it must not run in parallel.
+// ttSudoProc is an elevate.Proc for a helper started with sudo -n.
+type ttSudoProc struct{ cmd *exec.Cmd }
+
+func (p ttSudoProc) Wait() error {
+	err := p.cmd.Wait()
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+		return &elevate.ExitError{Code: ee.ExitCode()}
+	}
+	return err
+}
+
+// TestE2EHelper swaps hook.Launch, so it must not run in parallel.
 func TestE2EHelper(t *testing.T) {
 	ttGate(t)
-	if elevate.IsElevated() {
+	if hook.IsElevated() {
 		t.Skip("runs unprivileged")
 	}
 	sudo, err := exec.LookPath("sudo")
@@ -37,10 +50,15 @@ func TestE2EHelper(t *testing.T) {
 	if err != nil {
 		t.Skipf("starts its helper with sudo -n, which needs passwordless sudo: %v", err)
 	}
-	prev := elevate.Launch
-	t.Cleanup(func() { elevate.Launch = prev })
-	elevate.Launch = func(ctx context.Context, exe string, args []string) *exec.Cmd {
-		return exec.CommandContext(ctx, sudo, append([]string{"-n", exe}, args...)...)
+	prev := hook.Launch
+	t.Cleanup(func() { hook.Launch = prev })
+	hook.Launch = func(ctx context.Context, exe string, args []string) (elevate.Proc, error) {
+		cmd := exec.CommandContext(ctx, sudo, append([]string{"-n", exe}, args...)...)
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			return nil, err
+		}
+		return ttSudoProc{cmd}, nil
 	}
 
 	// Bypassing everything else keeps the runner's own traffic off the TUN.
@@ -118,7 +136,7 @@ func TestE2EHelper(t *testing.T) {
 
 func TestE2ERoot(t *testing.T) {
 	ttGate(t)
-	if !elevate.IsElevated() {
+	if !hook.IsElevated() {
 		t.Skip("needs root")
 	}
 	phys, err := bypass.DefaultInterface(false)

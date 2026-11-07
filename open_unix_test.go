@@ -5,31 +5,33 @@ package tun
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wzshiming/elevate"
+
+	"github.com/wzshiming/tun/internal/hook"
 )
 
-// ttUnixLaunchSwap makes the process look unprivileged and routes elevate.Launch to fake; it returns the recorded launches.
-func ttUnixLaunchSwap(t *testing.T, fake func(ctx context.Context, exe string, args []string) *exec.Cmd) *[][]string {
+// ttUnixLaunchSwap makes the process look unprivileged and routes hook.Launch to a helper that exits at once with waitErr; it returns the recorded launches.
+func ttUnixLaunchSwap(t *testing.T, waitErr error) *[][]string {
 	t.Helper()
-	prevLaunch, prevIsElevated := elevate.Launch, elevate.IsElevated
-	t.Cleanup(func() { elevate.Launch, elevate.IsElevated = prevLaunch, prevIsElevated })
+	prevLaunch, prevIsElevated := hook.Launch, hook.IsElevated
+	t.Cleanup(func() { hook.Launch, hook.IsElevated = prevLaunch, prevIsElevated })
 	var calls [][]string
-	elevate.IsElevated = func() bool { return false }
-	elevate.Launch = func(ctx context.Context, exe string, args []string) *exec.Cmd {
+	hook.IsElevated = func() bool { return false }
+	hook.Launch = func(_ context.Context, exe string, args []string) (elevate.Proc, error) {
 		calls = append(calls, append([]string{exe}, args...))
-		return fake(ctx, exe, args)
+		proc := &ttRelayProc{done: make(chan struct{}), err: waitErr}
+		close(proc.done)
+		return proc, nil
 	}
 	return &calls
 }
 
 func TestOpenLaunchesHelperCommandOnTheSocket(t *testing.T) {
-	calls := ttUnixLaunchSwap(t, func(ctx context.Context, _ string, _ []string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
-	})
+	calls := ttUnixLaunchSwap(t, &elevate.ExitError{Code: 1})
 	Open(t.Context(), ttDefaultConfig())
 	if len(*calls) != 1 {
 		t.Fatalf("Launch called %d times, want once", len(*calls))
@@ -41,11 +43,24 @@ func TestOpenLaunchesHelperCommandOnTheSocket(t *testing.T) {
 }
 
 func TestOpenReturnsErrDeniedWhenThePromptIsDeclined(t *testing.T) {
-	// The launcher exits as osascript does on a canceled prompt and as pkexec does on a dismissed one.
-	ttUnixLaunchSwap(t, func(ctx context.Context, _ string, _ []string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "echo 'execution error: User canceled. (-128)' >&2; exit 126")
-	})
+	ttUnixLaunchSwap(t, elevate.ErrDenied)
 	if _, err := Open(t.Context(), ttDefaultConfig()); !errors.Is(err, ErrDenied) {
 		t.Errorf("Open = %v, want ErrDenied", err)
+	}
+}
+
+func TestOpenReportsHelperExitCodeAndStderr(t *testing.T) {
+	ttUnixLaunchSwap(t, &elevate.ExitError{Code: 7, Stderr: "boom"})
+	_, err := Open(t.Context(), ttDefaultConfig())
+	if _, ok := errors.AsType[*elevate.ExitError](err); !ok || !strings.Contains(err.Error(), "7") || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("Open = %v, want an *elevate.ExitError naming exit code 7 and stderr boom", err)
+	}
+}
+
+func TestOpenFailsWhenTheHelperExitsCleanlyWithoutConnecting(t *testing.T) {
+	ttUnixLaunchSwap(t, nil)
+	if dev, err := Open(t.Context(), ttDefaultConfig()); err == nil {
+		dev.Close()
+		t.Error("Open = nil error after the helper exited 0 without connecting, want one")
 	}
 }

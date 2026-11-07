@@ -3,7 +3,6 @@
 package tun
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,8 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wzshiming/elevate"
 	wgtun "golang.zx2c4.com/wireguard/tun"
+
+	"github.com/wzshiming/tun/internal/hook"
 )
 
 var createTUN = func(name string, mtu int) (wgtun.Device, error) { return wgtun.CreateTUN(name, mtu) }
@@ -24,7 +24,7 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
-	if elevate.IsElevated() {
+	if hook.IsElevated() {
 		return openLocal(ctx, cfg)
 	}
 
@@ -65,15 +65,14 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := elevate.Launch(cctx, exe, []string{HelperCommand, sock})
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
+	proc, err := hook.Launch(cctx, exe, []string{HelperCommand, sock})
+	if err != nil {
 		return nil, err
 	}
+	var waitErr error
 	exited := make(chan struct{})
 	go func() {
-		cmd.Wait()
+		waitErr = proc.Wait()
 		// No helper connects once its launcher is gone, so the accept gives up.
 		ln.Close()
 		close(exited)
@@ -88,7 +87,10 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 		case ctx.Err() != nil:
 			return nil, ctx.Err()
 		case errors.Is(err, net.ErrClosed):
-			return nil, elevate.ClassifyExit(cmd.ProcessState.ExitCode(), stderr.String())
+			if waitErr == nil {
+				waitErr = errors.New("exited before connecting")
+			}
+			return nil, fmt.Errorf("tun: tun helper: %w", waitErr)
 		}
 		return nil, fmt.Errorf("tun: waiting for the tun helper: %w", err)
 	}

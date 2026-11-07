@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/wzshiming/elevate"
+	"github.com/wzshiming/tun/internal/hook"
 )
 
 // Helper runs the HelperCommand subcommand that Open launches as root.
@@ -19,7 +19,7 @@ func Helper(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: "+HelperCommand+" <absolute unix socket path>")
 		return 2
 	}
-	if !elevate.IsElevated() {
+	if !hook.IsElevated() {
 		fmt.Fprintln(os.Stderr, "tun-helper: must run as root")
 		return 2
 	}

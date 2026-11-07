@@ -360,15 +360,23 @@ func TestNewTokenIs64HexChars(t *testing.T) {
 	}
 }
 
-// ttRelayProc is a fake elevate.Proc that exits with code once done is closed.
+// ttRelayProc is a fake elevate.Proc whose Wait returns err once done is closed.
 type ttRelayProc struct {
 	done chan struct{}
-	code int
+	err  error
 }
 
-func (p *ttRelayProc) Wait() (int, error) {
+func (p *ttRelayProc) Wait() error {
 	<-p.done
-	return p.code, nil
+	return p.err
+}
+
+// ttRelayExit is what elevate's Wait returns for a helper exiting with code.
+func ttRelayExit(code int) error {
+	if code == 0 {
+		return nil
+	}
+	return &elevate.ExitError{Code: code}
 }
 
 // ttRelayLaunch returns a launch that records its arguments and runs serveHelper in a goroutine after a connection with a wrong token.
@@ -379,7 +387,7 @@ func ttRelayLaunch(open func(context.Context, Config) (*Device, error), gotArgs 
 		go func() {
 			defer close(proc.done)
 			if len(args) != 3 {
-				proc.code = 2
+				proc.err = ttRelayExit(2)
 				return
 			}
 			if bad, err := net.Dial("tcp4", args[1]); err == nil {
@@ -389,10 +397,10 @@ func ttRelayLaunch(open func(context.Context, Config) (*Device, error), gotArgs 
 			}
 			conn, err := net.Dial("tcp4", args[1])
 			if err != nil {
-				proc.code = 1
+				proc.err = ttRelayExit(1)
 				return
 			}
-			proc.code = serveHelper(conn, args[2], open)
+			proc.err = ttRelayExit(serveHelper(conn, args[2], open))
 		}()
 		return proc, nil
 	}
@@ -457,10 +465,10 @@ type ttRelayHeldProc struct {
 	release chan struct{}
 }
 
-func (p *ttRelayHeldProc) Wait() (int, error) {
-	code, err := p.Proc.Wait()
+func (p *ttRelayHeldProc) Wait() error {
+	err := p.Proc.Wait()
 	<-p.release
-	return code, err
+	return err
 }
 
 // ttRelayOpenHeld opens a relayed device whose helper process lingers until release is closed.
@@ -548,15 +556,32 @@ func TestErrDeniedIsTheElevateSeamValue(t *testing.T) {
 	}
 }
 
-func TestOpenViaRelayReportsHelperExitCode(t *testing.T) {
-	launch := func(context.Context, string, []string) (elevate.Proc, error) {
-		proc := &ttRelayProc{done: make(chan struct{}), code: 3}
+// ttRelayExitedLaunch returns a launch whose helper has already exited with Wait returning err.
+func ttRelayExitedLaunch(err error) func(context.Context, string, []string) (elevate.Proc, error) {
+	return func(context.Context, string, []string) (elevate.Proc, error) {
+		proc := &ttRelayProc{done: make(chan struct{}), err: err}
 		close(proc.done)
 		return proc, nil
 	}
-	_, err := openViaRelay(t.Context(), ttDefaultConfig(), "x", launch)
-	if err == nil || !strings.Contains(err.Error(), "3") {
-		t.Errorf("openViaRelay = %v, want an error naming exit code 3", err)
+}
+
+func TestOpenViaRelayReportsHelperExitCode(t *testing.T) {
+	_, err := openViaRelay(t.Context(), ttDefaultConfig(), "x", ttRelayExitedLaunch(&elevate.ExitError{Code: 7, Stderr: "boom"}))
+	if err == nil || !strings.Contains(err.Error(), "exited with code 7 before connecting") {
+		t.Errorf("openViaRelay = %v, want an error saying the helper exited with code 7 before connecting", err)
+	}
+}
+
+func TestOpenViaRelayReportsCleanHelperExitAsCode0(t *testing.T) {
+	_, err := openViaRelay(t.Context(), ttDefaultConfig(), "x", ttRelayExitedLaunch(nil))
+	if err == nil || !strings.Contains(err.Error(), "exited with code 0 before connecting") {
+		t.Errorf("openViaRelay = %v, want an error saying the helper exited with code 0 before connecting", err)
+	}
+}
+
+func TestOpenViaRelayReturnsErrDeniedFromWait(t *testing.T) {
+	if _, err := openViaRelay(t.Context(), ttDefaultConfig(), "x", ttRelayExitedLaunch(elevate.ErrDenied)); !errors.Is(err, ErrDenied) {
+		t.Errorf("openViaRelay = %v, want ErrDenied", err)
 	}
 }
 

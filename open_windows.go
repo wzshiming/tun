@@ -7,8 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/wzshiming/elevate"
-
+	"github.com/wzshiming/tun/internal/hook"
 	"github.com/wzshiming/tun/wintun"
 )
 
@@ -20,7 +19,7 @@ func Open(ctx context.Context, cfg Config) (*Device, error) {
 	if !wintun.Embedded {
 		return nil, ErrUnsupported
 	}
-	if elevate.IsElevated() {
+	if hook.IsElevated() {
 		return openLocal(ctx, cfg)
 	}
 	return openViaHelper(ctx, cfg)
@@ -35,5 +34,5 @@ func openViaHelper(ctx context.Context, cfg Config) (*Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	return openViaRelay(ctx, cfg, exe, elevate.Launch)
+	return openViaRelay(ctx, cfg, exe, hook.Launch)
 }
