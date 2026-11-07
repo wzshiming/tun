@@ -85,6 +85,34 @@ func TestUDPDNSFlowWithStalledRemoteEndsAfterIdle(t *testing.T) {
 	}
 }
 
+func TestUDPDNSRepliesPushBackIdle(t *testing.T) {
+	const idle = 200 * time.Millisecond
+	env := testServeDNS(t, idle)
+	conn := env.dialUDP(t, "10.0.0.53:53")
+	testSend(t, conn, "query")
+	target := env.nextTarget(t)
+	testReadFrame(t, target)
+	start := time.Now()
+	var last time.Time
+	for i := 0; time.Since(start) < 3*idle; i++ {
+		time.Sleep(80 * time.Millisecond)
+		testWriteFrame(t, target, "reply")
+		last = time.Now()
+		conn.SetReadDeadline(time.Now().Add(time.Second))
+		reply := make([]byte, 512)
+		if n, err := conn.Read(reply); err != nil || string(reply[:n]) != "reply" {
+			t.Fatalf("client Read() of reply %d, %v after the query = %q, %v, want %q: replies every 80ms must keep a flow with DNS.Idle %v alive", i+1, time.Since(start), reply[:n], err, "reply", idle)
+		}
+	}
+	if err := target.SetReadDeadline(time.Now().Add(testIdleBound)); err != nil {
+		t.Fatal(err)
+	}
+	testReadEOF(t, target, "target of a flow silent since its last reply")
+	if ended := time.Since(last); ended < idle*3/4 || ended > 2*time.Second {
+		t.Fatalf("flow ended %v after its last reply, want about DNS.Idle %v", ended, idle)
+	}
+}
+
 func TestDNSRejectsTCP(t *testing.T) {
 	env := testServeWith(t, Options{Addresses: testAddresses}, func(d *fakeDialer) Handler {
 		m := NewMux()
