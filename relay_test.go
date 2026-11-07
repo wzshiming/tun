@@ -526,6 +526,61 @@ func TestRelayCloseWaitsForTheHelperToExit(t *testing.T) {
 	}
 }
 
+// ttRelayCtxProc is an elevate.Proc whose Wait, like elevate's on Windows, returns the launch ctx's error once it is done, and otherwise exits once release is closed.
+type ttRelayCtxProc struct {
+	elevate.Proc
+	ctx     context.Context
+	release chan struct{}
+}
+
+func (p *ttRelayCtxProc) Wait() error {
+	select {
+	case <-p.ctx.Done():
+		return p.ctx.Err()
+	case <-p.release:
+		return p.Proc.Wait()
+	}
+}
+
+func TestRelayCloseWaitsForTheHelperAfterOpensCtxIsCancelled(t *testing.T) {
+	open := func(context.Context, Config) (*Device, error) {
+		return &Device{Device: ttRelayNewFakeDev(), Interface: "tun"}, nil
+	}
+	var args []string
+	inner := ttRelayLaunch(open, &args)
+	release := make(chan struct{})
+	ttRelaySwapLaunch(t, func(ctx context.Context, exe string, args []string) (elevate.Proc, error) {
+		proc, err := inner(ctx, exe, args)
+		if err != nil {
+			return nil, err
+		}
+		return &ttRelayCtxProc{proc, ctx, release}, nil
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	dev, err := openViaRelay(ctx, ttDefaultConfig(), "x")
+	cancel()
+	if err != nil {
+		t.Fatalf("openViaRelay: %v", err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- dev.Close() }()
+	select {
+	case <-closed:
+		close(release)
+		t.Fatal("Close returned while the helper process still ran, taking the cancelled Open ctx for its exit")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Errorf("Close = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close still blocked 5s after the helper exited")
+	}
+}
+
 func TestRelayCloseGivesUpOnAHelperThatDoesNotExit(t *testing.T) {
 	prev := helperExitTimeout
 	helperExitTimeout = 100 * time.Millisecond

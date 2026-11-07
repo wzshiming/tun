@@ -255,7 +255,8 @@ func openViaRelay(ctx context.Context, cfg Config, exe string) (*Device, error) 
 	launched := make(chan error, 1)
 	exited := make(chan error, 1)
 	go func() {
-		proc, err := launch(ctx, exe, []string{HelperCommand, ln.Addr().String(), token})
+		// Wait must report the helper's real exit, which Close waits for, so the launch outlives ctx.
+		proc, err := launch(context.WithoutCancel(ctx), exe, []string{HelperCommand, ln.Addr().String(), token})
 		launched <- err
 		if err != nil {
 			return
