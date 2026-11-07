@@ -252,8 +252,8 @@ func TestRejectedUDPFlowFreesItsEndpoint(t *testing.T) {
 	served := make(chan struct{}, 4)
 	env := testServeMux(t, func(m *Mux) {
 		m.Handle("udp", 0, HandlerFunc(func(_ context.Context, f Flow) {
-			served <- struct{}{}
 			f.Reject()
+			served <- struct{}{}
 		}))
 	})
 	conn := env.dialUDP(t, "10.0.0.9:5353")
