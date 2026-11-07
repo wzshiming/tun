@@ -357,6 +357,15 @@ func TestRelayUDPDialledReadErrorEndsFlowAndRedials(t *testing.T) {
 	}
 }
 
+func TestRelayIdleDefaultsTo60Seconds(t *testing.T) {
+	if got := (&Relay{}).idle(); got != 60*time.Second {
+		t.Fatalf("Relay{}.idle() = %v, want the 60s default", got)
+	}
+	if got := (&Relay{Idle: 3 * time.Second}).idle(); got != 3*time.Second {
+		t.Fatalf("Relay{Idle: 3s}.idle() = %v, want 3s", got)
+	}
+}
+
 // udpRelayOpen opens a flow to Relay{Idle: idle} and returns its client conn and target once the first datagram arrived.
 func udpRelayOpen(t *testing.T, idle time.Duration) (net.Conn, *udpRelayTarget) {
 	t.Helper()

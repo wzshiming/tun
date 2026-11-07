@@ -51,7 +51,7 @@ func (r *Relay) serveUDP(ctx context.Context, f Flow) {
 	defer closeBoth()
 	stop := context.AfterFunc(ctx, closeBoth)
 	defer stop()
-	touch, stopIdle := afterIdle(cmp.Or(r.Idle, 60*time.Second), closeBoth)
+	touch, stopIdle := afterIdle(r.idle(), closeBoth)
 	defer stopIdle()
 	replies := make(chan struct{})
 	go func() {
@@ -62,6 +62,10 @@ func (r *Relay) serveUDP(ctx context.Context, f Flow) {
 	relayDatagrams(remote, conn, touch)
 	closeBoth()
 	<-replies
+}
+
+func (r *Relay) idle() time.Duration {
+	return cmp.Or(r.Idle, 60*time.Second)
 }
 
 // relayDatagrams writes each datagram read from src to dst as one datagram, touching after each, until either fails.
