@@ -1,6 +1,6 @@
 # tun
 
-`github.com/wzshiming/tun` captures a machine's IP traffic into a TUN device and hands every flow to a Go dialer of your choice. It opens the TUN device with the privileges it needs (prompting the user when the process is not root/administrator), installs routes that capture everything except what must escape, runs a gVisor userspace network stack that turns packets back into TCP connections and DNS queries, and provides a dialer bound to the physical interface so forwarded traffic does not loop back into the TUN. It runs on macOS, Linux and Windows 10+.
+`github.com/wzshiming/tun` captures a machine's IP traffic into a TUN device and hands every flow to a Go handler of your choice. It opens the TUN device with the privileges it needs (prompting the user when the process is not root/administrator), installs routes that capture everything except what must escape, runs a gVisor userspace network stack that turns packets back into TCP connections and UDP flows and dispatches them by network and destination port, ships handlers that relay TCP and DNS through a dialer, and provides a dialer bound to the physical interface so forwarded traffic does not loop back into the TUN. It runs on macOS, Linux and Windows 10+.
 
 ## Install
 
@@ -22,9 +22,15 @@ go get github.com/wzshiming/tun
 ### `stack` — the userspace network stack
 
 - `type Dialer interface { DialContext(ctx context.Context, network, address string) (net.Conn, error) }`
-- `type Options struct { MTU int; Addresses []netip.Prefix; DNSIdle time.Duration }`
-- `func Serve(ctx context.Context, dev wgtun.Device, dialer Dialer, opts Options) error` — relays every captured flow of `dev`, a `golang.zx2c4.com/wireguard/tun` device such as `(*tun.Device).Device`, through `dialer`; returns when `ctx` ends or the device fails, and closes the device.
-- `func ClientAddr(ctx context.Context) net.Addr` — inside `DialContext`, the captured flow's source (`*net.TCPAddr` or `*net.UDPAddr`), nil when absent.
+- `type Flow interface { Network() string; Target() netip.AddrPort; Client() netip.AddrPort; Accept() (net.Conn, error); Reject() }` — a captured TCP connection or UDP flow: `Accept` completes the TCP handshake or returns the UDP flow's datagram conn (one datagram per `Read`), once; `Reject` resets the TCP client or drops the UDP datagrams.
+- `type Handler interface { ServeFlow(ctx context.Context, f Flow) }` and `type HandlerFunc func(context.Context, Flow)` — called once per flow on its own goroutine; when it returns, an unanswered flow is rejected and an accepted conn is closed.
+- `type Mux struct` with `func NewMux() *Mux`, `func (m *Mux) Handle(network string, port uint16, h Handler)` and `func (m *Mux) ServeFlow(ctx context.Context, f Flow)` — dispatches by `"tcp"`/`"udp"` and destination port, port 0 being the network's fallback; a flow without a handler is rejected.
+- `type Relay struct { Dialer Dialer }` — dials a TCP flow's target first, resetting the client when that fails, then pipes both ways; rejects UDP.
+- `type DNS struct { Dialer Dialer; Idle time.Duration }` — relays a UDP flow's datagrams as length-framed messages over one TCP connection to its target; the flow ends after `Idle` (default 10s) without datagrams.
+- `func DefaultMux(dialer Dialer) *Mux` — `Relay` for every TCP port and `DNS` for UDP port 53.
+- `type Options struct { MTU int; Addresses []netip.Prefix }`
+- `func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options) error` — hands every captured flow of `dev`, a `golang.zx2c4.com/wireguard/tun` device such as `(*tun.Device).Device`, to `handler` (nil refuses them all, UDP with ICMP port unreachable); returns when `ctx` ends or the device fails, once every `ServeFlow` has returned, and closes the device.
+- `func ClientAddr(ctx context.Context) net.Addr` — inside `DialContext`, the captured flow's source (`*net.TCPAddr` or `*net.UDPAddr`), nil when absent; `WithClientAddr` sets it.
 
 ### `bypass` — escaping the TUN
 
@@ -54,7 +60,7 @@ func main() {
 		log.Println(stack.ClientAddr(ctx), "->", network, address)
 		return direct.DialContext(ctx, network, address)
 	})
-	err = stack.Serve(ctx, dev.Device, dialer, stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
+	err = stack.Serve(ctx, dev.Device, stack.DefaultMux(dialer), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
 	if err != nil && ctx.Err() == nil {
 		log.Fatal(err)
 	}
@@ -87,7 +93,7 @@ Traffic forwarded to the real network must not be captured again. The `bypass` d
 
 ## Limits
 
-- UDP: only DNS (port 53) is relayed, over TCP through the dialer; all other UDP is answered with ICMP port unreachable.
+- UDP: `DefaultMux` relays only DNS (port 53), over TCP through the dialer; UDP to a port without a handler is dropped.
 - Linux: binding to an interface with `SO_BINDTODEVICE` without privileges requires kernel 5.7 or later.
 
 ## Command `cmd/tun`
