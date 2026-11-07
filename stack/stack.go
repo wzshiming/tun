@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	wgtun "golang.zx2c4.com/wireguard/tun"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -72,9 +73,36 @@ func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options)
 	g.stop()
 	s.RemoveNIC(nicID)
 	s.Close()
-	g.flows.Wait()
+	g.abortUntilDrained(s)
 	s.Wait()
 	return err
+}
+
+var (
+	reabortInterval = 100 * time.Millisecond
+	reaborted       = func() {} // test hook, called after each re-abort round
+)
+
+// abortUntilDrained waits for every flow, re-aborting the stack's endpoints meanwhile: a handshake that found its route before RemoveNIC can register after Close took its snapshot.
+func (g *gateway) abortUntilDrained(s *stack.Stack) {
+	drained := make(chan struct{})
+	go func() {
+		g.flows.Wait()
+		close(drained)
+	}()
+	ticker := time.NewTicker(reabortInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-drained:
+			return
+		case <-ticker.C:
+			for _, e := range s.RegisteredEndpoints() {
+				e.Abort()
+			}
+			reaborted()
+		}
+	}
 }
 
 // gateway hands the flows the stack captures to its handler and counts them so Serve can wait for them.
