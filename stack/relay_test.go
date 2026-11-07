@@ -18,6 +18,16 @@ const udpRelayQuiet = time.Second
 // udpRelayIdleBound is how long a sub-second Relay.Idle may take to end a flow; the 60s default exceeds it.
 const udpRelayIdleBound = 5 * time.Second
 
+// relaySocketBuffer lets a loopback UDP socket carry a 65507-byte datagram; macOS defaults to 9216 to send and 42080 to receive.
+const relaySocketBuffer = 1 << 20
+
+func relayRaiseBuffers(conn *net.UDPConn) error {
+	if err := conn.SetReadBuffer(relaySocketBuffer); err != nil {
+		return err
+	}
+	return conn.SetWriteBuffer(relaySocketBuffer)
+}
+
 // udpRelayDialer records every dial and answers it with a UDP socket connected to a fresh loopback UDP target, or once stalled with a stalledConn.
 type udpRelayDialer struct {
 	mu      sync.Mutex
@@ -63,11 +73,17 @@ func (d *udpRelayDialer) DialContext(ctx context.Context, network, address strin
 		if err != nil {
 			return nil, err
 		}
-		if conn, err = net.DialUDP("udp", nil, remote.LocalAddr().(*net.UDPAddr)); err != nil {
+		dialled, err := net.DialUDP("udp", nil, remote.LocalAddr().(*net.UDPAddr))
+		if err != nil {
 			remote.Close()
 			return nil, err
 		}
-		target.remote = remote
+		if err := errors.Join(relayRaiseBuffers(remote), relayRaiseBuffers(dialled)); err != nil {
+			remote.Close()
+			dialled.Close()
+			return nil, err
+		}
+		conn, target.remote = dialled, remote
 	}
 	target.dialled = &udpRelayConn{Conn: conn, closed: make(chan struct{})}
 	d.mu.Lock()
@@ -231,6 +247,29 @@ func TestRelayUDPKeepsDatagramsWholeAndInOrderBothWays(t *testing.T) {
 		if got, want := udpRelayClientRead(t, conn), udpRelayDatagram(size, byte(100+i)); !bytes.Equal(got, want) {
 			t.Fatalf("client datagram %d is %d bytes %x..., want the target's %d-byte datagram %d", i, len(got), got[:min(len(got), 8)], size, i)
 		}
+	}
+}
+
+func TestRelayUDPKeepsDatagramsAbove32KiBWholeBothWays(t *testing.T) {
+	for _, size := range []int{40000, 65507} {
+		t.Run(fmt.Sprint(size, " from the client"), func(t *testing.T) {
+			env, dialer := udpRelayServe(t, &Relay{})
+			conn := env.dialUDP(t, "10.0.0.9:5000")
+			if _, err := conn.Write(udpRelayDatagram(size, 1)); err != nil {
+				t.Fatalf("client send a %d-byte datagram: %v", size, err)
+			}
+			if got := dialer.next(t, env).recv(t); !bytes.Equal(got, udpRelayDatagram(size, 1)) {
+				t.Fatalf("target got a %d-byte datagram, want the client's %d bytes unchanged", len(got), size)
+			}
+		})
+		t.Run(fmt.Sprint(size, " from the target"), func(t *testing.T) {
+			conn, target := udpRelayOpen(t, 0)
+			target.send(t, udpRelayDatagram(size, 2))
+			conn.SetReadDeadline(time.Now().Add(testWait))
+			if got := udpRelayClientRead(t, conn); !bytes.Equal(got, udpRelayDatagram(size, 2)) {
+				t.Fatalf("client got a %d-byte datagram, want the target's %d bytes unchanged", len(got), size)
+			}
+		})
 	}
 }
 
