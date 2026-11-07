@@ -336,6 +336,27 @@ func TestRelayUDPCancelEndsFlowWithStalledRemote(t *testing.T) {
 	}
 }
 
+func TestRelayUDPDialledReadErrorEndsFlowAndRedials(t *testing.T) {
+	env, dialer := udpRelayServe(t, &Relay{})
+	conn := env.dialUDP(t, "10.0.0.9:5000")
+	testSend(t, conn, "open")
+	target := dialer.next(t, env)
+	target.recv(t)
+	// A past deadline fails Relay's pending Read as an ICMP port unreachable would.
+	target.dialled.SetReadDeadline(time.Now().Add(-time.Second))
+	select {
+	case <-target.dialled.closed:
+	case <-time.After(testWait):
+		t.Fatalf("dialled conn still open %v after its Read failed, want Relay to end the flow", testWait)
+	}
+	for deadline := time.Now().Add(testWait); len(dialer.recorded()) < 2; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("dialer.DialContext called %d times within %v of resending, want the ended flow's next datagram to dial again", len(dialer.recorded()), testWait)
+		}
+		testSend(t, conn, "again")
+	}
+}
+
 // udpRelayOpen opens a flow to Relay{Idle: idle} and returns its client conn and target once the first datagram arrived.
 func udpRelayOpen(t *testing.T, idle time.Duration) (net.Conn, *udpRelayTarget) {
 	t.Helper()
