@@ -1,0 +1,115 @@
+package stack
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"sync"
+	"testing"
+)
+
+// testFlow is a Flow without a connection, recording whether it was rejected.
+type testFlow struct {
+	network  string
+	target   netip.AddrPort
+	rejected bool
+}
+
+func (f *testFlow) Network() string           { return f.network }
+func (f *testFlow) Target() netip.AddrPort    { return f.target }
+func (f *testFlow) Client() netip.AddrPort    { return netip.MustParseAddrPort("10.0.0.2:40000") }
+func (f *testFlow) Accept() (net.Conn, error) { return nil, errors.New("testFlow has no conn") }
+func (f *testFlow) Reject()                   { f.rejected = true }
+
+func testFlowTo(network, target string) *testFlow {
+	return &testFlow{network: network, target: netip.MustParseAddrPort(target)}
+}
+
+// testNamed returns a handler appending name to *served.
+func testNamed(name string, served *[]string) Handler {
+	return HandlerFunc(func(context.Context, Flow) { *served = append(*served, name) })
+}
+
+func TestMuxRoutesExactPortBeforeFallback(t *testing.T) {
+	for _, network := range []string{"tcp", "udp"} {
+		t.Run(network, func(t *testing.T) {
+			var served []string
+			m := NewMux()
+			m.Handle(network, 0, testNamed("fallback", &served))
+			m.Handle(network, 443, testNamed("443", &served))
+			f := testFlowTo(network, "10.0.0.9:443")
+			m.ServeFlow(t.Context(), f)
+			if len(served) != 1 || served[0] != "443" || f.rejected {
+				t.Fatalf("%s flow to port 443 served by %q, rejected %v; want only the port-443 handler", network, served, f.rejected)
+			}
+		})
+	}
+}
+
+func TestMuxRoutesOtherPortsToNetworkFallback(t *testing.T) {
+	for _, network := range []string{"tcp", "udp"} {
+		t.Run(network, func(t *testing.T) {
+			var served []string
+			m := NewMux()
+			m.Handle(network, 0, testNamed("fallback", &served))
+			m.Handle(network, 443, testNamed("443", &served))
+			f := testFlowTo(network, "10.0.0.9:80")
+			m.ServeFlow(t.Context(), f)
+			if len(served) != 1 || served[0] != "fallback" || f.rejected {
+				t.Fatalf("%s flow to port 80 served by %q, rejected %v; want only the %s fallback", network, served, f.rejected, network)
+			}
+		})
+	}
+}
+
+func TestMuxRejectsFlowWithoutHandler(t *testing.T) {
+	for _, tc := range []struct{ network, other string }{{"tcp", "udp"}, {"udp", "tcp"}} {
+		t.Run(tc.network, func(t *testing.T) {
+			var served []string
+			m := NewMux()
+			m.Handle(tc.network, 53, testNamed("53", &served))
+			m.Handle(tc.other, 0, testNamed(tc.other+" fallback", &served))
+			m.Handle(tc.other, 1234, testNamed(tc.other+" 1234", &served))
+			f := testFlowTo(tc.network, "10.0.0.9:1234")
+			m.ServeFlow(t.Context(), f)
+			if !f.rejected || len(served) != 0 {
+				t.Fatalf("%s flow to port 1234 with no %s handler: rejected %v, served by %q; want rejected and no handler invoked", tc.network, tc.network, f.rejected, served)
+			}
+		})
+	}
+}
+
+func TestMuxHandlePanics(t *testing.T) {
+	noop := HandlerFunc(func(context.Context, Flow) {})
+	for _, tc := range []struct {
+		name string
+		do   func(m *Mux)
+	}{
+		{"unknown network", func(m *Mux) { m.Handle("ip", 0, noop) }},
+		{"nil handler", func(m *Mux) { m.Handle("tcp", 80, nil) }},
+		{"duplicate", func(m *Mux) { m.Handle("udp", 53, noop); m.Handle("udp", 53, noop) }},
+		{"duplicate fallback", func(m *Mux) { m.Handle("tcp", 0, noop); m.Handle("tcp", 0, noop) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("Handle did not panic on a registration with %s", tc.name)
+				}
+			}()
+			tc.do(NewMux())
+		})
+	}
+}
+
+func TestMuxHandleConcurrentWithServeFlow(t *testing.T) {
+	m := NewMux()
+	m.Handle("tcp", 0, HandlerFunc(func(context.Context, Flow) {}))
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Go(func() { m.Handle("udp", uint16(1000+i), HandlerFunc(func(context.Context, Flow) {})) })
+		wg.Go(func() { m.ServeFlow(t.Context(), testFlowTo("tcp", fmt.Sprintf("10.0.0.9:%d", 1000+i))) })
+	}
+	wg.Wait()
+}
