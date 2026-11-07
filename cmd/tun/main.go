@@ -86,7 +86,7 @@ func run(ctx context.Context, cfg tun.Config) error {
 	}
 
 	dialer := &logDialer{dialer: bypass.NewDialer(capture)}
-	err = stack.Serve(ctx, dev.Device, dialer, stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
+	err = stack.Serve(ctx, dev.Device, stack.DefaultMux(dialer), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
 	if ctx.Err() != nil {
 		log.Printf("interface %s down", dev.Interface)
 		return nil

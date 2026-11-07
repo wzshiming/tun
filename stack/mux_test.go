@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -100,6 +101,14 @@ func TestMuxHandlePanics(t *testing.T) {
 			}()
 			tc.do(NewMux())
 		})
+	}
+}
+
+func TestDefaultMuxRegistersRelayAndDNSOnly(t *testing.T) {
+	d := &fakeDialer{}
+	want := map[muxKey]Handler{{"tcp", 0}: &Relay{Dialer: d}, {"udp", 53}: &DNS{Dialer: d}}
+	if got := DefaultMux(d).handlers; !reflect.DeepEqual(got, want) {
+		t.Fatalf("DefaultMux registers %v, want exactly tcp/0 Relay and udp/53 DNS over its dialer", got)
 	}
 }
 

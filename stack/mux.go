@@ -52,6 +52,14 @@ func NewMux() *Mux {
 	return &Mux{handlers: make(map[muxKey]Handler)}
 }
 
+// DefaultMux returns a Mux relaying every TCP connection and the DNS flows to UDP port 53 through dialer.
+func DefaultMux(dialer Dialer) *Mux {
+	m := NewMux()
+	m.Handle("tcp", 0, &Relay{Dialer: dialer})
+	m.Handle("udp", 53, &DNS{Dialer: dialer})
+	return m
+}
+
 // Handle registers h for the flows of network, "tcp" or "udp", to port; port 0 registers the network's fallback.
 // It panics on another network, a nil handler or a registration already made.
 func (m *Mux) Handle(network string, port uint16, h Handler) {

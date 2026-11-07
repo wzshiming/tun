@@ -1,15 +1,10 @@
 package stack
 
 import (
-	"context"
 	"errors"
 	"io"
 	"net"
-	"net/netip"
-	"strings"
 	"testing"
-
-	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 func TestTCPDialsDestinationWithClientAddr(t *testing.T) {
@@ -29,15 +24,7 @@ func TestTCPRelaysBytesBothWays(t *testing.T) {
 func TestTCPDialFailureRefusesClient(t *testing.T) {
 	env := testServe(t, Options{Addresses: testAddresses})
 	env.dialer.fail(errors.New("test dial failure"))
-	ctx, cancel := context.WithTimeout(env.alive, testWait)
-	defer cancel()
-	conn, err := env.client.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort("10.0.0.9:443"))
-	if err == nil {
-		conn.Close()
-	}
-	if want := (&tcpip.ErrConnectionRefused{}).String(); err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("client dial error = %v%s, want it to contain %q", err, env.returned(), want)
-	}
+	env.dialTCPRefused(t, "10.0.0.9:443")
 }
 
 func TestTCPHalfCloseReachesBothEnds(t *testing.T) {

@@ -112,11 +112,14 @@ func ttOpen(t *testing.T, ctx context.Context, cfg tun.Config) *tun.Device {
 	return dev
 }
 
-// ttServeDev runs stack.Serve on dev until ctx ends; the channel receives its result.
+// ttServeDev runs stack.Serve on dev until ctx ends, relaying TCP and DNS through dialer; the channel receives its result.
 func ttServeDev(ctx context.Context, dev *tun.Device, cfg tun.Config, dialer *ttDialRecorder) <-chan error {
+	mux := stack.NewMux()
+	mux.Handle("tcp", 0, &stack.Relay{Dialer: dialer})
+	mux.Handle("udp", 53, &stack.DNS{Dialer: dialer})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- stack.Serve(ctx, dev, dialer, stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
+		errCh <- stack.Serve(ctx, dev, mux, stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
 	}()
 	return errCh
 }

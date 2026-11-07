@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -89,7 +88,7 @@ func TestE2EHelper(t *testing.T) {
 		ttDNSVia(t, "1.1.1.1:53")
 		rec.wantDial(t, "tcp", "1.1.1.1:53", "")
 	})
-	t.Run("udp port unreachable", func(t *testing.T) {
+	t.Run("udp without a handler is dropped", func(t *testing.T) {
 		conn, err := net.Dial("udp", "1.1.1.1:9999")
 		if err != nil {
 			t.Fatalf("dial udp 1.1.1.1:9999: %v", err)
@@ -98,9 +97,9 @@ func TestE2EHelper(t *testing.T) {
 		if _, err := conn.Write(make([]byte, 8)); err != nil {
 			t.Fatalf("send to udp 1.1.1.1:9999: %v", err)
 		}
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		if _, err := conn.Read(make([]byte, 64)); !errors.Is(err, syscall.ECONNREFUSED) {
-			t.Errorf("read from udp 1.1.1.1:9999 = %v, want ECONNREFUSED from an ICMP port unreachable", err)
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := conn.Read(make([]byte, 64)); !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Errorf("read from udp 1.1.1.1:9999 = %v, want a timeout with no reply and no ICMP port unreachable", err)
 		}
 		if dials := rec.dialsTo("1.1.1.1:9999"); len(dials) != 0 {
 			t.Errorf("Serve dialed %+v, want UDP to port 9999 never dialed", dials)
