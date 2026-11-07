@@ -7,7 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/wzshiming/tun/internal/elevate"
+	"github.com/wzshiming/elevate"
+
 	"github.com/wzshiming/tun/wintun"
 )
 

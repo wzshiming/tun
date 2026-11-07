@@ -15,9 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wzshiming/elevate"
 	wgtun "golang.zx2c4.com/wireguard/tun"
-
-	"github.com/wzshiming/tun/internal/elevate"
 )
 
 // ttRelayFakeDev is a wgtun.Device whose Read yields the packets sent to in and whose Write sends the packets to out.

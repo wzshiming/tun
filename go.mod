@@ -3,6 +3,7 @@ module github.com/wzshiming/tun
 go 1.27.3
 
 require (
+	github.com/wzshiming/elevate v0.0.0-20261106125235-828160fdf65c
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb
 	golang.org/x/net v0.60.0
 	golang.org/x/sys v0.48.0

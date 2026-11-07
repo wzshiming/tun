@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/wzshiming/tun/internal/elevate"
+	"github.com/wzshiming/elevate"
 )
 
 // ttUnixLaunchSwap makes the process look unprivileged and routes elevate.Launch to fake; it returns the recorded launches.

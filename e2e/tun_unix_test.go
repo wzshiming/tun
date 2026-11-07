@@ -15,9 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wzshiming/elevate"
+
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/bypass"
-	"github.com/wzshiming/tun/internal/elevate"
 )
 
 // TestE2EHelper swaps elevate.Launch, so it must not run in parallel.

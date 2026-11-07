@@ -13,9 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wzshiming/elevate"
 	wgtun "golang.zx2c4.com/wireguard/tun"
-
-	"github.com/wzshiming/tun/internal/elevate"
 )
 
 var createTUN = func(name string, mtu int) (wgtun.Device, error) { return wgtun.CreateTUN(name, mtu) }

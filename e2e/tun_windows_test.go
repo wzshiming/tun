@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wzshiming/elevate"
 	"golang.org/x/sys/windows"
 	wgtun "golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/bypass"
-	"github.com/wzshiming/tun/internal/elevate"
 	"github.com/wzshiming/tun/wintun"
 )
 

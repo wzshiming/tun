@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/wzshiming/tun/internal/elevate"
+	"github.com/wzshiming/elevate"
 )
 
 // Helper runs the HelperCommand subcommand that Open launches elevated.

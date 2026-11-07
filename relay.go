@@ -16,9 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wzshiming/elevate"
 	wgtun "golang.zx2c4.com/wireguard/tun"
-
-	"github.com/wzshiming/tun/internal/elevate"
 )
 
 // packetMax bounds the payload of a packet frame.
@@ -309,24 +308,8 @@ func serveHelper(conn net.Conn, token string, open func(context.Context, Config)
 		fmt.Fprintln(os.Stderr, "tun-helper: send token:", err)
 		return 1
 	}
-	var req request
-	if err := readFrame(conn, &req); err != nil {
-		fmt.Fprintln(os.Stderr, "tun-helper: read request:", err)
-		return 1
-	}
-	cfg := req.config()
-	var dev *Device
-	err := validate(cfg)
-	if err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		dev, err = open(ctx, cfg)
-		cancel()
-	}
-	// A client that stops reading must not stall the elevated helper.
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "tun-helper:", err)
-		writeFrame(conn, reply{Error: err.Error()})
+	dev := openRequested(conn, open)
+	if dev == nil {
 		return 1
 	}
 	defer dev.Close()
