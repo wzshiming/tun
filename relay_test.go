@@ -629,6 +629,34 @@ func TestOpenViaRelayReturnsOnCancelDuringPrompt(t *testing.T) {
 	<-prompting
 }
 
+func TestOpenViaRelayUsesTheLauncherInstalledAtCallTime(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	calls := make(chan string, 2)
+	launcher := func(name string) func(context.Context, string, []string) (elevate.Proc, error) {
+		return func(context.Context, string, []string) (elevate.Proc, error) {
+			calls <- name
+			<-release
+			return nil, ErrDenied
+		}
+	}
+	ttRelaySwapLaunch(t, launcher("A"))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := openViaRelay(ctx, ttDefaultConfig(), "x"); !errors.Is(err, context.Canceled) {
+		t.Errorf("openViaRelay = %v, want context.Canceled", err)
+	}
+	ttRelaySwapLaunch(t, launcher("B"))
+	select {
+	case got := <-calls:
+		if got != "A" {
+			t.Errorf("openViaRelay launched through %s, installed after it returned; want A", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("openViaRelay did not launch the helper within 5s")
+	}
+}
+
 func TestOpenViaRelayTimesOutWithoutConnection(t *testing.T) {
 	prev := relayConnectTimeout
 	relayConnectTimeout = 50 * time.Millisecond

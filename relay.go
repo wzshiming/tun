@@ -246,6 +246,7 @@ func openViaRelay(ctx context.Context, cfg Config, exe string) (*Device, error) 
 		return nil, err
 	}
 
+	launch := hook.Launch
 	done := make(chan struct{})
 	defer close(done)
 	found := make(chan net.Conn)
@@ -254,7 +255,7 @@ func openViaRelay(ctx context.Context, cfg Config, exe string) (*Device, error) 
 	launched := make(chan error, 1)
 	exited := make(chan error, 1)
 	go func() {
-		proc, err := hook.Launch(ctx, exe, []string{HelperCommand, ln.Addr().String(), token})
+		proc, err := launch(ctx, exe, []string{HelperCommand, ln.Addr().String(), token})
 		launched <- err
 		if err != nil {
 			return
