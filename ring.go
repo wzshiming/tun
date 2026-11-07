@@ -62,6 +62,7 @@ func (d *ringDevice) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 			d.ring.release(p)
 			return 1, nil
 		case errors.Is(err, errRingEmpty):
+			// One reader at a time: Wintun's read event is auto-reset, so one SetEvent wakes one waiter.
 			d.ring.wait()
 		case errors.Is(err, errRingEnded):
 			return 0, os.ErrClosed
