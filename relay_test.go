@@ -17,6 +17,8 @@ import (
 
 	"github.com/wzshiming/elevate"
 	wgtun "golang.zx2c4.com/wireguard/tun"
+
+	"github.com/wzshiming/tun/internal/hook"
 )
 
 // ttRelayFakeDev is a wgtun.Device whose Read yields the packets sent to in and whose Write sends the packets to out.
@@ -379,6 +381,14 @@ func ttRelayExit(code int) error {
 	return &elevate.ExitError{Code: code}
 }
 
+// ttRelaySwapLaunch routes hook.Launch to launch until t ends, so its callers must not run in parallel.
+func ttRelaySwapLaunch(t *testing.T, launch func(context.Context, string, []string) (elevate.Proc, error)) {
+	t.Helper()
+	prev := hook.Launch
+	t.Cleanup(func() { hook.Launch = prev })
+	hook.Launch = launch
+}
+
 // ttRelayLaunch returns a launch that records its arguments and runs serveHelper in a goroutine after a connection with a wrong token.
 func ttRelayLaunch(open func(context.Context, Config) (*Device, error), gotArgs *[]string) func(context.Context, string, []string) (elevate.Proc, error) {
 	return func(_ context.Context, exe string, args []string) (elevate.Proc, error) {
@@ -416,7 +426,8 @@ func TestOpenViaRelayReturnsRelayedDevice(t *testing.T) {
 	var args []string
 	cfg := ttDefaultConfig()
 	cfg.Name = "tt0"
-	dev, err := openViaRelay(t.Context(), cfg, "/x/app.exe", ttRelayLaunch(open, &args))
+	ttRelaySwapLaunch(t, ttRelayLaunch(open, &args))
+	dev, err := openViaRelay(t.Context(), cfg, "/x/app.exe")
 	if err != nil {
 		t.Fatalf("openViaRelay: %v", err)
 	}
@@ -486,7 +497,8 @@ func ttRelayOpenHeld(t *testing.T, release chan struct{}) *Device {
 		}
 		return &ttRelayHeldProc{proc, release}, nil
 	}
-	dev, err := openViaRelay(t.Context(), ttDefaultConfig(), "x", launch)
+	ttRelaySwapLaunch(t, launch)
+	dev, err := openViaRelay(t.Context(), ttDefaultConfig(), "x")
 	if err != nil {
 		t.Fatalf("openViaRelay: %v", err)
 	}
@@ -537,15 +549,16 @@ func TestRelayCloseGivesUpOnAHelperThatDoesNotExit(t *testing.T) {
 func TestOpenViaRelaySurfacesReplyError(t *testing.T) {
 	open := func(context.Context, Config) (*Device, error) { return nil, errors.New("no adapter today") }
 	var args []string
-	_, err := openViaRelay(t.Context(), ttDefaultConfig(), "x", ttRelayLaunch(open, &args))
+	ttRelaySwapLaunch(t, ttRelayLaunch(open, &args))
+	_, err := openViaRelay(t.Context(), ttDefaultConfig(), "x")
 	if err == nil || !strings.Contains(err.Error(), "no adapter today") {
 		t.Errorf("openViaRelay = %v, want the helper's error", err)
 	}
 }
 
 func TestOpenViaRelayPassesLaunchError(t *testing.T) {
-	launch := func(context.Context, string, []string) (elevate.Proc, error) { return nil, ErrDenied }
-	if _, err := openViaRelay(t.Context(), ttDefaultConfig(), "x", launch); !errors.Is(err, ErrDenied) {
+	ttRelaySwapLaunch(t, func(context.Context, string, []string) (elevate.Proc, error) { return nil, ErrDenied })
+	if _, err := openViaRelay(t.Context(), ttDefaultConfig(), "x"); !errors.Is(err, ErrDenied) {
 		t.Errorf("openViaRelay = %v, want ErrDenied", err)
 	}
 }
@@ -566,21 +579,24 @@ func ttRelayExitedLaunch(err error) func(context.Context, string, []string) (ele
 }
 
 func TestOpenViaRelayReportsHelperExitCode(t *testing.T) {
-	_, err := openViaRelay(t.Context(), ttDefaultConfig(), "x", ttRelayExitedLaunch(&elevate.ExitError{Code: 7, Stderr: "boom"}))
+	ttRelaySwapLaunch(t, ttRelayExitedLaunch(&elevate.ExitError{Code: 7, Stderr: "boom"}))
+	_, err := openViaRelay(t.Context(), ttDefaultConfig(), "x")
 	if err == nil || !strings.Contains(err.Error(), "exited with code 7 before connecting") {
 		t.Errorf("openViaRelay = %v, want an error saying the helper exited with code 7 before connecting", err)
 	}
 }
 
 func TestOpenViaRelayReportsCleanHelperExitAsCode0(t *testing.T) {
-	_, err := openViaRelay(t.Context(), ttDefaultConfig(), "x", ttRelayExitedLaunch(nil))
+	ttRelaySwapLaunch(t, ttRelayExitedLaunch(nil))
+	_, err := openViaRelay(t.Context(), ttDefaultConfig(), "x")
 	if err == nil || !strings.Contains(err.Error(), "exited with code 0 before connecting") {
 		t.Errorf("openViaRelay = %v, want an error saying the helper exited with code 0 before connecting", err)
 	}
 }
 
 func TestOpenViaRelayReturnsErrDeniedFromWait(t *testing.T) {
-	if _, err := openViaRelay(t.Context(), ttDefaultConfig(), "x", ttRelayExitedLaunch(elevate.ErrDenied)); !errors.Is(err, ErrDenied) {
+	ttRelaySwapLaunch(t, ttRelayExitedLaunch(elevate.ErrDenied))
+	if _, err := openViaRelay(t.Context(), ttDefaultConfig(), "x"); !errors.Is(err, ErrDenied) {
 		t.Errorf("openViaRelay = %v, want ErrDenied", err)
 	}
 }
@@ -588,15 +604,17 @@ func TestOpenViaRelayReturnsErrDeniedFromWait(t *testing.T) {
 func TestOpenViaRelayReturnsOnCancelDuringPrompt(t *testing.T) {
 	prompt := make(chan struct{})
 	t.Cleanup(func() { close(prompt) })
-	launch := func(context.Context, string, []string) (elevate.Proc, error) {
+	prompting := make(chan struct{})
+	ttRelaySwapLaunch(t, func(context.Context, string, []string) (elevate.Proc, error) {
+		close(prompting)
 		<-prompt
 		return nil, ErrDenied
-	}
+	})
 	ctx, cancel := context.WithCancel(t.Context())
 	time.AfterFunc(50*time.Millisecond, cancel)
 	done := make(chan error, 1)
 	go func() {
-		_, err := openViaRelay(ctx, ttDefaultConfig(), "x", launch)
+		_, err := openViaRelay(ctx, ttDefaultConfig(), "x")
 		done <- err
 	}()
 	select {
@@ -607,6 +625,8 @@ func TestOpenViaRelayReturnsOnCancelDuringPrompt(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("openViaRelay still blocked 5s after cancel")
 	}
+	// Orders openViaRelay's read of hook.Launch before the cleanup restores it.
+	<-prompting
 }
 
 func TestOpenViaRelayTimesOutWithoutConnection(t *testing.T) {
@@ -615,8 +635,8 @@ func TestOpenViaRelayTimesOutWithoutConnection(t *testing.T) {
 	t.Cleanup(func() { relayConnectTimeout = prev })
 	proc := &ttRelayProc{done: make(chan struct{})}
 	t.Cleanup(func() { close(proc.done) })
-	launch := func(context.Context, string, []string) (elevate.Proc, error) { return proc, nil }
-	_, err := openViaRelay(t.Context(), ttDefaultConfig(), "x", launch)
+	ttRelaySwapLaunch(t, func(context.Context, string, []string) (elevate.Proc, error) { return proc, nil })
+	_, err := openViaRelay(t.Context(), ttDefaultConfig(), "x")
 	if err == nil || !strings.Contains(err.Error(), "did not connect") {
 		t.Errorf("openViaRelay = %v, want an error saying the helper did not connect", err)
 	}

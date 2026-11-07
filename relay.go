@@ -18,6 +18,8 @@ import (
 
 	"github.com/wzshiming/elevate"
 	wgtun "golang.zx2c4.com/wireguard/tun"
+
+	"github.com/wzshiming/tun/internal/hook"
 )
 
 // packetMax bounds the payload of a packet frame.
@@ -229,8 +231,8 @@ func acceptHelper(ln net.Listener, token string, tokenTimeout time.Duration, fou
 }
 
 // openViaRelay launches exe's tun-helper and returns a Device relaying the packets of the TUN the helper opens.
-// launch may block on a prompt that cannot be cancelled, so ctx ends the wait without it.
-func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx context.Context, exe string, args []string) (elevate.Proc, error)) (*Device, error) {
+// hook.Launch may block on a prompt that cannot be cancelled, so ctx ends the wait without it.
+func openViaRelay(ctx context.Context, cfg Config, exe string) (*Device, error) {
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -249,7 +251,7 @@ func openViaRelay(ctx context.Context, cfg Config, exe string, launch func(ctx c
 	launched := make(chan error, 1)
 	exited := make(chan error, 1)
 	go func() {
-		proc, err := launch(ctx, exe, []string{HelperCommand, ln.Addr().String(), token})
+		proc, err := hook.Launch(ctx, exe, []string{HelperCommand, ln.Addr().String(), token})
 		launched <- err
 		if err != nil {
 			return

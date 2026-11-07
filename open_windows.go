@@ -30,5 +30,5 @@ func openViaHelper(ctx context.Context, cfg Config) (*Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	return openViaRelay(ctx, cfg, exe, hook.Launch)
+	return openViaRelay(ctx, cfg, exe)
 }
