@@ -1,6 +1,7 @@
 package stack
 
 import (
+	"fmt"
 	"net"
 
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -8,26 +9,27 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
-func (g *gateway) handleTCP(r *tcp.ForwarderRequest) {
-	if !g.start() {
+// forwardTCP serves a new connection on the forwarder's own goroutine; Accept completes the handshake, Reject resets the client.
+func (g *gateway) forwardTCP(r *tcp.ForwarderRequest) {
+	if g.handler == nil || !g.start() {
 		r.Complete(true)
 		return
 	}
-	defer g.flows.Done()
 	id := r.ID()
-	client := net.TCPAddrFromAddrPort(addrPort(id.RemoteAddress, id.RemotePort))
-	remote, err := g.dialer.DialContext(WithClientAddr(g.ctx, client), "tcp", addrPort(id.LocalAddress, id.LocalPort).String())
-	if err != nil {
-		r.Complete(true)
-		return
-	}
-	var wq waiter.Queue
-	ep, e := r.CreateEndpoint(&wq)
-	if e != nil {
-		remote.Close()
-		r.Complete(true)
-		return
-	}
-	r.Complete(false)
-	tunnel(g.ctx, gonet.NewTCPConn(&wq, ep), remote)
+	g.serve(&flow{
+		network: "tcp",
+		target:  addrPort(id.LocalAddress, id.LocalPort),
+		client:  addrPort(id.RemoteAddress, id.RemotePort),
+		accept: func() (net.Conn, error) {
+			var wq waiter.Queue
+			ep, e := r.CreateEndpoint(&wq)
+			if e != nil {
+				r.Complete(true)
+				return nil, fmt.Errorf("stack: accept tcp: %s", e)
+			}
+			r.Complete(false)
+			return gonet.NewTCPConn(&wq, ep), nil
+		},
+		reject: func() { r.Complete(true) },
+	})
 }

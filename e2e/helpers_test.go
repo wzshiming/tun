@@ -33,6 +33,9 @@ const ttDNSQuery = "\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\
 // ttCaptureLab is a capture list covering only the benchmarking and documentation ranges.
 var ttCaptureLab = []netip.Prefix{netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("2001:db8::/32")}
 
+// ttUDPEchoTarget is a TEST-NET-2 destination whose UDP port ttServeDev relays, which tests redirect to a loopback echo server.
+var ttUDPEchoTarget = netip.MustParseAddrPort("198.51.100.1:5000")
+
 // ttGate skips the test, which changes the host's interfaces, routes or sockets, unless TUN_E2E=1.
 func ttGate(t *testing.T) {
 	t.Helper()
@@ -112,11 +115,15 @@ func ttOpen(t *testing.T, ctx context.Context, cfg tun.Config) *tun.Device {
 	return dev
 }
 
-// ttServeDev runs stack.Serve on dev until ctx ends; the channel receives its result.
+// ttServeDev runs stack.Serve on dev until ctx ends, relaying TCP, DNS and UDP to ttUDPEchoTarget's port through dialer; the channel receives its result.
 func ttServeDev(ctx context.Context, dev *tun.Device, cfg tun.Config, dialer *ttDialRecorder) <-chan error {
+	mux := stack.NewMux()
+	mux.Handle("tcp", 0, &stack.Relay{Dialer: dialer})
+	mux.Handle("udp", 53, &stack.DNS{Dialer: dialer})
+	mux.Handle("udp", ttUDPEchoTarget.Port(), &stack.Relay{Dialer: dialer})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- stack.Serve(ctx, dev, dialer, stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
+		errCh <- stack.Serve(ctx, dev, mux, stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
 	}()
 	return errCh
 }
@@ -243,6 +250,61 @@ func ttServeLocal(t *testing.T, handle func(net.Conn)) string {
 }
 
 func ttEchoServer(conn net.Conn) { io.Copy(conn, conn) }
+
+// ttServeUDPEcho answers every datagram to a new 127.0.0.1 UDP socket with the same datagram and returns the socket's address.
+func ttServeUDPEcho(t *testing.T) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on udp 127.0.0.1: %v", err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			pc.WriteTo(buf[:n], from)
+		}
+	}()
+	return pc.LocalAddr().String()
+}
+
+// ttUDPEchoVia sends a random datagram to address over UDP and fails t unless the same datagram comes back within 5s.
+func ttUDPEchoVia(t *testing.T, address string) {
+	t.Helper()
+	conn, err := net.Dial("udp", address)
+	if err != nil {
+		t.Fatalf("dial udp %s: %v", address, err)
+	}
+	defer conn.Close()
+	want := make([]byte, 512)
+	rand.Read(want)
+	got := make([]byte, 65535)
+	// UDP may lose a datagram, so resend each second until the 5s run out.
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		if _, err := conn.Write(want); err != nil {
+			t.Fatalf("send a datagram to udp %s: %v", address, err)
+		}
+		wait := time.Now().Add(time.Second)
+		if wait.After(deadline) {
+			wait = deadline
+		}
+		conn.SetReadDeadline(wait)
+		n, err := conn.Read(got)
+		if err == nil {
+			if !bytes.Equal(got[:n], want) {
+				t.Fatalf("udp %s echoed %d bytes, want the %d-byte datagram sent unchanged", address, n, len(want))
+			}
+			return
+		}
+		if !errors.Is(err, os.ErrDeadlineExceeded) || !time.Now().Before(deadline) {
+			t.Fatalf("read the echoed datagram from udp %s: %v", address, err)
+		}
+	}
+}
 
 // ttDNSServer answers each length-framed DNS message with the same message marked as a response.
 func ttDNSServer(conn net.Conn) {

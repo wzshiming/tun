@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/netstack"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
@@ -52,6 +54,8 @@ type fakeDevice struct {
 	segmented    chan []byte
 	synArmed     atomic.Bool
 	synSegmented atomic.Bool
+	// unreachable counts the ICMP destination unreachable packets Serve wrote.
+	unreachable atomic.Int32
 }
 
 func (d *fakeDevice) File() *os.File           { return nil }
@@ -96,6 +100,9 @@ func (d *fakeDevice) Write(bufs [][]byte, offset int) (int, error) {
 	default:
 	}
 	for _, buf := range bufs {
+		if testIsUnreachable(buf[offset:]) {
+			d.unreachable.Add(1)
+		}
 		d.client.Write([][]byte{buf[offset:]}, 0)
 	}
 	return len(bufs), nil
@@ -145,6 +152,27 @@ func testIsSYN(packet []byte) bool {
 	}
 	segment := header.TCP(ip.Payload())
 	return len(segment) >= header.TCPMinimumSize && segment.Flags()&(header.TCPFlagSyn|header.TCPFlagAck) == header.TCPFlagSyn
+}
+
+// testIsUnreachable reports whether packet is an ICMPv4 or ICMPv6 destination unreachable message.
+func testIsUnreachable(packet []byte) bool {
+	switch header.IPVersion(packet) {
+	case header.IPv4Version:
+		ip := header.IPv4(packet)
+		if !ip.IsValid(len(packet)) || ip.TransportProtocol() != header.ICMPv4ProtocolNumber {
+			return false
+		}
+		icmp := header.ICMPv4(ip.Payload())
+		return len(icmp) >= header.ICMPv4MinimumSize && icmp.Type() == header.ICMPv4DstUnreachable
+	case header.IPv6Version:
+		ip := header.IPv6(packet)
+		if !ip.IsValid(len(packet)) || ip.TransportProtocol() != header.ICMPv6ProtocolNumber {
+			return false
+		}
+		icmp := header.ICMPv6(ip.Payload())
+		return len(icmp) >= header.ICMPv6MinimumSize && icmp.Type() == header.ICMPv6DstUnreachable
+	}
+	return false
 }
 
 // failRead makes every Read from now on fail with err.
@@ -330,6 +358,12 @@ type testEnv struct {
 
 func testServe(t *testing.T, opts Options) *testEnv {
 	t.Helper()
+	return testServeWith(t, opts, func(d *fakeDialer) Handler { return DefaultMux(d) })
+}
+
+// testServeWith serves the handler newHandler builds over the env's dialer.
+func testServeWith(t *testing.T, opts Options, newHandler func(*fakeDialer) Handler) *testEnv {
+	t.Helper()
 	clientDev, client, err := netstack.CreateNetTUN([]netip.Addr{testClient4, testClient6}, nil, testMTU)
 	if err != nil {
 		t.Fatalf("netstack.CreateNetTUN: %v", err)
@@ -367,8 +401,9 @@ func testServe(t *testing.T, opts Options) *testEnv {
 	ctx, cancel := context.WithCancel(context.Background())
 	alive, stop := context.WithCancel(context.Background())
 	env := &testEnv{dev: dev, dialer: dialer, client: client, cancel: cancel, alive: alive, done: make(chan struct{})}
+	handler := newHandler(dialer)
 	go func() {
-		env.err = Serve(ctx, dev, dialer, opts)
+		env.err = Serve(ctx, dev, handler, opts)
 		close(env.done)
 		stop()
 	}()
@@ -425,6 +460,20 @@ func (e *testEnv) dialTCP(t *testing.T, address string) *gonet.TCPConn {
 	}
 	conn.SetDeadline(time.Now().Add(testWait))
 	return conn
+}
+
+// dialTCPRefused expects the client's TCP dial to address to be refused with a RST.
+func (e *testEnv) dialTCPRefused(t *testing.T, address string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(e.alive, testWait)
+	defer cancel()
+	conn, err := e.client.DialContextTCPAddrPort(ctx, netip.MustParseAddrPort(address))
+	if err == nil {
+		conn.Close()
+	}
+	if want := (&tcpip.ErrConnectionRefused{}).String(); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("client dial %s error = %v%s, want it to contain %q", address, err, e.returned(), want)
+	}
 }
 
 func (e *testEnv) dialUDP(t *testing.T, address string) *gonet.UDPConn {
