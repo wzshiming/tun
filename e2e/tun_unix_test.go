@@ -50,8 +50,9 @@ func TestE2EHelper(t *testing.T) {
 	}
 
 	// Bypassing everything else keeps the runner's own traffic off the TUN.
-	cfg := ttConfig(ttSet(t, ttPrefixes("0.0.0.0/0", "::/0"), ttPrefixes("1.1.1.1/32", "2606:4700:4700::1111/128")).Prefixes())
-	want := ttPrefixes("1.1.1.1/32", "2606:4700:4700::1111/128")
+	captured := ttPrefixes("1.1.1.1/32", "2606:4700:4700::1111/128", netip.PrefixFrom(ttUDPEchoTarget.Addr(), 32).String())
+	cfg := ttConfig(ttSet(t, ttPrefixes("0.0.0.0/0", "::/0"), captured).Prefixes())
+	want := captured
 	if got := tun.CaptureRoutes(cfg); len(got) != len(want) || slices.ContainsFunc(want, func(p netip.Prefix) bool { return !slices.Contains(got, p) }) {
 		t.Fatalf("CaptureRoutes = %v, want exactly %v", got, want)
 	}
@@ -64,8 +65,12 @@ func TestE2EHelper(t *testing.T) {
 	}
 	echo := ttServeLocal(t, ttEchoServer)
 	rec := &ttDialRecorder{
-		redirect: map[string]string{"1.1.1.1:8080": echo, "[2606:4700:4700::1111]:8080": echo},
-		dns:      ttServeLocal(t, ttDNSServer),
+		redirect: map[string]string{
+			"1.1.1.1:8080":                echo,
+			"[2606:4700:4700::1111]:8080": echo,
+			ttUDPEchoTarget.String():      ttServeUDPEcho(t),
+		},
+		dns: ttServeLocal(t, ttDNSServer),
 	}
 	rec.logDialErrorsOnFailure(t)
 	errCh := ttServeDev(ctx, dev, cfg, rec)
@@ -73,7 +78,7 @@ func TestE2EHelper(t *testing.T) {
 	ttWaitFor(t, 10*time.Second, func() bool {
 		return ttIfaceHas(dev.Interface, "198.18.0.1") && ttIfaceHas(dev.Interface, "fd00:6a77:7761::1")
 	}, dev.Interface+" to hold 198.18.0.1 and fd00:6a77:7761::1")
-	for _, ip := range []string{"1.1.1.1", "2606:4700:4700::1111"} {
+	for _, ip := range []string{"1.1.1.1", "2606:4700:4700::1111", ttUDPEchoTarget.Addr().String()} {
 		if got := ttRouteDev(t, ip); got != dev.Interface {
 			t.Fatalf("route to %s leaves through %q, want %s", ip, got, dev.Interface)
 		}
@@ -87,6 +92,10 @@ func TestE2EHelper(t *testing.T) {
 	t.Run("dns over udp", func(t *testing.T) {
 		ttDNSVia(t, "1.1.1.1:53")
 		rec.wantDial(t, "tcp", "1.1.1.1:53", "")
+	})
+	t.Run("udp relayed", func(t *testing.T) {
+		ttUDPEchoVia(t, ttUDPEchoTarget.String())
+		rec.wantDial(t, "udp", ttUDPEchoTarget.String(), "198.18.0.1")
 	})
 	t.Run("udp without a handler is dropped", func(t *testing.T) {
 		conn, err := net.Dial("udp", "1.1.1.1:9999")
@@ -103,6 +112,12 @@ func TestE2EHelper(t *testing.T) {
 		}
 		if dials := rec.dialsTo("1.1.1.1:9999"); len(dials) != 0 {
 			t.Errorf("Serve dialed %+v, want UDP to port 9999 never dialed", dials)
+		}
+		// A Serve that died would also leave the datagram unanswered.
+		select {
+		case err := <-errCh:
+			t.Fatalf("Serve returned %v while UDP to port 9999 went unanswered, want it still serving", err)
+		default:
 		}
 	})
 	t.Run("ping", func(t *testing.T) {
