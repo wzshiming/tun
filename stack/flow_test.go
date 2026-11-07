@@ -281,8 +281,13 @@ func TestServeClosesConnLeftOpenByServeFlow(t *testing.T) {
 				t.Fatal("Accept() returned no conn")
 			}
 			conn.SetReadDeadline(time.Now().Add(testWait))
+			// testServeFlow returns before Serve closes the conn, so datagrams still queued on it are read first.
+			var err error
+			for err == nil {
+				_, err = conn.Read(make([]byte, 512))
+			}
 			var netErr net.Error
-			if _, err := conn.Read(make([]byte, 512)); err == nil || errors.As(err, &netErr) && netErr.Timeout() {
+			if errors.As(err, &netErr) && netErr.Timeout() {
 				t.Fatalf("Read() on the conn a returned ServeFlow left open = %v, want it closed by Serve", err)
 			}
 		})
