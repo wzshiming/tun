@@ -15,25 +15,20 @@ import (
 
 	"github.com/wzshiming/elevate"
 	"golang.org/x/sys/windows"
-	wgtun "golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/bypass"
 	"github.com/wzshiming/tun/internal/hook"
-	"github.com/wzshiming/tun/wintun"
 )
 
 // ttWinBypass keeps the runner's private networks off the TUN.
 var ttWinBypass = ttPrefixes("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")
 
-// ttWinGate skips unless TUN_E2E=1, the build embeds wintun.dll and the process is elevated.
+// ttWinGate skips unless TUN_E2E=1 and the process is elevated.
 func ttWinGate(t *testing.T) {
 	t.Helper()
 	ttGate(t)
-	if !wintun.Embedded {
-		t.Skip("this build embeds no wintun.dll")
-	}
 	if !hook.IsElevated() {
 		t.Skip("needs an elevated process")
 	}
@@ -77,11 +72,11 @@ func TestE2EWindowsLocal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InterfaceByName(%s): %v", dev.Interface, err)
 	}
-	native, ok := dev.Device.(*wgtun.NativeTun)
+	luider, ok := dev.Device.(interface{ LUID() uint64 })
 	if !ok {
-		t.Fatalf("device is %T, want *wgtun.NativeTun", dev.Device)
+		t.Fatalf("device is %T, want one with a LUID method", dev.Device)
 	}
-	luid := winipcfg.LUID(native.LUID())
+	luid := winipcfg.LUID(luider.LUID())
 	rows, err := winipcfg.GetIPForwardTable2(windows.AF_INET)
 	if err != nil {
 		t.Fatalf("GetIPForwardTable2: %v", err)

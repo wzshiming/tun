@@ -6,10 +6,7 @@ import (
 	"net/netip"
 
 	"golang.org/x/sys/windows"
-	wgtun "golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
-
-	"github.com/wzshiming/tun/wintun"
 )
 
 // adapterGUID is the adapter's GUID, fixed per name so Windows keeps one network profile for it and adapters of different names never share one.
@@ -25,23 +22,18 @@ func adapterGUID(cfg Config) windows.GUID {
 
 // openLocal creates and configures the Wintun adapter in this process, which must be elevated.
 func openLocal(ctx context.Context, cfg Config) (*Device, error) {
-	if err := wintun.Load(); err != nil {
-		return nil, err
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	wgtun.WintunTunnelType = cfg.name()
 	guid := adapterGUID(cfg)
-	dev, err := wgtun.CreateTUNWithRequestedGUID(cfg.name(), &guid, cfg.MTU)
+	dev, err := newWintunDevice(cfg.name(), &guid, cfg.MTU)
 	if err != nil {
 		return nil, err
 	}
 	name, err := dev.Name()
 	var warnings []string
 	if err == nil {
-		luid := winipcfg.LUID(dev.(*wgtun.NativeTun).LUID())
-		warnings, err = configureVia(ctx, cfg, luidConfigurer(luid))
+		warnings, err = configureVia(ctx, cfg, luidConfigurer(dev.LUID()))
 	}
 	if err != nil {
 		dev.Close()

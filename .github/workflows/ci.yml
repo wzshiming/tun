@@ -75,7 +75,7 @@ jobs:
         shell: bash
         run: |
           TUN_E2E=1 TUN_E2E_RUNAS=1 "$RUNNER_TEMP/tun-e2e.test.exe" -test.v -test.timeout 6m | tee "$RUNNER_TEMP/tun-e2e.log"
-          for t in TestE2EWindowsLocal TestE2EWindowsHelper TestE2EWindowsHelperRunas TestE2EWintunLoad \
+          for t in TestE2EWindowsLocal TestE2EWindowsHelper TestE2EWindowsHelperRunas \
             TestE2EBypassDefaultInterfaceIsUpAndNotLoopback TestE2EBypassBindsUDPToIPv4DefaultInterface; do
             grep -qF -- "--- PASS: $t (" "$RUNNER_TEMP/tun-e2e.log" || { echo "$t did not pass"; exit 1; }
           done

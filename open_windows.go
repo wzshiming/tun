@@ -8,16 +8,12 @@ import (
 	"path/filepath"
 
 	"github.com/wzshiming/tun/internal/hook"
-	"github.com/wzshiming/tun/wintun"
 )
 
 // Open prompts for administrator privileges through UAC unless the process is elevated.
 func Open(ctx context.Context, cfg Config) (*Device, error) {
 	if err := validate(cfg); err != nil {
 		return nil, err
-	}
-	if !wintun.Embedded {
-		return nil, ErrUnsupported
 	}
 	if hook.IsElevated() {
 		return openLocal(ctx, cfg)

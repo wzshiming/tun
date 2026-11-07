@@ -16,7 +16,6 @@ import (
 	"github.com/wzshiming/elevate"
 
 	"github.com/wzshiming/tun/internal/hook"
-	"github.com/wzshiming/tun/wintun"
 )
 
 // ttWinHelperSwap makes the process look unelevated and routes hook.Launch to fake; it returns the recorded launches.
@@ -31,13 +30,6 @@ func ttWinHelperSwap(t *testing.T, fake func(ctx context.Context, exe string, ar
 		return fake(ctx, exe, args)
 	}
 	return &calls
-}
-
-func ttWinHelperNeedWintun(t *testing.T) {
-	t.Helper()
-	if !wintun.Embedded {
-		t.Skip("no Wintun DLL embedded for this architecture")
-	}
 }
 
 func TestHelperRejectsWrongArgCounts(t *testing.T) {
@@ -88,7 +80,6 @@ func TestOpenReturnsValidationErrorWithoutElevating(t *testing.T) {
 }
 
 func TestOpenElevatesTestBinaryAndReturnsDenied(t *testing.T) {
-	ttWinHelperNeedWintun(t)
 	calls := ttWinHelperSwap(t, func(context.Context, string, []string) (elevate.Proc, error) { return nil, elevate.ErrDenied })
 	if _, err := Open(t.Context(), ttDefaultConfig()); !errors.Is(err, ErrDenied) {
 		t.Errorf("Open = %v, want ErrDenied", err)
@@ -111,7 +102,6 @@ func TestOpenElevatesTestBinaryAndReturnsDenied(t *testing.T) {
 }
 
 func TestOpenRelaysThroughHelper(t *testing.T) {
-	ttWinHelperNeedWintun(t)
 	fake := ttRelayNewFakeDev()
 	open := func(context.Context, Config) (*Device, error) {
 		return &Device{Device: fake, Interface: "tun", Warnings: []string{"w1"}}, nil
@@ -144,7 +134,6 @@ func TestOpenRelaysThroughHelper(t *testing.T) {
 }
 
 func TestOpenReportsHelperExitCode(t *testing.T) {
-	ttWinHelperNeedWintun(t)
 	ttWinHelperSwap(t, ttRelayExitedLaunch(&elevate.ExitError{Code: 7, Stderr: "boom"}))
 	if _, err := Open(t.Context(), ttDefaultConfig()); err == nil || !strings.Contains(err.Error(), "code 7") {
 		t.Errorf("Open = %v, want an error naming exit code 7", err)
@@ -152,7 +141,6 @@ func TestOpenReportsHelperExitCode(t *testing.T) {
 }
 
 func TestOpenReturnsCtxErrWhileWaiting(t *testing.T) {
-	ttWinHelperNeedWintun(t)
 	prompt := make(chan struct{})
 	t.Cleanup(func() { close(prompt) })
 	ttWinHelperSwap(t, func(context.Context, string, []string) (elevate.Proc, error) {
