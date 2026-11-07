@@ -32,7 +32,14 @@ func newWintunDevice(name string, guid *windows.GUID, mtu int) (*wintunDevice, e
 }
 
 // LUID returns the adapter's LUID, or 0 once closed.
-func (d *wintunDevice) LUID() uint64 { return d.adapter.LUID() }
+func (d *wintunDevice) LUID() uint64 {
+	d.running.RLock()
+	defer d.running.RUnlock()
+	if d.closed.Load() {
+		return 0
+	}
+	return d.adapter.LUID()
+}
 
 // wintunRing is a packetRing over a Wintun session; end also closes the adapter.
 type wintunRing struct {
