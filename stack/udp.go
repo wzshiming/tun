@@ -99,11 +99,16 @@ func (g *gateway) newUDPConn(target, client netip.AddrPort, netProto tcpip.Netwo
 	return c
 }
 
-// ReadFrom returns the next datagram and the destination the client sent it to.
+// ReadFrom returns the next datagram and the destination the client sent it to; a closed session or a passed deadline fails it even with datagrams queued.
 func (c *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	select {
 	case <-c.closed:
 		return 0, nil, net.ErrClosed
+	default:
+	}
+	select {
+	case <-c.readDeadline.wait():
+		return 0, nil, os.ErrDeadlineExceeded
 	default:
 	}
 	select {

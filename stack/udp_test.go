@@ -386,20 +386,38 @@ func TestUDPSessionReadDeadlineTimesOutAndCanBeExtended(t *testing.T) {
 	}
 }
 
+// udpFixQueued returns a session conn outside any stack with n datagrams queued, so a read racing them against another wake-up shows within n reads.
+func udpFixQueued(n int) *udpConn {
+	c := &udpConn{
+		queue:        make(chan datagram, n),
+		readDeadline: deadline{passed: make(chan struct{})},
+		closed:       make(chan struct{}),
+		onClose:      func() {},
+	}
+	for range n {
+		c.queue <- datagram{payload: []byte("queued"), target: udpFamilies[0].first}
+	}
+	return c
+}
+
 func TestUDPSessionReadFromAfterCloseReturnsErrClosed(t *testing.T) {
-	errs := make(chan error, 1)
-	env, _ := udpSessionServe(t, func(_ context.Context, f Flow) {
-		conn, err := f.Accept()
-		if err != nil {
-			errs <- err
-			return
+	c := udpFixQueued(64)
+	c.Close()
+	for i := range 64 {
+		if _, _, err := c.ReadFrom(make([]byte, 512)); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("ReadFrom %d after Close with datagrams queued = %v, want net.ErrClosed", i+1, err)
 		}
-		conn.Close()
-		errs <- udpReadFrom(conn).err
-	})
-	testSend(t, env.dialUDP(t, "10.0.0.9:5000"), "open")
-	if err := testReceive(t, errs, "ReadFrom after Close"); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("ReadFrom after Close = %v, want net.ErrClosed", err)
+	}
+}
+
+func TestUDPSessionReadFromPastDeadlineTimesOutWithDatagramQueued(t *testing.T) {
+	c := udpFixQueued(64)
+	c.SetReadDeadline(time.Now().Add(-time.Second))
+	for i := range 64 {
+		_, _, err := c.ReadFrom(make([]byte, 512))
+		if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+			t.Fatalf("ReadFrom %d past its deadline with datagrams queued = %v, want a timeout net.Error", i+1, err)
+		}
 	}
 }
 
