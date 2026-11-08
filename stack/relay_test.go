@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -315,6 +316,19 @@ func (l *coneListener) stall() {
 	l.mu.Unlock()
 }
 
+// closes counts the Close calls on every coneSocket l opened.
+func (l *coneListener) closes() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, pc := range l.sockets {
+		if s, ok := pc.(*coneSocket); ok {
+			n += int(s.closes.Load())
+		}
+	}
+	return n
+}
+
 func (l *coneListener) recorded() []fakeDial {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -359,6 +373,7 @@ type coneSocket struct {
 	*net.UDPConn
 	closed     chan struct{}
 	closeOnce  sync.Once
+	closes     atomic.Int32
 	targets    chan<- *coneTarget
 	mu         sync.Mutex
 	byTarget   map[netip.AddrPort]*coneTarget
@@ -401,6 +416,7 @@ func (s *coneSocket) ReadFrom(b []byte) (int, net.Addr, error) {
 }
 
 func (s *coneSocket) Close() error {
+	s.closes.Add(1)
 	s.closeOnce.Do(func() { close(s.closed) })
 	return s.UDPConn.Close()
 }
@@ -579,6 +595,21 @@ func TestRelayConeIdleEndsSessionAndNextDatagramListensAgain(t *testing.T) {
 			t.Fatalf("ListenPacket called %d times within %v of sending after the idle end, want a new session listening again", listener.opens(), testWait)
 		}
 		testSend(t, conn, "again")
+	}
+}
+
+func TestRelayConeClosesEachSessionSocketOnce(t *testing.T) {
+	const sessions = 5
+	env, listener, _ := coneServe(t, &Relay{})
+	fam := udpFamilies[0]
+	for range sessions {
+		testSendTo(t, env.listenUDP(t, fam.client), []byte("open"), fam.first)
+		listener.nextCone(t, env).recv(t)
+	}
+	env.cancel()
+	env.wait(t)
+	if got := listener.closes(); got != sessions {
+		t.Fatalf("Relay called Close %d times on the sockets of %d sessions, want once each", got, sessions)
 	}
 }
 

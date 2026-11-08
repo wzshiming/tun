@@ -87,10 +87,10 @@ func (r *Relay) serveCone(ctx context.Context, conn net.Conn, client netip.AddrP
 	if err != nil {
 		return
 	}
-	end := func() {
+	end := sync.OnceFunc(func() {
 		conn.Close()
 		remote.Close()
-	}
+	})
 	stop := context.AfterFunc(ctx, end)
 	defer stop()
 	touch, stopIdle := afterIdle(r.idle(), end)
