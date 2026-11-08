@@ -1,6 +1,6 @@
 # tun
 
-`github.com/wzshiming/tun` captures a machine's IP traffic into a TUN device and hands every flow to a Go handler of your choice. It opens the TUN device with the privileges it needs (prompting the user when the process is not root/administrator), installs routes that capture everything except what must escape, runs a gVisor userspace network stack that turns packets back into TCP connections and UDP sessions and dispatches them by network and destination port, ships handlers that relay TCP and UDP (full cone) through a dialer, DNS on UDP port 53 over TCP, and provides a dialer and a listen config bound to the physical interface so forwarded traffic does not loop back into the TUN. It runs on macOS, Linux and Windows 10+.
+`github.com/wzshiming/tun` captures a machine's IP traffic into a TUN device and hands every flow to a Go handler of your choice. It opens the TUN device with the privileges it needs (prompting the user when the process is not root/administrator), installs routes that capture everything except what must escape, runs a gVisor userspace network stack that turns packets back into TCP connections and UDP sessions and dispatches them by network and destination port, ships handlers that relay TCP through a `Dialer` and UDP full cone through a `PacketListener` (symmetric through the `Dialer` without one), DNS on UDP port 53 over TCP, and provides a dialer and a listen config bound to the physical interface so forwarded traffic does not loop back into the TUN. It runs on macOS, Linux and Windows 10+.
 
 ## Install
 
@@ -31,7 +31,7 @@ go get github.com/wzshiming/tun
 - `func DefaultMux(dialer Dialer) *Mux` — `Relay` for every TCP and UDP port, except `DNS` for UDP port 53. When `dialer` also implements `PacketListener`, the UDP `Relay` gets it as `Packets` and relays full cone; a wrapper around a dialer must forward `ListenPacket` to keep that.
 - `type Options struct { MTU int; Addresses []netip.Prefix }`
 - `func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options) error` — hands every captured flow of `dev`, a `golang.zx2c4.com/wireguard/tun` device such as `(*tun.Device).Device`, to `handler` (nil refuses them all, UDP with ICMP port unreachable); returns when `ctx` ends or the device fails, once every `ServeFlow` has returned, and closes the device.
-- `func ClientAddr(ctx context.Context) net.Addr` — inside `DialContext`, the captured flow's source (`*net.TCPAddr` or `*net.UDPAddr`), nil when absent; `WithClientAddr` sets it.
+- `func ClientAddr(ctx context.Context) net.Addr` — inside `DialContext` or `ListenPacket`, the captured flow's source (`*net.TCPAddr` or `*net.UDPAddr`), nil when absent; `WithClientAddr` sets it.
 
 ### `bypass` — escaping the TUN
 
@@ -117,7 +117,7 @@ Traffic forwarded to the real network must not be captured again. The `bypass` d
 
 ## Command `cmd/tun`
 
-`cmd/tun` captures the traffic, forwards every flow directly through the physical interface, UDP full cone, and logs it: the flow (`<client> -> <network> <address>`), dial errors, and on close the bytes read and written and the duration; a UDP session logs `<client> -> udp <address>` once for each target it sends to.
+`cmd/tun` captures the traffic, forwards every flow directly through the physical interface, UDP full cone, and logs it: the flow (`<client> -> <network> <address>`), dial and listen errors, and on close the bytes read and written and the duration; a UDP session logs `<client> -> udp <address>` once for each target it sends to.
 
 ```sh
 go run ./cmd/tun [flags]
