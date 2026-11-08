@@ -3,6 +3,8 @@ package bypass
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -92,6 +94,56 @@ func TestNewListenConfigControlRefusesBareNetworkWithoutFamily(t *testing.T) {
 func TestNewListenConfigWithoutCaptureHasNoControl(t *testing.T) {
 	if lc := NewListenConfig(nil); lc == nil || lc.Control != nil {
 		t.Errorf("NewListenConfig(nil) = %+v, want a zero-value ListenConfig", lc)
+	}
+}
+
+func TestNewListenConfigListenPacketBareUDPReachesControlFamilySuffixed(t *testing.T) {
+	l, b := &ttLookup{}, &ttBinder{}
+	lc := newListenConfig(l.lookup, b.bind, ttNow)
+	var networks []string
+	control := lc.Control
+	lc.Control = func(network, address string, c syscall.RawConn) error {
+		networks = append(networks, network)
+		return control(network, address, c)
+	}
+	conn, err := lc.ListenPacket(t.Context(), "udp", ":0")
+	if err != nil {
+		t.Fatalf("ListenPacket(udp, :0) error = %v, want nil", err)
+	}
+	conn.Close()
+	if len(networks) != 1 || (networks[0] != "udp4" && networks[0] != "udp6") {
+		t.Fatalf("Control networks = %q for ListenPacket(udp, :0), want one udp4 or udp6", networks)
+	}
+	if want := []bool{networks[0] == "udp6"}; !slices.Equal(l.families, want) {
+		t.Errorf("lookup families = %v after Control saw %s, want %v", l.families, networks[0], want)
+	}
+}
+
+func TestNewListenConfigListenUnixSucceeds(t *testing.T) {
+	dir, err := os.MkdirTemp("", "bp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "s")
+	ln, err := NewListenConfig(ttCaptureAll).Listen(t.Context(), "unix", path)
+	if err != nil {
+		t.Fatalf("Listen(unix, %s) with a capture error = %v, want nil", path, err)
+	}
+	ln.Close()
+}
+
+func TestNewListenConfigControlBindsNoUnixSocket(t *testing.T) {
+	for _, network := range []string{"unix", "unixgram", "unixpacket"} {
+		t.Run(network, func(t *testing.T) {
+			l, b := &ttLookup{}, &ttBinder{}
+			if err := ttListenControl(t, l, b)(network, "/tmp/s", &ttRawConn{}); err != nil {
+				t.Errorf("Control(%s, /tmp/s) error = %v, want nil", network, err)
+			}
+			if len(l.families) != 0 || len(b.calls) != 0 {
+				t.Errorf("lookup families %v, bind calls %+v, want neither", l.families, b.calls)
+			}
+		})
 	}
 }
 

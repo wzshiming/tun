@@ -48,9 +48,11 @@ func newDialer(capture []netip.Prefix, lookup lookupFunc, bind bindFunc, now fun
 	return d
 }
 
-// NewListenConfig returns a listen config that binds every socket to the default-route interface of its family.
-// The family comes from the network's 4 or 6 suffix, else from the listen address's literal IP; a bare network
-// with an unspecified or host-name address fails, as does a family without a default route (ErrNoDefaultRoute).
+// NewListenConfig returns a listen config that binds every IP socket to the default-route interface of its family;
+// Unix sockets are left unbound. Listen on "udp4"/"udp6" (or "tcp4"/"tcp6") or on a literal IP address to pick the family.
+// A bare "udp" or "tcp" with a wildcard or host-name address takes the family net chooses, usually IPv6 on a dual-stack
+// host, so it binds to the IPv6 default interface and fails with ErrNoDefaultRoute on a host routing only IPv4.
+// Any family without a default route fails the same way.
 // The interface is fixed when the socket is created: a later default-route change does not move the socket.
 // An empty capture, or a platform that cannot bind, yields a zero-value ListenConfig.
 func NewListenConfig(capture []netip.Prefix) *net.ListenConfig {
@@ -64,6 +66,10 @@ func newListenConfig(lookup lookupFunc, bind bindFunc, now func() time.Time) *ne
 	b := &defaultBinder{lookup: lookup, bind: bind, now: now}
 	return &net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
+			switch network {
+			case "unix", "unixgram", "unixpacket":
+				return nil
+			}
 			ipv6, err := listenFamily(network, address)
 			if err != nil {
 				return err
@@ -73,6 +79,8 @@ func newListenConfig(lookup lookupFunc, bind bindFunc, now func() time.Time) *ne
 	}
 }
 
+// listenFamily takes the family from the network's 4 or 6 suffix, which net always adds before calling Control for IP
+// listens, else from address's literal IP; it fails for anything else, reachable only by calling Control directly.
 func listenFamily(network, address string) (ipv6 bool, err error) {
 	switch network {
 	case "tcp4", "udp4", "ip4":
