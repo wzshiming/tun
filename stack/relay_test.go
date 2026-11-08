@@ -255,6 +255,8 @@ type coneListener struct {
 	sockets []net.PacketConn
 	opened  chan net.PacketConn
 	targets chan *coneTarget
+	// refuse is a target address every socket of l fails to write to.
+	refuse netip.AddrPort
 }
 
 func newConeListener(t *testing.T) *coneListener {
@@ -266,7 +268,7 @@ func newConeListener(t *testing.T) *coneListener {
 func (l *coneListener) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
 	l.mu.Lock()
 	l.calls = append(l.calls, fakeDial{network: network, address: address, client: ClientAddr(ctx)})
-	err, stalled := l.err, l.stalled
+	err, stalled, refuse := l.err, l.stalled, l.refuse
 	l.mu.Unlock()
 	if err != nil {
 		return nil, err
@@ -279,7 +281,7 @@ func (l *coneListener) ListenPacket(ctx context.Context, network, address string
 		if err != nil {
 			return nil, err
 		}
-		pc = &coneSocket{UDPConn: conn, closed: make(chan struct{}), targets: l.targets, byTarget: make(map[netip.AddrPort]*coneTarget), byLoopback: make(map[netip.AddrPort]netip.AddrPort)}
+		pc = &coneSocket{UDPConn: conn, closed: make(chan struct{}), targets: l.targets, refuse: refuse, byTarget: make(map[netip.AddrPort]*coneTarget), byLoopback: make(map[netip.AddrPort]netip.AddrPort)}
 	}
 	l.mu.Lock()
 	l.sockets = append(l.sockets, pc)
@@ -313,6 +315,12 @@ func (l *coneListener) fail(err error) {
 func (l *coneListener) stall() {
 	l.mu.Lock()
 	l.stalled = true
+	l.mu.Unlock()
+}
+
+func (l *coneListener) refuseWrites(addr netip.AddrPort) {
+	l.mu.Lock()
+	l.refuse = addr
 	l.mu.Unlock()
 }
 
@@ -375,6 +383,7 @@ type coneSocket struct {
 	closeOnce  sync.Once
 	closes     atomic.Int32
 	targets    chan<- *coneTarget
+	refuse     netip.AddrPort
 	mu         sync.Mutex
 	byTarget   map[netip.AddrPort]*coneTarget
 	byLoopback map[netip.AddrPort]netip.AddrPort
@@ -385,6 +394,9 @@ func (s *coneSocket) WriteTo(b []byte, addr net.Addr) (int, error) {
 	udpAddr, ok := addr.(*net.UDPAddr)
 	if !ok {
 		return 0, fmt.Errorf("coneSocket: write to %T %v", addr, addr)
+	}
+	if s.refuse.IsValid() && relayUnmap(udpAddr.AddrPort()) == s.refuse {
+		return 0, fmt.Errorf("coneSocket: write to %v refused", addr)
 	}
 	target, created, err := s.standIn(udpAddr.AddrPort())
 	if err != nil {
@@ -610,6 +622,45 @@ func TestRelayConeClosesEachSessionSocketOnce(t *testing.T) {
 	env.wait(t)
 	if got := listener.closes(); got != sessions {
 		t.Fatalf("Relay called Close %d times on the sockets of %d sessions, want once each", got, sessions)
+	}
+}
+
+func TestRelayConeWriteFailureDropsOnlyThatDatagram(t *testing.T) {
+	fam := udpFamilies[0]
+	env, listener, _ := coneServe(t, &Relay{})
+	listener.refuseWrites(fam.second)
+	conn := env.listenUDP(t, fam.client)
+	testSendTo(t, conn, []byte("open"), fam.first)
+	target := listener.nextCone(t, env)
+	target.recv(t)
+	testSendTo(t, conn, []byte("refused"), fam.second)
+	testSendTo(t, conn, []byte("after"), fam.first)
+	if got := target.recv(t); string(got) != "after" {
+		t.Fatalf("target got %q, want %q relayed after the refused datagram", got, "after")
+	}
+	if n := listener.opens(); n != 1 {
+		t.Fatalf("ListenPacket called %d times, want the session kept on its one socket after a failed WriteTo", n)
+	}
+}
+
+func TestRelayConeReadErrorEndsSessionAndListensAgain(t *testing.T) {
+	env, listener, _ := coneServe(t, &Relay{})
+	conn := env.dialUDP(t, "10.0.0.9:5000")
+	testSend(t, conn, "open")
+	target := listener.nextCone(t, env)
+	target.recv(t)
+	// A past deadline fails Relay's pending ReadFrom as a socket error would.
+	target.socket.SetReadDeadline(time.Now().Add(-time.Second))
+	select {
+	case <-target.gone():
+	case <-time.After(testWait):
+		t.Fatalf("session socket still open %v after its ReadFrom failed, want Relay to end the session", testWait)
+	}
+	for deadline := time.Now().Add(testWait); listener.opens() < 2; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("ListenPacket called %d times within %v of resending, want the ended session's next datagram to listen again", listener.opens(), testWait)
+		}
+		testSend(t, conn, "again")
 	}
 }
 
@@ -914,6 +965,25 @@ func TestRelayUDPSlowDialDoesNotDelayOtherTargets(t *testing.T) {
 	}
 	if got := dialer.next(t, env).recv(t); string(got) != "to slow" {
 		t.Fatalf("slow target got %q once dialled, want %q", got, "to slow")
+	}
+}
+
+func TestRelayUDPFullQueueDropsInsteadOfDelayingOtherTargets(t *testing.T) {
+	fam := udpFamilies[0]
+	env, dialer := udpRelayServe(t, &Relay{})
+	dialer.slowDial(fam.second.String(), 3*time.Second)
+	conn := env.listenUDP(t, fam.client)
+	for range 4 * relayQueueLen {
+		testSendTo(t, conn, []byte("to slow"), fam.second)
+	}
+	start := time.Now()
+	testSendTo(t, conn, []byte("to fast"), fam.first)
+	fast := dialer.next(t, env).recv(t)
+	if elapsed := time.Since(start); elapsed > relayStallBound {
+		t.Fatalf("datagram to %v reached a target %v after sending while %d datagrams waited on a 3s dial to %v, want within %v", fam.first, elapsed.Round(time.Millisecond), 4*relayQueueLen, fam.second, relayStallBound)
+	}
+	if string(fast) != "to fast" {
+		t.Fatalf("first target reached got %q, want %q", fast, "to fast")
 	}
 }
 
