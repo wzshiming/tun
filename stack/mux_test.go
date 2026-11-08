@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -153,6 +154,95 @@ func TestMuxHandleParsesPattern(t *testing.T) {
 			}
 			if _, ok := m.handlers[want]; !ok || len(m.handlers) != 1 {
 				t.Fatalf("Handle(%q) registered %v, want only %+v", tc.pattern, m.handlers, want)
+			}
+		})
+	}
+}
+
+func TestMuxHandleStoresIPv4MappedPrefixAsIPv4(t *testing.T) {
+	for _, tc := range []struct {
+		pattern string
+		prefix  string
+		port    uint16
+	}{
+		{"::ffff:10.0.0.0/104", "10.0.0.0/8", 0},
+		{"::ffff:10.0.0.1/128", "10.0.0.1/32", 0},
+		{"[::ffff:10.0.0.0/104]:53", "10.0.0.0/8", 53},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			m := NewMux()
+			m.Handle("udp", tc.pattern, HandlerFunc(func(context.Context, Flow) {}))
+			want := muxRoute{network: "udp", prefix: netip.MustParsePrefix(tc.prefix), port: tc.port}
+			if _, ok := m.handlers[want]; !ok || len(m.handlers) != 1 {
+				t.Fatalf("Handle(%q) registered %v, want only %+v", tc.pattern, m.handlers, want)
+			}
+		})
+	}
+}
+
+func TestMuxRoutesIPv4TargetToIPv4MappedPrefix(t *testing.T) {
+	var served []string
+	m := NewMux()
+	m.Handle("tcp", "::ffff:10.0.0.0/104", testNamed("mapped", &served))
+	f := testFlowTo("tcp", "10.1.2.3:80")
+	m.ServeFlow(t.Context(), f)
+	if len(served) != 1 || served[0] != "mapped" || f.rejected {
+		t.Fatalf("flow to 10.1.2.3:80 served by %q, rejected %v; want the ::ffff:10.0.0.0/104 handler", served, f.rejected)
+	}
+}
+
+func TestMuxHandlePanicsOnIPv4MappedTwinOfIPv4Prefix(t *testing.T) {
+	noop := HandlerFunc(func(context.Context, Flow) {})
+	m := NewMux()
+	m.Handle("udp", "10.0.0.0/8", noop)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Handle(\"::ffff:10.0.0.0/104\") after \"10.0.0.0/8\" did not panic as a duplicate")
+		}
+	}()
+	m.Handle("udp", "::ffff:10.0.0.0/104", noop)
+}
+
+// testHandlePanic returns the message Handle(network, pattern) panics with, failing t if it does not.
+func testHandlePanic(t *testing.T, pattern string) (msg string) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("Handle(%q) did not panic", pattern)
+		}
+		msg = fmt.Sprint(r)
+	}()
+	NewMux().Handle("tcp", pattern, HandlerFunc(func(context.Context, Flow) {}))
+	return ""
+}
+
+func TestMuxHandlePanicsOnIPv4MappedPrefixShorterThan96(t *testing.T) {
+	if msg := testHandlePanic(t, "::ffff:0.0.0.0/90"); !strings.Contains(msg, "IPv4-mapped") {
+		t.Fatalf("Handle(\"::ffff:0.0.0.0/90\") panicked with %q, want it to name the IPv4-mapped prefix", msg)
+	}
+}
+
+func TestMuxHandleInvalidHostPanicReportsHostError(t *testing.T) {
+	for _, tc := range []struct{ pattern, want string }{
+		{"10.0.0.0/33", "prefix length out of range"},
+		{"1.2.3", "IPv4 address too short"},
+		{"10.0.0.0/08", "bad bits after slash"},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			msg := testHandlePanic(t, tc.pattern)
+			if !strings.Contains(msg, tc.want) || strings.Contains(msg, "missing port") {
+				t.Fatalf("Handle(%q) panicked with %q, want the host error %q, not missing port", tc.pattern, msg, tc.want)
+			}
+		})
+	}
+}
+
+func TestMuxHandlePanicsOnZonedAddress(t *testing.T) {
+	for _, pattern := range []string{"fe80::1%eth0", "[fe80::1%eth0]:53"} {
+		t.Run(pattern, func(t *testing.T) {
+			if msg := testHandlePanic(t, pattern); !strings.Contains(msg, "zone") {
+				t.Fatalf("Handle(%q) panicked with %q, want it to mention the zone", pattern, msg)
 			}
 		})
 	}

@@ -44,7 +44,7 @@ func (h HandlerFunc) ServeFlow(ctx context.Context, f Flow) { h(ctx, f) }
 // A UDP session goes by its first datagram's destination, its handler then serving its datagrams to every target.
 //
 // A pattern is "" for any address and port, host for that host and any port, host:port, or :port for any address and that port.
-// host is an IP address or a CIDR prefix, its host bits masked off, IPv6 in brackets when a port follows; an IPv4-mapped IPv6 address is taken as IPv4.
+// host is an IP address or a CIDR prefix, its host bits masked off, IPv6 in brackets when a port follows; an IPv4-mapped IPv6 address, or prefix of /96 or longer, is taken as IPv4; a zone is rejected.
 // Port 0 means any port.
 //
 // The registered hosts form layers, longest prefix first, an address being a full-length prefix, and the any-address layer last.
@@ -125,12 +125,13 @@ func parseMuxPattern(pattern string) (netip.Prefix, uint16, error) {
 	if strings.HasPrefix(whole, "[") && strings.HasSuffix(whole, "]") {
 		whole = whole[1 : len(whole)-1]
 	}
-	if prefix, err := parseMuxHost(whole); err == nil {
+	prefix, hostErr := parseMuxHost(whole)
+	if hostErr == nil {
 		return prefix, 0, nil
 	}
 	host, portText, err := net.SplitHostPort(pattern)
 	if err != nil {
-		return netip.Prefix{}, 0, err
+		return netip.Prefix{}, 0, hostErr
 	}
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil {
@@ -139,25 +140,35 @@ func parseMuxPattern(pattern string) (netip.Prefix, uint16, error) {
 	if host == "" {
 		return netip.Prefix{}, uint16(port), nil
 	}
-	prefix, err := parseMuxHost(host)
+	prefix, err = parseMuxHost(host)
 	if err != nil {
 		return netip.Prefix{}, 0, err
 	}
 	return prefix, uint16(port), nil
 }
 
-// parseMuxHost parses an IP address as its full-length prefix, or a CIDR prefix masked.
+// parseMuxHost parses an IP address as its full-length prefix, or a CIDR prefix masked, an IPv4-mapped one as IPv4.
 func parseMuxHost(host string) (netip.Prefix, error) {
 	if strings.Contains(host, "/") {
 		prefix, err := netip.ParsePrefix(host)
 		if err != nil {
 			return netip.Prefix{}, err
 		}
+		// Checked before masking, which clears the ::ffff marker of a prefix shorter than /96.
+		if addr := prefix.Addr(); addr.Is4In6() {
+			if prefix.Bits() < 96 {
+				return netip.Prefix{}, fmt.Errorf("IPv4-mapped prefix %s shorter than /96", prefix)
+			}
+			prefix = netip.PrefixFrom(addr.Unmap(), prefix.Bits()-96)
+		}
 		return prefix.Masked(), nil
 	}
 	addr, err := netip.ParseAddr(host)
 	if err != nil {
 		return netip.Prefix{}, err
+	}
+	if addr.Zone() != "" {
+		return netip.Prefix{}, fmt.Errorf("address %s has zone %q", addr, addr.Zone())
 	}
 	addr = addr.Unmap()
 	return netip.PrefixFrom(addr, addr.BitLen()), nil
