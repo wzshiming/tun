@@ -405,7 +405,9 @@ func (s *coneSocket) Close() error {
 	return s.UDPConn.Close()
 }
 
-func (s *coneSocket) loopback() netip.AddrPort { return relayUnmap(s.UDPConn.LocalAddr().(*net.UDPAddr).AddrPort()) }
+func (s *coneSocket) loopback() netip.AddrPort {
+	return relayUnmap(s.UDPConn.LocalAddr().(*net.UDPAddr).AddrPort())
+}
 
 // standIn returns the coneTarget standing for addr, opening it first if new.
 func (s *coneSocket) standIn(addr netip.AddrPort) (target *coneTarget, created bool, err error) {
@@ -444,7 +446,9 @@ type coneTarget struct {
 	addr   netip.AddrPort
 }
 
-func (tg *coneTarget) loopback() netip.AddrPort { return relayUnmap(tg.remote.LocalAddr().(*net.UDPAddr).AddrPort()) }
+func (tg *coneTarget) loopback() netip.AddrPort {
+	return relayUnmap(tg.remote.LocalAddr().(*net.UDPAddr).AddrPort())
+}
 
 func (tg *coneTarget) recv(t *testing.T) []byte {
 	t.Helper()
