@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"slices"
 	"sync"
 	"testing"
@@ -226,6 +227,10 @@ var relayModes = []relayMode{
 		env, dialer := udpRelayServe(t, relay)
 		return env, relayDialled{dialer}
 	}},
+	{"full cone", func(t *testing.T, relay *Relay) (*testEnv, relayOpener) {
+		env, listener, _ := coneServe(t, relay)
+		return env, listener
+	}},
 }
 
 // relayDialled is the symmetric mode's opener: one dialled conn per target.
@@ -237,6 +242,351 @@ func (d relayDialled) next(t *testing.T, env *testEnv) relayEnd {
 }
 
 func (d relayDialled) opens() int { return len(d.recorded()) }
+
+var _ PacketListener = (*net.ListenConfig)(nil)
+
+// coneListener is a PacketListener recording each call and answering it with a new coneSocket, or with err once failing, or a coneStalled once stalled.
+type coneListener struct {
+	mu      sync.Mutex
+	calls   []fakeDial
+	err     error
+	stalled bool
+	sockets []net.PacketConn
+	opened  chan net.PacketConn
+	targets chan *coneTarget
+}
+
+func newConeListener(t *testing.T) *coneListener {
+	l := &coneListener{opened: make(chan net.PacketConn, 16), targets: make(chan *coneTarget, 16)}
+	t.Cleanup(l.closeAll)
+	return l
+}
+
+func (l *coneListener) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
+	l.mu.Lock()
+	l.calls = append(l.calls, fakeDial{network: network, address: address, client: ClientAddr(ctx)})
+	err, stalled := l.err, l.stalled
+	l.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	var pc net.PacketConn
+	if stalled {
+		pc = coneStalled{&stalledConn{writing: make(chan struct{}), closed: make(chan struct{})}}
+	} else {
+		conn, err := coneLoopback()
+		if err != nil {
+			return nil, err
+		}
+		pc = &coneSocket{UDPConn: conn, closed: make(chan struct{}), targets: l.targets, byTarget: make(map[netip.AddrPort]*coneTarget), byLoopback: make(map[netip.AddrPort]netip.AddrPort)}
+	}
+	l.mu.Lock()
+	l.sockets = append(l.sockets, pc)
+	l.mu.Unlock()
+	select {
+	case l.opened <- pc:
+	default:
+	}
+	return pc, nil
+}
+
+// coneLoopback opens an unconnected 127.0.0.1 UDP socket able to carry a 65507-byte datagram.
+func coneLoopback() (*net.UDPConn, error) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		return nil, err
+	}
+	if err := relayRaiseBuffers(conn); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (l *coneListener) fail(err error) {
+	l.mu.Lock()
+	l.err = err
+	l.mu.Unlock()
+}
+
+func (l *coneListener) stall() {
+	l.mu.Lock()
+	l.stalled = true
+	l.mu.Unlock()
+}
+
+func (l *coneListener) recorded() []fakeDial {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.calls)
+}
+
+func (l *coneListener) opens() int { return len(l.recorded()) }
+
+func (l *coneListener) closeAll() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, pc := range l.sockets {
+		pc.Close()
+		if s, ok := pc.(*coneSocket); ok {
+			s.closeStandIns()
+		}
+	}
+}
+
+func (l *coneListener) next(t *testing.T, env *testEnv) relayEnd {
+	t.Helper()
+	return l.nextCone(t, env)
+}
+
+// nextCone returns the next target a socket of l sent its first datagram to.
+func (l *coneListener) nextCone(t *testing.T, env *testEnv) *coneTarget {
+	t.Helper()
+	select {
+	case target := <-l.targets:
+		target.remote.SetDeadline(time.Now().Add(testWait))
+		return target
+	case <-env.done:
+		t.Fatalf("Serve returned %v without Relay sending to a new target", env.err)
+	case <-time.After(testWait):
+		t.Fatalf("Relay sent to no new target within %v", testWait)
+	}
+	return nil
+}
+
+// coneSocket is an unconnected loopback socket on which every target address stands for a loopback socket of its own, a coneTarget.
+type coneSocket struct {
+	*net.UDPConn
+	closed     chan struct{}
+	closeOnce  sync.Once
+	targets    chan<- *coneTarget
+	mu         sync.Mutex
+	byTarget   map[netip.AddrPort]*coneTarget
+	byLoopback map[netip.AddrPort]netip.AddrPort
+}
+
+// WriteTo sends b to the coneTarget standing for addr, announcing it on its first datagram.
+func (s *coneSocket) WriteTo(b []byte, addr net.Addr) (int, error) {
+	udpAddr, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return 0, fmt.Errorf("coneSocket: write to %T %v", addr, addr)
+	}
+	target, created, err := s.standIn(udpAddr.AddrPort())
+	if err != nil {
+		return 0, err
+	}
+	if created {
+		select {
+		case s.targets <- target:
+		default:
+		}
+	}
+	return s.UDPConn.WriteToUDPAddrPort(b, target.loopback())
+}
+
+// ReadFrom returns the next datagram from a coneTarget, from the address it stands for.
+func (s *coneSocket) ReadFrom(b []byte) (int, net.Addr, error) {
+	for {
+		n, from, err := s.UDPConn.ReadFromUDPAddrPort(b)
+		if err != nil {
+			return n, nil, err
+		}
+		s.mu.Lock()
+		addr, ok := s.byLoopback[relayUnmap(from)]
+		s.mu.Unlock()
+		if ok {
+			return n, net.UDPAddrFromAddrPort(addr), nil
+		}
+	}
+}
+
+func (s *coneSocket) Close() error {
+	s.closeOnce.Do(func() { close(s.closed) })
+	return s.UDPConn.Close()
+}
+
+func (s *coneSocket) loopback() netip.AddrPort { return relayUnmap(s.UDPConn.LocalAddr().(*net.UDPAddr).AddrPort()) }
+
+// standIn returns the coneTarget standing for addr, opening it first if new.
+func (s *coneSocket) standIn(addr netip.AddrPort) (target *coneTarget, created bool, err error) {
+	addr = relayUnmap(addr)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if target, ok := s.byTarget[addr]; ok {
+		return target, false, nil
+	}
+	conn, err := coneLoopback()
+	if err != nil {
+		return nil, false, err
+	}
+	target = &coneTarget{remote: conn, socket: s, addr: addr}
+	s.byTarget[addr] = target
+	s.byLoopback[target.loopback()] = addr
+	return target, true, nil
+}
+
+func (s *coneSocket) closeStandIns() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, target := range s.byTarget {
+		target.remote.Close()
+	}
+}
+
+func relayUnmap(ap netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+}
+
+// coneTarget is the loopback socket standing for target address addr on socket.
+type coneTarget struct {
+	remote *net.UDPConn
+	socket *coneSocket
+	addr   netip.AddrPort
+}
+
+func (tg *coneTarget) loopback() netip.AddrPort { return relayUnmap(tg.remote.LocalAddr().(*net.UDPAddr).AddrPort()) }
+
+func (tg *coneTarget) recv(t *testing.T) []byte {
+	t.Helper()
+	datagram, _ := tg.recvFrom(t)
+	return datagram
+}
+
+// recvFrom reads one datagram Relay sent the target and the loopback address it came from.
+func (tg *coneTarget) recvFrom(t *testing.T) ([]byte, netip.AddrPort) {
+	t.Helper()
+	buf := make([]byte, 65535)
+	n, from, err := tg.remote.ReadFromUDPAddrPort(buf)
+	if err != nil {
+		t.Fatalf("target %v read a datagram from Relay: %v", tg.addr, err)
+	}
+	return buf[:n], relayUnmap(from)
+}
+
+func (tg *coneTarget) send(t *testing.T, datagram []byte) {
+	t.Helper()
+	if _, err := tg.remote.WriteToUDPAddrPort(datagram, tg.socket.loopback()); err != nil {
+		t.Fatalf("target %v send a %d-byte datagram: %v", tg.addr, len(datagram), err)
+	}
+}
+
+func (tg *coneTarget) gone() <-chan struct{} { return tg.socket.closed }
+
+// coneStalled is a session socket whose ReadFrom and WriteTo block until Close.
+type coneStalled struct{ *stalledConn }
+
+func (c coneStalled) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, err := c.Read(b)
+	return n, nil, err
+}
+
+func (c coneStalled) WriteTo(b []byte, _ net.Addr) (int, error) { return c.Write(b) }
+
+// coneServe serves relay as the udp fallback with a fresh coneListener as its Packets and a udpRelayDialer as its Dialer.
+func coneServe(t *testing.T, relay *Relay) (*testEnv, *coneListener, *udpRelayDialer) {
+	t.Helper()
+	listener := newConeListener(t)
+	relay.Packets = listener
+	env, dialer := udpRelayServe(t, relay)
+	return env, listener, dialer
+}
+
+func TestRelayConeListensOnceAndRelaysEverySource(t *testing.T) {
+	for _, fam := range udpFamilies {
+		t.Run(fam.name, func(t *testing.T) {
+			env, listener, dialer := coneServe(t, &Relay{})
+			conn := env.listenUDP(t, fam.client)
+			testSendTo(t, conn, []byte("to first"), fam.first)
+			first := listener.nextCone(t, env)
+			gotFirst, firstFrom := first.recvFrom(t)
+			testSendTo(t, conn, []byte("to second"), fam.second)
+			second := listener.nextCone(t, env)
+			gotSecond, secondFrom := second.recvFrom(t)
+			if first.addr != fam.first || string(gotFirst) != "to first" || second.addr != fam.second || string(gotSecond) != "to second" {
+				t.Fatalf("targets got %v %q and %v %q, want %v %q and %v %q", first.addr, gotFirst, second.addr, gotSecond, fam.first, "to first", fam.second, "to second")
+			}
+			if firstFrom != secondFrom {
+				t.Fatalf("targets received from %v and %v, want both from the session's one socket", firstFrom, secondFrom)
+			}
+			wantNetwork := map[string]string{"ipv4": "udp4", "ipv6": "udp6"}[fam.name]
+			calls := listener.recorded()
+			if len(calls) != 1 || calls[0].network != wantNetwork || calls[0].address != ":0" {
+				t.Fatalf("ListenPacket calls %+v, want one (%q, %q)", calls, wantNetwork, ":0")
+			}
+			if got, want := calls[0].client, conn.LocalAddr(); got == nil || fmt.Sprintf("%T %v", got, got) != fmt.Sprintf("%T %v", want, want) {
+				t.Fatalf("ClientAddr(ListenPacket ctx) = %T %v, want the client's %T %v", got, got, want, want)
+			}
+			if dials := dialer.recorded(); len(dials) != 0 {
+				t.Fatalf("dialer.DialContext calls %+v, want none with Packets set", dials)
+			}
+			second.send(t, []byte("from second"))
+			if got, want := testRecvFrom(t, conn), (udpRead{"from second", fam.second, nil}); got != want {
+				t.Fatalf("client got %+v, want %+v", got, want)
+			}
+			first.send(t, []byte("from first"))
+			if got, want := testRecvFrom(t, conn), (udpRead{"from first", fam.first, nil}); got != want {
+				t.Fatalf("client got %+v, want %+v", got, want)
+			}
+			unseen, _, err := first.socket.standIn(fam.unseen)
+			if err != nil {
+				t.Fatalf("stand in for %v: %v", fam.unseen, err)
+			}
+			unseen.send(t, []byte("from unseen"))
+			if got, want := testRecvFrom(t, conn), (udpRead{"from unseen", fam.unseen, nil}); got != want {
+				t.Fatalf("client got %+v from a source it never sent to, want %+v", got, want)
+			}
+			if n := env.dev.unreachable.Load(); n != 0 {
+				t.Fatalf("Serve wrote %d ICMP destination unreachable, want none", n)
+			}
+		})
+	}
+}
+
+func TestRelayConeListenFailureEndsSessionAndListensAgain(t *testing.T) {
+	env, listener, _ := coneServe(t, &Relay{})
+	listener.fail(errors.New("cone test listen failure"))
+	conn := env.dialUDP(t, "10.0.0.9:5000")
+	testSend(t, conn, "first")
+	conn.SetReadDeadline(time.Now().Add(udpRelayQuiet))
+	var netErr net.Error
+	if n, err := conn.Read(make([]byte, 512)); !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("client Read() = %d, %v after a failed ListenPacket, want a timeout with no reply", n, err)
+	}
+	if n := env.dev.unreachable.Load(); n != 0 {
+		t.Fatalf("Serve wrote %d ICMP destination unreachable after a failed ListenPacket, want none", n)
+	}
+	for deadline := time.Now().Add(testWait); listener.opens() < 2; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("ListenPacket called %d times within %v of resending, want the next datagram to start a session listening again", listener.opens(), testWait)
+		}
+		testSend(t, conn, "again")
+	}
+}
+
+func TestRelayConeIdleEndsSessionAndNextDatagramListensAgain(t *testing.T) {
+	env, listener, _ := coneServe(t, &Relay{Idle: 200 * time.Millisecond})
+	conn := env.dialUDP(t, "10.0.0.9:5000")
+	testSend(t, conn, "open")
+	target := listener.nextCone(t, env)
+	target.recv(t)
+	udpRelayExpectClosed(t, target, "session idle past Relay.Idle 200ms")
+	for deadline := time.Now().Add(testWait); listener.opens() < 2; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("ListenPacket called %d times within %v of sending after the idle end, want a new session listening again", listener.opens(), testWait)
+		}
+		testSend(t, conn, "again")
+	}
+}
+
+func TestRelayConeCancelEndsStalledSession(t *testing.T) {
+	env, listener, _ := coneServe(t, &Relay{})
+	listener.stall()
+	testSend(t, env.dialUDP(t, "10.0.0.9:5000"), "datagram")
+	stalled := testReceive(t, listener.opened, "ListenPacket").(coneStalled)
+	testReceive(t, stalled.writing, "Relay's WriteTo on its stalled socket")
+	env.cancel()
+	testReceive(t, stalled.closed, "closing the stalled socket after ctx ended")
+}
 
 // udpRelayServe serves relay, given a fresh udpRelayDialer, as the udp fallback.
 func udpRelayServe(t *testing.T, relay *Relay) (*testEnv, *udpRelayDialer) {
