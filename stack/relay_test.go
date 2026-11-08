@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
 // udpRelayQuiet is how long a client waits before concluding no reply comes.
@@ -355,6 +357,90 @@ func TestRelayUDPDialledReadErrorEndsFlowAndRedials(t *testing.T) {
 		}
 		testSend(t, conn, "again")
 	}
+}
+
+// udpRelayTwoTargets opens a session to Relay{Idle: idle} from one client socket to two targets, each reached by one datagram.
+func udpRelayTwoTargets(t *testing.T, idle time.Duration) (env *testEnv, dialer *udpRelayDialer, conn *gonet.UDPConn, first, second *udpRelayTarget) {
+	t.Helper()
+	env, dialer = udpRelayServe(t, &Relay{Idle: idle})
+	fam := udpFamilies[0]
+	conn = env.listenUDP(t, fam.client)
+	testSendTo(t, conn, []byte("to first"), fam.first)
+	first = dialer.next(t, env)
+	if got := first.recv(t); string(got) != "to first" {
+		t.Fatalf("first target got %q, want %q", got, "to first")
+	}
+	testSendTo(t, conn, []byte("to second"), fam.second)
+	second = dialer.next(t, env)
+	if got := second.recv(t); string(got) != "to second" {
+		t.Fatalf("second target got %q, want %q", got, "to second")
+	}
+	return env, dialer, conn, first, second
+}
+
+func TestRelayUDPSessionDialsOnceEachTargetAndRepliesFromIt(t *testing.T) {
+	fam := udpFamilies[0]
+	env, dialer, conn, first, second := udpRelayTwoTargets(t, 0)
+	testSendTo(t, conn, []byte("again"), fam.first)
+	if got := first.recv(t); string(got) != "again" {
+		t.Fatalf("first target got %q, want the later datagram %q on the same socket", got, "again")
+	}
+	dials := dialer.recorded()
+	client := conn.LocalAddr().String()
+	if len(dials) != 2 || dials[0].address != fam.first.String() || dials[1].address != fam.second.String() {
+		t.Fatalf("dialer.DialContext calls %+v, want one udp dial each to %v and %v", dials, fam.first, fam.second)
+	}
+	for _, dial := range dials {
+		if dial.network != "udp" || dial.client == nil || dial.client.String() != client {
+			t.Fatalf("dial %+v, want network udp tagged with the client %s", dial, client)
+		}
+	}
+	second.send(t, []byte("from second"))
+	if got, want := testRecvFrom(t, conn), (udpRead{"from second", fam.second, nil}); got != want {
+		t.Fatalf("client got %+v, want %+v", got, want)
+	}
+	first.send(t, []byte("from first"))
+	if got, want := testRecvFrom(t, conn), (udpRead{"from first", fam.first, nil}); got != want {
+		t.Fatalf("client got %+v, want %+v", got, want)
+	}
+	if n := env.dev.unreachable.Load(); n != 0 {
+		t.Fatalf("Serve wrote %d ICMP destination unreachable, want none", n)
+	}
+}
+
+func TestRelayUDPReadErrorClosesOnlyThatTargetsSocket(t *testing.T) {
+	fam := udpFamilies[0]
+	env, dialer, conn, first, second := udpRelayTwoTargets(t, 0)
+	// A past deadline fails Relay's pending Read as an ICMP port unreachable would.
+	first.dialled.SetReadDeadline(time.Now().Add(-time.Second))
+	select {
+	case <-first.dialled.closed:
+	case <-time.After(testWait):
+		t.Fatalf("first target's socket still open %v after its Read failed, want it closed", testWait)
+	}
+	testSendTo(t, conn, []byte("still"), fam.second)
+	if got := second.recv(t); string(got) != "still" {
+		t.Fatalf("second target got %q, want %q on its socket kept open", got, "still")
+	}
+	testSendTo(t, conn, []byte("redial"), fam.first)
+	again := dialer.next(t, env)
+	if got := again.recv(t); string(got) != "redial" {
+		t.Fatalf("redialled first target got %q, want %q", got, "redial")
+	}
+	if dials := dialer.recorded(); len(dials) != 3 || dials[2].address != fam.first.String() {
+		t.Fatalf("dialer.DialContext calls %+v, want a third dial to %v", dials, fam.first)
+	}
+	select {
+	case <-second.dialled.closed:
+		t.Fatal("second target's socket closed, want only the failed one closed")
+	default:
+	}
+}
+
+func TestRelayUDPSessionIdleClosesEverySocket(t *testing.T) {
+	_, _, _, first, second := udpRelayTwoTargets(t, 200*time.Millisecond)
+	udpRelayExpectClosed(t, first, "first target of a session idle past Relay.Idle 200ms")
+	udpRelayExpectClosed(t, second, "second target of a session idle past Relay.Idle 200ms")
 }
 
 func TestRelayIdleDefaultsTo60Seconds(t *testing.T) {
