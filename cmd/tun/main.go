@@ -96,7 +96,7 @@ func run(ctx context.Context, cfg tun.Config) error {
 
 type logDialer struct {
 	dialer  *net.Dialer
-	packets *net.ListenConfig
+	packets stack.PacketListener
 }
 
 func (d *logDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -117,12 +117,13 @@ func (d *logDialer) DialContext(ctx context.Context, network, address string) (n
 // ListenPacket opens a UDP session's socket, which logs each target it first sends to as a flow.
 func (d *logDialer) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
 	pc, err := d.packets.ListenPacket(ctx, network, address)
-	if err != nil {
-		return nil, err
-	}
 	client := "unknown"
 	if addr := stack.ClientAddr(ctx); addr != nil {
 		client = addr.String()
+	}
+	if err != nil {
+		log.Printf("%s -> %s %s: %v", client, network, address, err)
+		return nil, err
 	}
 	return &logPacketConn{PacketConn: pc, client: client, seen: make(map[string]bool)}, nil
 }

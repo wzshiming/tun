@@ -51,6 +51,32 @@ func TestLogDialerListenPacketLogsEachNewTargetOnce(t *testing.T) {
 	}
 }
 
+type failingListener struct{ err error }
+
+func (l failingListener) ListenPacket(context.Context, string, string) (net.PacketConn, error) {
+	return nil, l.err
+}
+
+func TestLogDialerListenPacketLogsItsFailure(t *testing.T) {
+	var logged bytes.Buffer
+	flags, out := log.Flags(), log.Writer()
+	log.SetFlags(0)
+	log.SetOutput(&logged)
+	t.Cleanup(func() {
+		log.SetFlags(flags)
+		log.SetOutput(out)
+	})
+	listenErr := errors.New("listen refused")
+	d := &logDialer{packets: failingListener{listenErr}}
+	ctx := stack.WithClientAddr(context.Background(), &net.UDPAddr{IP: net.IPv4(198, 18, 0, 1), Port: 4000})
+	if pc, err := d.ListenPacket(ctx, "udp4", ":0"); !errors.Is(err, listenErr) {
+		t.Fatalf("ListenPacket = %v, %v; want the listener's error", pc, err)
+	}
+	if got, want := logged.String(), "198.18.0.1:4000 -> udp4 :0: listen refused\n"; got != want {
+		t.Errorf("logged %q, want the one line %q", got, want)
+	}
+}
+
 type closeWriteConn struct {
 	net.Conn
 	closedWrite bool
