@@ -36,6 +36,12 @@ var ttCaptureLab = []netip.Prefix{netip.MustParsePrefix("198.18.0.0/15"), netip.
 // ttUDPEchoTarget is a TEST-NET-2 destination whose UDP port ttServeDev relays, which tests redirect to a loopback echo server.
 var ttUDPEchoTarget = netip.MustParseAddrPort("198.51.100.1:5000")
 
+// ttConeSecondTarget is a second echo target on ttUDPEchoTarget's port, and ttConeInjectedSource a source the client never sends to.
+var (
+	ttConeSecondTarget   = netip.MustParseAddrPort("198.51.100.2:5000")
+	ttConeInjectedSource = netip.MustParseAddrPort("198.51.100.3:7")
+)
+
 // ttGate skips the test, which changes the host's interfaces, routes or sockets, unless TUN_E2E=1.
 func ttGate(t *testing.T) {
 	t.Helper()
@@ -115,12 +121,12 @@ func ttOpen(t *testing.T, ctx context.Context, cfg tun.Config) *tun.Device {
 	return dev
 }
 
-// ttServeDev runs stack.Serve on dev until ctx ends, relaying TCP, DNS and UDP to ttUDPEchoTarget's port through dialer; the channel receives its result.
+// ttServeDev runs stack.Serve on dev until ctx ends, relaying TCP, DNS and, full cone, UDP to ttUDPEchoTarget's port through dialer; the channel receives its result.
 func ttServeDev(ctx context.Context, dev *tun.Device, cfg tun.Config, dialer *ttDialRecorder) <-chan error {
 	mux := stack.NewMux()
 	mux.Handle("tcp", 0, &stack.Relay{Dialer: dialer})
 	mux.Handle("udp", 53, &stack.DNS{Dialer: dialer})
-	mux.Handle("udp", ttUDPEchoTarget.Port(), &stack.Relay{Dialer: dialer})
+	mux.Handle("udp", ttUDPEchoTarget.Port(), &stack.Relay{Dialer: dialer, Packets: dialer})
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- stack.Serve(ctx, dev, mux, stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
@@ -162,6 +168,7 @@ type ttDialRecorder struct {
 	mu       sync.Mutex
 	dials    []ttDial
 	dialErrs []string
+	sockets  []*ttConeSocket
 }
 
 func (r *ttDialRecorder) DialContext(ctx context.Context, network, address string) (conn net.Conn, err error) {
@@ -191,6 +198,118 @@ func (r *ttDialRecorder) DialContext(ctx context.Context, network, address strin
 	}
 	var d net.Dialer
 	return d.DialContext(ctx, network, target)
+}
+
+// ListenPacket opens a loopback socket standing in for a session's socket: it sends to each redirected destination's stand-in and reports a stand-in's datagrams as from its destination, recording each destination as a "udp" dial on its first datagram.
+func (r *ttDialRecorder) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
+	if len(r.redirect) == 0 {
+		return nil, fmt.Errorf("tt: no stand-ins to listen for %s %s", network, address)
+	}
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	s := &ttConeSocket{PacketConn: pc, rec: r, toStandIn: make(map[string]string), fromStandIn: make(map[string]netip.AddrPort)}
+	if client := stack.ClientAddr(ctx); client != nil {
+		s.client = client.String()
+	}
+	for dest, standIn := range r.redirect {
+		if ap, err := netip.ParseAddrPort(dest); err == nil {
+			s.toStandIn[ap.String()] = standIn
+			s.fromStandIn[standIn] = ap
+		}
+	}
+	r.mu.Lock()
+	r.sockets = append(r.sockets, s)
+	r.mu.Unlock()
+	return s, nil
+}
+
+// inject sends payload to every socket ListenPacket opened so far, each to report it as from source.
+func (r *ttDialRecorder) inject(t *testing.T, source netip.AddrPort, payload []byte) {
+	t.Helper()
+	from, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen to inject from %v: %v", source, err)
+	}
+	defer from.Close()
+	r.mu.Lock()
+	sockets := slices.Clone(r.sockets)
+	r.mu.Unlock()
+	if len(sockets) == 0 {
+		t.Fatalf("no session socket to inject a datagram from %v into", source)
+	}
+	for _, s := range sockets {
+		s.mu.Lock()
+		s.fromStandIn[from.LocalAddr().String()] = source
+		s.mu.Unlock()
+		if _, err := from.WriteTo(payload, s.LocalAddr()); err != nil {
+			t.Fatalf("inject a datagram from %v: %v", source, err)
+		}
+	}
+}
+
+// ttConeSocket is the loopback session socket ttDialRecorder.ListenPacket returns.
+type ttConeSocket struct {
+	net.PacketConn
+	rec    *ttDialRecorder
+	client string
+
+	mu          sync.Mutex
+	toStandIn   map[string]string
+	fromStandIn map[string]netip.AddrPort
+	sent        map[string]bool
+}
+
+func (s *ttConeSocket) WriteTo(b []byte, addr net.Addr) (int, error) {
+	udpAddr, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return 0, fmt.Errorf("tt: write to %T %v", addr, addr)
+	}
+	ap := udpAddr.AddrPort()
+	dest := netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()).String()
+	s.mu.Lock()
+	standIn, ok := s.toStandIn[dest]
+	first := ok && !s.sent[dest]
+	if first {
+		if s.sent == nil {
+			s.sent = make(map[string]bool)
+		}
+		s.sent[dest] = true
+	}
+	s.mu.Unlock()
+	if !ok {
+		err := fmt.Errorf("tt: nothing stands in for %s", dest)
+		s.rec.mu.Lock()
+		s.rec.dialErrs = append(s.rec.dialErrs, err.Error())
+		s.rec.mu.Unlock()
+		return 0, err
+	}
+	if first {
+		s.rec.mu.Lock()
+		s.rec.dials = append(s.rec.dials, ttDial{network: "udp", address: dest, client: s.client})
+		s.rec.mu.Unlock()
+	}
+	to, err := net.ResolveUDPAddr("udp4", standIn)
+	if err != nil {
+		return 0, err
+	}
+	return s.PacketConn.WriteTo(b, to)
+}
+
+func (s *ttConeSocket) ReadFrom(b []byte) (int, net.Addr, error) {
+	for {
+		n, from, err := s.PacketConn.ReadFrom(b)
+		if err != nil {
+			return n, nil, err
+		}
+		s.mu.Lock()
+		source, ok := s.fromStandIn[from.String()]
+		s.mu.Unlock()
+		if ok {
+			return n, net.UDPAddrFromAddrPort(source), nil
+		}
+	}
 }
 
 // dialsTo returns the recorded dials to address.
@@ -272,38 +391,46 @@ func ttServeUDPEcho(t *testing.T) string {
 	return pc.LocalAddr().String()
 }
 
-// ttUDPEchoVia sends a random datagram to address over UDP and fails t unless the same datagram comes back within 5s.
-func ttUDPEchoVia(t *testing.T, address string) {
+// ttConeEchoFrom sends a random datagram from conn, an unconnected socket, to target and fails t unless the same datagram comes back from target within 5s.
+func ttConeEchoFrom(t *testing.T, conn *net.UDPConn, target netip.AddrPort) {
 	t.Helper()
-	conn, err := net.Dial("udp", address)
-	if err != nil {
-		t.Fatalf("dial udp %s: %v", address, err)
-	}
-	defer conn.Close()
 	want := make([]byte, 512)
 	rand.Read(want)
-	got := make([]byte, 65535)
-	// UDP may lose a datagram, so resend each second until the 5s run out.
-	for deadline := time.Now().Add(5 * time.Second); ; {
-		if _, err := conn.Write(want); err != nil {
-			t.Fatalf("send a datagram to udp %s: %v", address, err)
+	ttConeAwait(t, conn, target, want, func() {
+		if _, err := conn.WriteToUDPAddrPort(want, target); err != nil {
+			t.Fatalf("send a datagram to udp %s: %v", target, err)
 		}
+	})
+}
+
+// ttConeAwait calls send each second until conn reads want from source, failing t after 5s; datagrams from elsewhere or with other bytes are skipped.
+func ttConeAwait(t *testing.T, conn *net.UDPConn, source netip.AddrPort, want []byte, send func()) {
+	t.Helper()
+	got := make([]byte, 65535)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		send()
 		wait := time.Now().Add(time.Second)
 		if wait.After(deadline) {
 			wait = deadline
 		}
 		conn.SetReadDeadline(wait)
-		n, err := conn.Read(got)
-		if err == nil {
-			if !bytes.Equal(got[:n], want) {
-				t.Fatalf("udp %s echoed %d bytes, want the %d-byte datagram sent unchanged", address, n, len(want))
+		for {
+			n, from, err := conn.ReadFromUDPAddrPort(got)
+			if err != nil {
+				if !errors.Is(err, os.ErrDeadlineExceeded) {
+					t.Fatalf("read a datagram from %v: %v", source, err)
+				}
+				break
 			}
-			return
-		}
-		if !errors.Is(err, os.ErrDeadlineExceeded) || !time.Now().Before(deadline) {
-			t.Fatalf("read the echoed datagram from udp %s: %v", address, err)
+			from = netip.AddrPortFrom(from.Addr().Unmap(), from.Port())
+			if from == source && bytes.Equal(got[:n], want) {
+				return
+			}
+			t.Logf("skipped a %d-byte datagram from %v while awaiting one from %v", n, from, source)
 		}
 	}
+	t.Fatalf("no %d-byte datagram from %v within 5s", len(want), source)
 }
 
 // ttDNSServer answers each length-framed DNS message with the same message marked as a response.

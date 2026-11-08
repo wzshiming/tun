@@ -50,7 +50,7 @@ func TestE2EHelper(t *testing.T) {
 	}
 
 	// Bypassing everything else keeps the runner's own traffic off the TUN.
-	captured := ttPrefixes("1.1.1.1/32", "2606:4700:4700::1111/128", netip.PrefixFrom(ttUDPEchoTarget.Addr(), 32).String())
+	captured := ttPrefixes("1.1.1.1/32", "2606:4700:4700::1111/128", netip.PrefixFrom(ttUDPEchoTarget.Addr(), 32).String(), netip.PrefixFrom(ttConeSecondTarget.Addr(), 32).String())
 	cfg := ttConfig(ttSet(t, ttPrefixes("0.0.0.0/0", "::/0"), captured).Prefixes())
 	want := captured
 	if got := tun.CaptureRoutes(cfg); len(got) != len(want) || slices.ContainsFunc(want, func(p netip.Prefix) bool { return !slices.Contains(got, p) }) {
@@ -69,6 +69,7 @@ func TestE2EHelper(t *testing.T) {
 			"1.1.1.1:8080":                echo,
 			"[2606:4700:4700::1111]:8080": echo,
 			ttUDPEchoTarget.String():      ttServeUDPEcho(t),
+			ttConeSecondTarget.String():   ttServeUDPEcho(t),
 		},
 		dns: ttServeLocal(t, ttDNSServer),
 	}
@@ -78,7 +79,7 @@ func TestE2EHelper(t *testing.T) {
 	ttWaitFor(t, 10*time.Second, func() bool {
 		return ttIfaceHas(dev.Interface, "198.18.0.1") && ttIfaceHas(dev.Interface, "fd00:6a77:7761::1")
 	}, dev.Interface+" to hold 198.18.0.1 and fd00:6a77:7761::1")
-	for _, ip := range []string{"1.1.1.1", "2606:4700:4700::1111", ttUDPEchoTarget.Addr().String()} {
+	for _, ip := range []string{"1.1.1.1", "2606:4700:4700::1111", ttUDPEchoTarget.Addr().String(), ttConeSecondTarget.Addr().String()} {
 		if got := ttRouteDev(t, ip); got != dev.Interface {
 			t.Fatalf("route to %s leaves through %q, want %s", ip, got, dev.Interface)
 		}
@@ -94,8 +95,17 @@ func TestE2EHelper(t *testing.T) {
 		rec.wantDial(t, "tcp", "1.1.1.1:53", "")
 	})
 	t.Run("udp relayed", func(t *testing.T) {
-		ttUDPEchoVia(t, ttUDPEchoTarget.String())
+		conn, err := net.ListenUDP("udp4", nil)
+		if err != nil {
+			t.Fatalf("listen udp4: %v", err)
+		}
+		defer conn.Close()
+		ttConeEchoFrom(t, conn, ttUDPEchoTarget)
+		ttConeEchoFrom(t, conn, ttConeSecondTarget)
+		injected := []byte("from a source never sent to")
+		ttConeAwait(t, conn, ttConeInjectedSource, injected, func() { rec.inject(t, ttConeInjectedSource, injected) })
 		rec.wantDial(t, "udp", ttUDPEchoTarget.String(), "198.18.0.1")
+		rec.wantDial(t, "udp", ttConeSecondTarget.String(), "198.18.0.1")
 	})
 	t.Run("udp without a handler is dropped", func(t *testing.T) {
 		conn, err := net.Dial("udp", "1.1.1.1:9999")
