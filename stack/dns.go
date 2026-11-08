@@ -9,14 +9,15 @@ import (
 	"time"
 )
 
-// DNS serves a UDP flow by relaying its datagrams as length-framed messages over one TCP connection to its target, dialled through Dialer; it rejects TCP flows.
+// DNS serves a UDP session by relaying the datagrams it sends to each target as length-framed messages over one TCP connection to that target, dialled through Dialer, and the replies back from that target; it rejects TCP flows.
 type DNS struct {
 	Dialer Dialer
-	// Idle ends a flow after this long without datagrams either way; 0 means 10s.
+	// Idle ends a session after this long without datagrams either way to any target; 0 means 10s.
 	Idle time.Duration
 }
 
-// ServeFlow relays f until it idles, the dial or either conn fails, or ctx ends, and then closes both conns.
+// ServeFlow relays f until it idles, its conn fails or ctx ends, and then closes the session and every TCP conn.
+// A target whose dial or TCP conn fails loses only its own datagrams; its next one dials again.
 func (d *DNS) ServeFlow(ctx context.Context, f Flow) {
 	if f.Network() != "udp" {
 		f.Reject()
@@ -27,29 +28,10 @@ func (d *DNS) ServeFlow(ctx context.Context, f Flow) {
 		return
 	}
 	defer conn.Close()
-	remote, err := d.Dialer.DialContext(WithClientAddr(ctx, net.UDPAddrFromAddrPort(f.Client())), "tcp", f.Target().String())
-	if err != nil {
-		return
-	}
-	closeBoth := func() {
-		conn.Close()
-		remote.Close()
-	}
-	defer closeBoth()
-	stop := context.AfterFunc(ctx, closeBoth)
-	defer stop()
-	// Datagrams either way push back the idle timer, whose expiry closes both conns wherever the relay blocks.
-	touch, stopIdle := afterIdle(cmp.Or(d.Idle, 10*time.Second), closeBoth)
-	defer stopIdle()
-	replies := make(chan struct{})
-	go func() {
-		defer close(replies)
-		defer closeBoth()
-		relayReplies(conn, remote, touch)
-	}()
-	relayQueries(conn, remote, touch)
-	closeBoth()
-	<-replies
+	ctx = WithClientAddr(ctx, net.UDPAddrFromAddrPort(f.Client()))
+	relaySession(ctx, conn, cmp.Or(d.Idle, 10*time.Second),
+		func(target string) (net.Conn, error) { return d.Dialer.DialContext(ctx, "tcp", target) },
+		writeFrame, readFrame)
 }
 
 // afterIdle calls onIdle once d passes without a touch; stop cancels it.
@@ -58,34 +40,21 @@ func afterIdle(d time.Duration, onIdle func()) (touch func(), stop func() bool) 
 	return func() { timer.Reset(d) }, timer.Stop
 }
 
-func relayQueries(conn, remote net.Conn, touch func()) {
-	buf := make([]byte, 2+65535)
-	for {
-		n, err := conn.Read(buf[2:])
-		if err != nil {
-			return
-		}
-		binary.BigEndian.PutUint16(buf, uint16(n))
-		if _, err := remote.Write(buf[:2+n]); err != nil {
-			return
-		}
-		touch()
-	}
+// writeFrame writes message prefixed with its 2-byte big-endian length.
+func writeFrame(remote net.Conn, message []byte) error {
+	frame := binary.BigEndian.AppendUint16(make([]byte, 0, 2+len(message)), uint16(len(message)))
+	_, err := remote.Write(append(frame, message...))
+	return err
 }
 
-func relayReplies(conn, remote net.Conn, touch func()) {
-	buf := make([]byte, 65535)
-	for {
-		if _, err := io.ReadFull(remote, buf[:2]); err != nil {
-			return
-		}
-		reply := buf[:binary.BigEndian.Uint16(buf)]
-		if _, err := io.ReadFull(remote, reply); err != nil {
-			return
-		}
-		if _, err := conn.Write(reply); err != nil {
-			return
-		}
-		touch()
+// readFrame reads one length-framed message into buf.
+func readFrame(remote net.Conn, buf []byte) ([]byte, error) {
+	if _, err := io.ReadFull(remote, buf[:2]); err != nil {
+		return nil, err
 	}
+	message := buf[:binary.BigEndian.Uint16(buf)]
+	if _, err := io.ReadFull(remote, message); err != nil {
+		return nil, err
+	}
+	return message, nil
 }

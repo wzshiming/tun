@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -110,6 +111,44 @@ func TestUDPDNSRepliesPushBackIdle(t *testing.T) {
 	testReadEOF(t, target, "target of a flow silent since its last reply")
 	if ended := time.Since(last); ended < idle*3/4 || ended > 2*time.Second {
 		t.Fatalf("flow ended %v after its last reply, want about DNS.Idle %v", ended, idle)
+	}
+}
+
+func TestUDPDNSSessionDialsOnceEachServerAndRepliesFromIt(t *testing.T) {
+	env := testServeDNS(t, 0)
+	first, second := netip.MustParseAddrPort("10.0.0.53:53"), netip.MustParseAddrPort("10.0.0.54:53")
+	conn := env.listenUDP(t, testClient4)
+	testSendTo(t, conn, []byte("q1"), first)
+	firstServer := env.nextTarget(t)
+	if got := testReadFrame(t, firstServer); got != "q1" {
+		t.Fatalf("first server read %q, want %q", got, "q1")
+	}
+	testSendTo(t, conn, []byte("q2"), second)
+	secondServer := env.nextTarget(t)
+	if got := testReadFrame(t, secondServer); got != "q2" {
+		t.Fatalf("second server read %q, want %q", got, "q2")
+	}
+	testSendTo(t, conn, []byte("q3"), first)
+	if got := testReadFrame(t, firstServer); got != "q3" {
+		t.Fatalf("first server read %q, want the later query %q on the same conn", got, "q3")
+	}
+	dials := env.dialer.recorded()
+	client := conn.LocalAddr().String()
+	if len(dials) != 2 || dials[0].address != first.String() || dials[1].address != second.String() {
+		t.Fatalf("dialer.DialContext calls %+v, want one tcp dial each to %v and %v", dials, first, second)
+	}
+	for _, dial := range dials {
+		if dial.network != "tcp" || dial.client == nil || dial.client.String() != client {
+			t.Fatalf("dial %+v, want network tcp tagged with the client %s", dial, client)
+		}
+	}
+	testWriteFrame(t, secondServer, "r2")
+	if got, want := testRecvFrom(t, conn), (udpRead{"r2", second, nil}); got != want {
+		t.Fatalf("client got %+v, want %+v", got, want)
+	}
+	testWriteFrame(t, firstServer, "r1")
+	if got, want := testRecvFrom(t, conn), (udpRead{"r1", first, nil}); got != want {
+		t.Fatalf("client got %+v, want %+v", got, want)
 	}
 }
 
