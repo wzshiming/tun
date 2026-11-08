@@ -13,7 +13,10 @@ import (
 )
 
 // logDialer must listen too, so stack.DefaultMux relays UDP full cone.
-var _ stack.PacketListener = (*logDialer)(nil)
+var (
+	_ stack.ListenConfig = (*logDialer)(nil)
+	_ stack.Dialer       = (*logDialer)(nil)
+)
 
 func TestLogDialerListenPacketLogsEachNewTargetOnce(t *testing.T) {
 	var logged bytes.Buffer
@@ -33,7 +36,7 @@ func TestLogDialerListenPacketLogsEachNewTargetOnce(t *testing.T) {
 		defer target.Close()
 		targets = append(targets, target)
 	}
-	d := &logDialer{packets: &net.ListenConfig{}}
+	d := &logDialer{listen: &net.ListenConfig{}}
 	ctx := stack.WithClientAddr(context.Background(), &net.UDPAddr{IP: net.IPv4(198, 18, 0, 1), Port: 4000})
 	pc, err := d.ListenPacket(ctx, "udp4", "127.0.0.1:0")
 	if err != nil {
@@ -53,8 +56,20 @@ func TestLogDialerListenPacketLogsEachNewTargetOnce(t *testing.T) {
 
 type failingListener struct{ err error }
 
+func (l failingListener) Listen(context.Context, string, string) (net.Listener, error) {
+	return nil, l.err
+}
+
 func (l failingListener) ListenPacket(context.Context, string, string) (net.PacketConn, error) {
 	return nil, l.err
+}
+
+func TestLogDialerListenUsesItsListenConfig(t *testing.T) {
+	listenErr := errors.New("listen refused")
+	d := &logDialer{listen: failingListener{listenErr}}
+	if l, err := d.Listen(context.Background(), "tcp4", ":0"); !errors.Is(err, listenErr) {
+		t.Fatalf("Listen = %v, %v; want the listen config's error", l, err)
+	}
 }
 
 func TestLogDialerListenPacketLogsItsFailure(t *testing.T) {
@@ -67,7 +82,7 @@ func TestLogDialerListenPacketLogsItsFailure(t *testing.T) {
 		log.SetOutput(out)
 	})
 	listenErr := errors.New("listen refused")
-	d := &logDialer{packets: failingListener{listenErr}}
+	d := &logDialer{listen: failingListener{listenErr}}
 	ctx := stack.WithClientAddr(context.Background(), &net.UDPAddr{IP: net.IPv4(198, 18, 0, 1), Port: 4000})
 	if pc, err := d.ListenPacket(ctx, "udp4", ":0"); !errors.Is(err, listenErr) {
 		t.Fatalf("ListenPacket = %v, %v; want the listener's error", pc, err)

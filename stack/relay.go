@@ -11,23 +11,24 @@ import (
 	"time"
 )
 
-// PacketListener opens unconnected packet sockets; *net.ListenConfig is one.
-type PacketListener interface {
+// ListenConfig opens listening sockets; *net.ListenConfig is one.
+type ListenConfig interface {
+	Listen(ctx context.Context, network, address string) (net.Listener, error)
 	ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error)
 }
 
 // Relay serves a flow by dialing its target through Dialer, on the flow's network, and passing the two connections' data into each other.
 type Relay struct {
 	Dialer Dialer
-	// Packets, when set, relays a UDP session full cone: through one socket it listens on, to every target, delivering datagrams from any source.
-	Packets PacketListener
+	// ListenConfig, when set, relays a UDP session full cone: through one socket from its ListenPacket, to every target, delivering datagrams from any source.
+	ListenConfig ListenConfig
 	// Idle ends a UDP session after this long without datagrams either way to any target; 0 means 60s.
 	Idle time.Duration
 }
 
 // ServeFlow dials a TCP flow's target before accepting, so a failed dial resets the client, then passes half-closes on and ends with ctx.
-// A UDP session is accepted first. With Packets set, it listens on one "udp4" or "udp6" socket, by the client's family, which sends the session's datagrams to their targets and returns every datagram it receives from its source; a failed listen ends the session.
-// Without Packets, each target it sends to gets its own dialled conn, its datagrams relayed one for one and the replies sent back from that target; a failed dial or conn drops that target's datagrams until the next one dials again.
+// A UDP session is accepted first. With ListenConfig set, it listens on one "udp4" or "udp6" socket, by the client's family, which sends the session's datagrams to their targets and returns every datagram it receives from its source; a failed listen ends the session.
+// Without ListenConfig, each target it sends to gets its own dialled conn, its datagrams relayed one for one and the replies sent back from that target; a failed dial or conn drops that target's datagrams until the next one dials again.
 func (r *Relay) ServeFlow(ctx context.Context, f Flow) {
 	if f.Network() == "udp" {
 		r.serveUDP(ctx, f)
@@ -53,7 +54,7 @@ func (r *Relay) serveUDP(ctx context.Context, f Flow) {
 	}
 	defer conn.Close()
 	ctx = WithClientAddr(ctx, net.UDPAddrFromAddrPort(f.Client()))
-	if r.Packets != nil {
+	if r.ListenConfig != nil {
 		r.serveCone(ctx, conn, f.Client())
 		return
 	}
@@ -73,7 +74,7 @@ func (r *Relay) idle() time.Duration {
 	return cmp.Or(r.Idle, 60*time.Second)
 }
 
-// serveCone relays conn, the session of client, through one socket from r.Packets until conn or the socket fails, ctx ends or the session idles.
+// serveCone relays conn, the session of client, through one socket from r.ListenConfig until conn or the socket fails, ctx ends or the session idles.
 func (r *Relay) serveCone(ctx context.Context, conn net.Conn, client netip.AddrPort) {
 	session, ok := conn.(net.PacketConn)
 	if !ok {
@@ -83,7 +84,7 @@ func (r *Relay) serveCone(ctx context.Context, conn net.Conn, client netip.AddrP
 	if client.Addr().Unmap().Is4() {
 		network = "udp4"
 	}
-	remote, err := r.Packets.ListenPacket(ctx, network, ":0")
+	remote, err := r.ListenConfig.ListenPacket(ctx, network, ":0")
 	if err != nil {
 		return
 	}

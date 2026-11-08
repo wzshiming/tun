@@ -244,9 +244,9 @@ func (d relayDialled) next(t *testing.T, env *testEnv) relayEnd {
 
 func (d relayDialled) opens() int { return len(d.recorded()) }
 
-var _ PacketListener = (*net.ListenConfig)(nil)
+var _ ListenConfig = (*net.ListenConfig)(nil)
 
-// coneListener is a PacketListener recording each call and answering it with a new coneSocket, or with err once failing, or a coneStalled once stalled.
+// coneListener is a ListenConfig recording each ListenPacket call and answering it with a new coneSocket, or with err once failing, or a coneStalled once stalled; Listen always fails.
 type coneListener struct {
 	mu      sync.Mutex
 	calls   []fakeDial
@@ -263,6 +263,10 @@ func newConeListener(t *testing.T) *coneListener {
 	l := &coneListener{opened: make(chan net.PacketConn, 16), targets: make(chan *coneTarget, 16)}
 	t.Cleanup(l.closeAll)
 	return l
+}
+
+func (l *coneListener) Listen(context.Context, string, string) (net.Listener, error) {
+	return nil, errors.New("coneListener: Listen is not supported")
 }
 
 func (l *coneListener) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
@@ -514,11 +518,11 @@ func (c coneStalled) ReadFrom(b []byte) (int, net.Addr, error) {
 
 func (c coneStalled) WriteTo(b []byte, _ net.Addr) (int, error) { return c.Write(b) }
 
-// coneServe serves relay as the udp fallback with a fresh coneListener as its Packets and a udpRelayDialer as its Dialer.
+// coneServe serves relay as the udp fallback with a fresh coneListener as its ListenConfig and a udpRelayDialer as its Dialer.
 func coneServe(t *testing.T, relay *Relay) (*testEnv, *coneListener, *udpRelayDialer) {
 	t.Helper()
 	listener := newConeListener(t)
-	relay.Packets = listener
+	relay.ListenConfig = listener
 	env, dialer := udpRelayServe(t, relay)
 	return env, listener, dialer
 }
@@ -549,7 +553,7 @@ func TestRelayConeListensOnceAndRelaysEverySource(t *testing.T) {
 				t.Fatalf("ClientAddr(ListenPacket ctx) = %T %v, want the client's %T %v", got, got, want, want)
 			}
 			if dials := dialer.recorded(); len(dials) != 0 {
-				t.Fatalf("dialer.DialContext calls %+v, want none with Packets set", dials)
+				t.Fatalf("dialer.DialContext calls %+v, want none with ListenConfig set", dials)
 			}
 			second.send(t, []byte("from second"))
 			if got, want := testRecvFrom(t, conn), (udpRead{"from second", fam.second, nil}); got != want {

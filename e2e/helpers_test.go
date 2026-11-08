@@ -126,7 +126,7 @@ func ttServeDev(ctx context.Context, dev *tun.Device, cfg tun.Config, dialer *tt
 	mux := stack.NewMux()
 	mux.Handle("tcp", 0, &stack.Relay{Dialer: dialer})
 	mux.Handle("udp", 53, &stack.DNS{Dialer: dialer})
-	mux.Handle("udp", ttUDPEchoTarget.Port(), &stack.Relay{Dialer: dialer, Packets: dialer})
+	mux.Handle("udp", ttUDPEchoTarget.Port(), &stack.Relay{Dialer: dialer, ListenConfig: dialer})
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- stack.Serve(ctx, dev, mux, stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
@@ -198,6 +198,11 @@ func (r *ttDialRecorder) DialContext(ctx context.Context, network, address strin
 	}
 	var d net.Dialer
 	return d.DialContext(ctx, network, target)
+}
+
+// Listen fails, as the stack never calls it.
+func (r *ttDialRecorder) Listen(context.Context, string, string) (net.Listener, error) {
+	return nil, errors.New("tt: Listen is not supported")
 }
 
 // ListenPacket opens a loopback socket standing in for a session's socket: it sends to each redirected destination's stand-in and reports a stand-in's datagrams as from its destination, recording each destination as a "udp" dial on its first datagram.

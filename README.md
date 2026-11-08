@@ -1,6 +1,6 @@
 # tun
 
-`github.com/wzshiming/tun` captures a machine's IP traffic into a TUN device and hands every flow to a Go handler of your choice. It opens the TUN device with the privileges it needs (prompting the user when the process is not root/administrator), installs routes that capture everything except what must escape, runs a gVisor userspace network stack that turns packets back into TCP connections and UDP sessions and dispatches them by network and destination port, ships handlers that relay TCP through a `Dialer` and UDP full cone through a `PacketListener` (symmetric through the `Dialer` without one), DNS on UDP port 53 over TCP, and provides a dialer and a listen config bound to the physical interface so forwarded traffic does not loop back into the TUN. It runs on macOS, Linux and Windows 10+.
+`github.com/wzshiming/tun` captures a machine's IP traffic into a TUN device and hands every flow to a Go handler of your choice. It opens the TUN device with the privileges it needs (prompting the user when the process is not root/administrator), installs routes that capture everything except what must escape, runs a gVisor userspace network stack that turns packets back into TCP connections and UDP sessions and dispatches them by network and destination port, ships handlers that relay TCP through a `Dialer` and UDP full cone through a `ListenConfig` (symmetric through the `Dialer` without one), DNS on UDP port 53 over TCP, and provides a dialer and a listen config bound to the physical interface so forwarded traffic does not loop back into the TUN. It runs on macOS, Linux and Windows 10+.
 
 ## Install
 
@@ -22,13 +22,13 @@ go get github.com/wzshiming/tun
 ### `stack` — the userspace network stack
 
 - `type Dialer interface { DialContext(ctx context.Context, network, address string) (net.Conn, error) }`
-- `type PacketListener interface { ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) }` — opens unconnected packet sockets; `*net.ListenConfig` is one.
+- `type ListenConfig interface { Listen(ctx context.Context, network, address string) (net.Listener, error); ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) }` — opens listening sockets, shaped like the standard library's; `*net.ListenConfig` is one.
 - `type Flow interface { Network() string; Target() netip.AddrPort; Client() netip.AddrPort; Accept() (net.Conn, error); Reject() }` — a captured TCP connection or UDP session: `Accept` completes the TCP handshake or returns the UDP session's conn (see [UDP](#udp)), once; `Reject` resets the TCP client or drops the session's datagrams.
 - `type Handler interface { ServeFlow(ctx context.Context, f Flow) }` and `type HandlerFunc func(context.Context, Flow)` — called once per flow on its own goroutine; when it returns, an unanswered flow is rejected and an accepted conn is closed.
 - `type Mux struct` with `func NewMux() *Mux`, `func (m *Mux) Handle(network string, port uint16, h Handler)` and `func (m *Mux) ServeFlow(ctx context.Context, f Flow)` — dispatches by `"tcp"`/`"udp"` and destination port, port 0 being the network's fallback; a flow without a handler is rejected. A UDP session goes by its first datagram's port.
-- `type Relay struct { Dialer Dialer; Packets PacketListener; Idle time.Duration }` — dials a TCP flow's target first, resetting the client when that fails, then pipes both ways. Accepts a UDP session and relays it full cone when `Packets` is set, symmetric otherwise (see [UDP](#udp)), ending it after `Idle` (default 60s) without datagrams either way.
+- `type Relay struct { Dialer Dialer; ListenConfig ListenConfig; Idle time.Duration }` — dials a TCP flow's target first, resetting the client when that fails, then pipes both ways. Accepts a UDP session and relays it full cone when `ListenConfig` is set, symmetric otherwise (see [UDP](#udp)), ending it after `Idle` (default 60s) without datagrams either way.
 - `type DNS struct { Dialer Dialer; Idle time.Duration }` — relays each datagram of a UDP session as a length-framed message over one TCP connection per server it sends to, dialled through `Dialer`, and the replies back from that server; the session ends after `Idle` (default 10s) without datagrams; rejects TCP.
-- `func DefaultMux(dialer Dialer) *Mux` — `Relay` for every TCP and UDP port, except `DNS` for UDP port 53. When `dialer` also implements `PacketListener`, the UDP `Relay` gets it as `Packets` and relays full cone; a wrapper around a dialer must forward `ListenPacket` to keep that.
+- `func DefaultMux(dialer Dialer) *Mux` — `Relay` for every TCP and UDP port, except `DNS` for UDP port 53. When `dialer` also implements `ListenConfig`, the UDP `Relay` gets it as `ListenConfig` and relays full cone; a wrapper around a dialer must forward `Listen` and `ListenPacket` to keep that.
 - `type Options struct { MTU int; Addresses []netip.Prefix }`
 - `func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options) error` — hands every captured flow of `dev`, a `golang.zx2c4.com/wireguard/tun` device such as `(*tun.Device).Device`, to `handler` (nil refuses them all, UDP with ICMP port unreachable); returns when `ctx` ends or the device fails, once every `ServeFlow` has returned, and closes the device.
 - `func ClientAddr(ctx context.Context) net.Addr` — inside `DialContext` or `ListenPacket`, the captured flow's source (`*net.TCPAddr` or `*net.UDPAddr`), nil when absent; `WithClientAddr` sets it.
@@ -36,16 +36,16 @@ go get github.com/wzshiming/tun
 ### `bypass` — escaping the TUN
 
 - `func NewDialer(capture []netip.Prefix) *net.Dialer` — a dialer that binds connections to captured destinations onto the default-route interface.
-- `func NewListenConfig(capture []netip.Prefix) *net.ListenConfig` — a listen config that binds every socket onto its family's default-route interface, fixed at creation; pass it as `Relay.Packets` for direct egress.
+- `func NewListenConfig(capture []netip.Prefix) *net.ListenConfig` — a listen config that binds every socket onto its family's default-route interface, fixed at creation; pass it as `Relay.ListenConfig` for direct egress.
 - `func DefaultInterface(ipv6 bool) (*net.Interface, error)` and `var ErrNoDefaultRoute error`.
 
 ## UDP
 
 - **Sessions.** `Serve` gives each client socket, keyed by its address and port, one UDP session carrying every datagram it sends, to any target. `Flow.Target` is the first datagram's destination. The `Mux` picks the component by that first datagram's port and the whole session goes to it, so a socket that later sends to another port stays with the first component.
 - **The session conn** is a `net.Conn` and a `net.PacketConn`: `ReadFrom` returns each datagram with the `*net.UDPAddr` the client sent it to; `WriteTo(b, src)` delivers `b` to the client as if from `src`; `Read` and `Write` are the view connected to `Flow.Target`; read deadlines apply; `Close` ends the session, and the client's next datagram starts a new one.
-- **`Relay` full cone**, when `Packets` is set: one unconnected `"udp4"` or `"udp6"` socket per session, by the client's family, sends every target's datagrams, and every datagram it receives, from any source, reaches the client with that source's real address. A failed `ListenPacket` ends the session silently.
-- **`Relay` symmetric**, when `Packets` is nil: one connected socket dialled per target, replies coming only from that target; the only mode for dialers that cannot provide unconnected sockets, such as proxy chains. A slow dial delays only its own target.
-- **`DefaultMux`** relays full cone when its dialer is also a `PacketListener`, symmetric otherwise. For direct egress, `bypass.NewListenConfig` is the `Packets`.
+- **`Relay` full cone**, when `ListenConfig` is set: one unconnected `"udp4"` or `"udp6"` socket per session, by the client's family, sends every target's datagrams, and every datagram it receives, from any source, reaches the client with that source's real address. A failed `ListenPacket` ends the session silently.
+- **`Relay` symmetric**, when `ListenConfig` is nil: one connected socket dialled per target, replies coming only from that target; the only mode for dialers that cannot provide unconnected sockets, such as proxy chains. A slow dial delays only its own target.
+- **`DefaultMux`** relays full cone when its dialer is also a `ListenConfig`, symmetric otherwise. For direct egress, `bypass.NewListenConfig` is the `ListenConfig`.
 - **`DNS`** carries UDP port 53 over TCP: one TCP connection per server within a session.
 - **Unhandled UDP**, whose first datagram's port has no component, is dropped; ICMP port unreachable is sent only when `Serve`'s handler is nil.
 - **Interface.** A relay socket stays on the interface it was bound to at creation: after a default-route change, new sessions use the new interface while running ones keep the old one until they idle out (60s by default).
@@ -69,7 +69,7 @@ func main() {
 		log.Fatal(err)
 	}
 	capture := tun.CaptureRoutes(cfg)
-	dialer := &logDialer{direct: bypass.NewDialer(capture), packets: bypass.NewListenConfig(capture)}
+	dialer := &logDialer{dialer: bypass.NewDialer(capture), listen: bypass.NewListenConfig(capture)}
 	err = stack.Serve(ctx, dev.Device, stack.DefaultMux(dialer), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
 	if err != nil && ctx.Err() == nil {
 		log.Fatal(err)
@@ -77,18 +77,22 @@ func main() {
 }
 
 type logDialer struct {
-	direct  *net.Dialer
-	packets *net.ListenConfig
+	dialer *net.Dialer
+	listen stack.ListenConfig
 }
 
 func (d *logDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	log.Println(stack.ClientAddr(ctx), "->", network, address)
-	return d.direct.DialContext(ctx, network, address)
+	return d.dialer.DialContext(ctx, network, address)
 }
 
-// ListenPacket keeps DefaultMux's UDP relay full cone.
+// Listen and ListenPacket make logDialer a stack.ListenConfig, keeping DefaultMux's UDP relay full cone.
+func (d *logDialer) Listen(ctx context.Context, network, address string) (net.Listener, error) {
+	return d.listen.Listen(ctx, network, address)
+}
+
 func (d *logDialer) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
-	return d.packets.ListenPacket(ctx, network, address)
+	return d.listen.ListenPacket(ctx, network, address)
 }
 ```
 

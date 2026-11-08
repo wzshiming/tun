@@ -55,11 +55,11 @@ func NewMux() *Mux {
 }
 
 // DefaultMux returns a Mux relaying every TCP connection and UDP flow through dialer, the DNS flows to UDP port 53 over TCP.
-// A dialer that is also a PacketListener relays UDP full cone, as Relay.Packets; a wrapper around a dialer must forward ListenPacket to keep it.
+// A dialer that is also a ListenConfig relays UDP full cone, as Relay.ListenConfig; a wrapper around a dialer must forward Listen and ListenPacket to keep it.
 func DefaultMux(dialer Dialer) *Mux {
 	udp := &Relay{Dialer: dialer}
-	if packets, ok := dialer.(PacketListener); ok {
-		udp.Packets = packets
+	if lc, ok := dialer.(ListenConfig); ok {
+		udp.ListenConfig = lc
 	}
 	m := NewMux()
 	m.Handle("tcp", 0, &Relay{Dialer: dialer})
