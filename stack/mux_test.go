@@ -112,6 +112,36 @@ func TestDefaultMuxRegistersRelayDNSAndUDPRelay(t *testing.T) {
 	}
 }
 
+// relayDialListener is a Dialer that is also a PacketListener.
+type relayDialListener struct {
+	*udpRelayDialer
+	*coneListener
+}
+
+func TestDefaultMuxGivesUDPRelayTheDialersPacketListener(t *testing.T) {
+	d := relayDialListener{&udpRelayDialer{}, &coneListener{}}
+	want := map[muxKey]Handler{{"tcp", 0}: &Relay{Dialer: d}, {"udp", 53}: &DNS{Dialer: d}, {"udp", 0}: &Relay{Dialer: d, Packets: d}}
+	if got := DefaultMux(d).handlers; !reflect.DeepEqual(got, want) {
+		t.Fatalf("DefaultMux registers %v, want tcp/0 Relay, udp/53 DNS and udp/0 Relay with the dialer as its Packets", got)
+	}
+}
+
+func TestDefaultMuxRelaysUDPFullConeThroughADialersPacketListener(t *testing.T) {
+	dialer := &udpRelayDialer{targets: make(chan *udpRelayTarget, 16)}
+	t.Cleanup(dialer.closeAll)
+	listener := newConeListener(t)
+	env := testServeWith(t, Options{Addresses: testAddresses}, func(*fakeDialer) Handler {
+		return DefaultMux(relayDialListener{dialer, listener})
+	})
+	testSend(t, env.dialUDP(t, "10.0.0.9:5000"), "datagram")
+	if got := listener.nextCone(t, env).recv(t); string(got) != "datagram" {
+		t.Fatalf("target got %q, want %q", got, "datagram")
+	}
+	if calls, dials := listener.recorded(), dialer.recorded(); len(calls) != 1 || len(dials) != 0 {
+		t.Fatalf("DefaultMux's UDP Relay listened %+v and dialled %+v, want one ListenPacket and no DialContext", calls, dials)
+	}
+}
+
 func TestDefaultMuxRoutesUDPByPort(t *testing.T) {
 	for _, tc := range []struct{ name, target, network string }{
 		{"port 53 to DNS over tcp", "10.0.0.53:53", "tcp"},
