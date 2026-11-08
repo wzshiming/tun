@@ -35,6 +35,7 @@ go get github.com/wzshiming/tun
 ### `bypass` — escaping the TUN
 
 - `func NewDialer(capture []netip.Prefix) *net.Dialer` — a dialer that binds connections to captured destinations onto the default-route interface.
+- `func NewListenConfig(capture []netip.Prefix) *net.ListenConfig` — a listen config that binds every socket onto its family's default-route interface, fixed at creation.
 - `func DefaultInterface(ipv6 bool) (*net.Interface, error)` and `var ErrNoDefaultRoute error`.
 
 ## Example

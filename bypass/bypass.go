@@ -3,6 +3,7 @@ package bypass
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -45,6 +46,49 @@ func newDialer(capture []netip.Prefix, lookup lookupFunc, bind bindFunc, now fun
 	// DNS server addresses are IP literals, so resolving through d never recurses.
 	d.Resolver = &net.Resolver{PreferGo: true, Dial: d.DialContext}
 	return d
+}
+
+// NewListenConfig returns a listen config that binds every socket to the default-route interface of its family.
+// The family comes from the network's 4 or 6 suffix, else from the listen address's literal IP; a bare network
+// with an unspecified or host-name address fails, as does a family without a default route (ErrNoDefaultRoute).
+// The interface is fixed when the socket is created: a later default-route change does not move the socket.
+// An empty capture, or a platform that cannot bind, yields a zero-value ListenConfig.
+func NewListenConfig(capture []netip.Prefix) *net.ListenConfig {
+	if len(capture) == 0 || bindDefault == nil {
+		return &net.ListenConfig{}
+	}
+	return newListenConfig(lookupDefault, bindDefault, time.Now)
+}
+
+func newListenConfig(lookup lookupFunc, bind bindFunc, now func() time.Time) *net.ListenConfig {
+	b := &defaultBinder{lookup: lookup, bind: bind, now: now}
+	return &net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			ipv6, err := listenFamily(network, address)
+			if err != nil {
+				return err
+			}
+			return b.bindSocket(c, ipv6)
+		},
+	}
+}
+
+func listenFamily(network, address string) (ipv6 bool, err error) {
+	switch network {
+	case "tcp4", "udp4", "ip4":
+		return false, nil
+	case "tcp6", "udp6", "ip6":
+		return true, nil
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		// Control receives ip networks' addresses without a port.
+		host = address
+	}
+	if ip, err := netip.ParseAddr(host); err == nil && !ip.IsUnspecified() {
+		return ip.Unmap().Is6(), nil
+	}
+	return false, fmt.Errorf("bypass: %s listen address %q must name the family (use udp4/udp6 or a literal address)", network, address)
 }
 
 // defaultBinder binds sockets to the family's default-route interface, looked up through a per-family cache.
