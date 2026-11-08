@@ -51,3 +51,42 @@ func TestE2EBypassBindsUDPToIPv4DefaultInterface(t *testing.T) {
 		t.Errorf("IP_BOUND_IF = %d, want %d (%s holds the IPv4 default route)", bound, iface.Index, iface.Name)
 	}
 }
+
+func TestE2EBypassListenConfigBindsUDPToIPv4DefaultInterface(t *testing.T) {
+	ttGate(t)
+	iface, err := bypass.DefaultInterface(false)
+	if errors.Is(err, bypass.ErrNoDefaultRoute) {
+		t.Skip("no IPv4 default route on this host")
+	}
+	if err != nil {
+		t.Fatalf("DefaultInterface(false) error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	conn, err := bypass.NewListenConfig(ttCaptureLab).ListenPacket(ctx, "udp4", ":0")
+	if err != nil {
+		t.Fatalf("ListenPacket(udp4, :0) error = %v", err)
+	}
+	defer conn.Close()
+	sc, ok := conn.(syscall.Conn)
+	if !ok {
+		t.Fatalf("%T is not a syscall.Conn", conn)
+	}
+	raw, err := sc.SyscallConn()
+	if err != nil {
+		t.Fatalf("SyscallConn error = %v", err)
+	}
+	var bound int
+	var optErr error
+	if err := raw.Control(func(fd uintptr) {
+		bound, optErr = unix.GetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_BOUND_IF)
+	}); err != nil {
+		t.Fatalf("RawConn.Control error = %v", err)
+	}
+	if optErr != nil {
+		t.Fatalf("getsockopt(IP_BOUND_IF) error = %v", optErr)
+	}
+	if bound != iface.Index {
+		t.Errorf("IP_BOUND_IF = %d, want %d (%s holds the IPv4 default route)", bound, iface.Index, iface.Name)
+	}
+}
