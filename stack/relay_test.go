@@ -178,6 +178,48 @@ func (tg *udpRelayTarget) send(t *testing.T, datagram []byte) {
 	}
 }
 
+func (tg *udpRelayTarget) gone() <-chan struct{} { return tg.dialled.closed }
+
+// relayEnd is one target's end of a session Relay serves, in either UDP mode.
+type relayEnd interface {
+	// recv reads one datagram Relay sent the target.
+	recv(t *testing.T) []byte
+	// send writes a datagram from the target, for Relay to pass to the client.
+	send(t *testing.T, datagram []byte)
+	// gone is closed once Relay closed the socket carrying the target's datagrams.
+	gone() <-chan struct{}
+}
+
+// relayOpener hands out the target ends a served Relay opens and counts the sockets it opened for them.
+type relayOpener interface {
+	next(t *testing.T, env *testEnv) relayEnd
+	opens() int
+}
+
+// relayMode serves a Relay in one of its UDP modes.
+type relayMode struct {
+	name  string
+	serve func(t *testing.T, relay *Relay) (*testEnv, relayOpener)
+}
+
+// relayModes are Relay's UDP modes, for the tests holding in each.
+var relayModes = []relayMode{
+	{"symmetric", func(t *testing.T, relay *Relay) (*testEnv, relayOpener) {
+		env, dialer := udpRelayServe(t, relay)
+		return env, relayDialled{dialer}
+	}},
+}
+
+// relayDialled is the symmetric mode's opener: one dialled conn per target.
+type relayDialled struct{ *udpRelayDialer }
+
+func (d relayDialled) next(t *testing.T, env *testEnv) relayEnd {
+	t.Helper()
+	return d.udpRelayDialer.next(t, env)
+}
+
+func (d relayDialled) opens() int { return len(d.recorded()) }
+
 // udpRelayServe serves relay, given a fresh udpRelayDialer, as the udp fallback.
 func udpRelayServe(t *testing.T, relay *Relay) (*testEnv, *udpRelayDialer) {
 	t.Helper()
@@ -228,67 +270,77 @@ func TestRelayUDPDialsIPv6InBracketForm(t *testing.T) {
 }
 
 func TestRelayUDPKeepsDatagramsWholeAndInOrderBothWays(t *testing.T) {
-	env, dialer := udpRelayServe(t, &Relay{})
-	conn := env.dialUDP(t, "10.0.0.9:5000")
-	sizes := []int{1, 512, 1400}
-	for i, size := range sizes {
-		if _, err := conn.Write(udpRelayDatagram(size, byte(i))); err != nil {
-			t.Fatalf("client send a %d-byte datagram: %v", size, err)
-		}
-	}
-	target := dialer.next(t, env)
-	for i, size := range sizes {
-		if got, want := target.recv(t), udpRelayDatagram(size, byte(i)); !bytes.Equal(got, want) {
-			t.Fatalf("target datagram %d is %d bytes %x..., want the client's %d-byte datagram %d", i, len(got), got[:min(len(got), 8)], size, i)
-		}
-	}
-	for i, size := range sizes {
-		target.send(t, udpRelayDatagram(size, byte(100+i)))
-	}
-	for i, size := range sizes {
-		if got, want := udpRelayClientRead(t, conn), udpRelayDatagram(size, byte(100+i)); !bytes.Equal(got, want) {
-			t.Fatalf("client datagram %d is %d bytes %x..., want the target's %d-byte datagram %d", i, len(got), got[:min(len(got), 8)], size, i)
-		}
+	for _, mode := range relayModes {
+		t.Run(mode.name, func(t *testing.T) {
+			env, opener := mode.serve(t, &Relay{})
+			conn := env.dialUDP(t, "10.0.0.9:5000")
+			sizes := []int{1, 512, 1400}
+			for i, size := range sizes {
+				if _, err := conn.Write(udpRelayDatagram(size, byte(i))); err != nil {
+					t.Fatalf("client send a %d-byte datagram: %v", size, err)
+				}
+			}
+			target := opener.next(t, env)
+			for i, size := range sizes {
+				if got, want := target.recv(t), udpRelayDatagram(size, byte(i)); !bytes.Equal(got, want) {
+					t.Fatalf("target datagram %d is %d bytes %x..., want the client's %d-byte datagram %d", i, len(got), got[:min(len(got), 8)], size, i)
+				}
+			}
+			for i, size := range sizes {
+				target.send(t, udpRelayDatagram(size, byte(100+i)))
+			}
+			for i, size := range sizes {
+				if got, want := udpRelayClientRead(t, conn), udpRelayDatagram(size, byte(100+i)); !bytes.Equal(got, want) {
+					t.Fatalf("client datagram %d is %d bytes %x..., want the target's %d-byte datagram %d", i, len(got), got[:min(len(got), 8)], size, i)
+				}
+			}
+		})
 	}
 }
 
 func TestRelayUDPKeepsDatagramsAbove32KiBWholeBothWays(t *testing.T) {
-	for _, size := range []int{40000, 65507} {
-		t.Run(fmt.Sprint(size, " from the client"), func(t *testing.T) {
-			env, dialer := udpRelayServe(t, &Relay{})
-			conn := env.dialUDP(t, "10.0.0.9:5000")
-			if _, err := conn.Write(udpRelayDatagram(size, 1)); err != nil {
-				t.Fatalf("client send a %d-byte datagram: %v", size, err)
-			}
-			if got := dialer.next(t, env).recv(t); !bytes.Equal(got, udpRelayDatagram(size, 1)) {
-				t.Fatalf("target got a %d-byte datagram, want the client's %d bytes unchanged", len(got), size)
-			}
-		})
-		t.Run(fmt.Sprint(size, " from the target"), func(t *testing.T) {
-			conn, target := udpRelayOpen(t, 0)
-			target.send(t, udpRelayDatagram(size, 2))
-			conn.SetReadDeadline(time.Now().Add(testWait))
-			if got := udpRelayClientRead(t, conn); !bytes.Equal(got, udpRelayDatagram(size, 2)) {
-				t.Fatalf("client got a %d-byte datagram, want the target's %d bytes unchanged", len(got), size)
-			}
-		})
+	for _, mode := range relayModes {
+		for _, size := range []int{40000, 65507} {
+			t.Run(fmt.Sprint(mode.name, " ", size, " from the client"), func(t *testing.T) {
+				env, opener := mode.serve(t, &Relay{})
+				conn := env.dialUDP(t, "10.0.0.9:5000")
+				if _, err := conn.Write(udpRelayDatagram(size, 1)); err != nil {
+					t.Fatalf("client send a %d-byte datagram: %v", size, err)
+				}
+				if got := opener.next(t, env).recv(t); !bytes.Equal(got, udpRelayDatagram(size, 1)) {
+					t.Fatalf("target got a %d-byte datagram, want the client's %d bytes unchanged", len(got), size)
+				}
+			})
+			t.Run(fmt.Sprint(mode.name, " ", size, " from the target"), func(t *testing.T) {
+				conn, target := udpRelayOpen(t, mode, 0)
+				target.send(t, udpRelayDatagram(size, 2))
+				conn.SetReadDeadline(time.Now().Add(testWait))
+				if got := udpRelayClientRead(t, conn); !bytes.Equal(got, udpRelayDatagram(size, 2)) {
+					t.Fatalf("client got a %d-byte datagram, want the target's %d bytes unchanged", len(got), size)
+				}
+			})
+		}
 	}
 }
 
-func TestRelayUDPFlowReusesDialledConn(t *testing.T) {
-	env, dialer := udpRelayServe(t, &Relay{})
-	conn := env.dialUDP(t, "10.0.0.9:5000")
-	testSend(t, conn, "first")
-	target := dialer.next(t, env)
-	target.recv(t)
-	for _, datagram := range []string{"second", "third"} {
-		testSend(t, conn, datagram)
-		if got := target.recv(t); string(got) != datagram {
-			t.Fatalf("the flow's dialled conn got %q, want the later datagram %q", got, datagram)
-		}
-	}
-	if dials := dialer.recorded(); len(dials) != 1 {
-		t.Fatalf("dialer.DialContext called %d times for one client port, want 1", len(dials))
+func TestRelayUDPFlowReusesItsSocket(t *testing.T) {
+	for _, mode := range relayModes {
+		t.Run(mode.name, func(t *testing.T) {
+			env, opener := mode.serve(t, &Relay{})
+			conn := env.dialUDP(t, "10.0.0.9:5000")
+			testSend(t, conn, "first")
+			target := opener.next(t, env)
+			target.recv(t)
+			for _, datagram := range []string{"second", "third"} {
+				testSend(t, conn, datagram)
+				if got := target.recv(t); string(got) != datagram {
+					t.Fatalf("the flow's socket got %q, want the later datagram %q", got, datagram)
+				}
+			}
+			if n := opener.opens(); n != 1 {
+				t.Fatalf("Relay opened %d sockets for one client port to one target, want 1", n)
+			}
+		})
 	}
 }
 
@@ -359,28 +411,29 @@ func TestRelayUDPDialledReadErrorEndsFlowAndRedials(t *testing.T) {
 	}
 }
 
-// udpRelayTwoTargets opens a session to Relay{Idle: idle} from one client socket to two targets, each reached by one datagram.
-func udpRelayTwoTargets(t *testing.T, idle time.Duration) (env *testEnv, dialer *udpRelayDialer, conn *gonet.UDPConn, first, second *udpRelayTarget) {
+// udpRelayTwoTargets opens a session to Relay{Idle: idle} in mode from one client socket to two targets, each reached by one datagram.
+func udpRelayTwoTargets(t *testing.T, mode relayMode, idle time.Duration) (env *testEnv, opener relayOpener, conn *gonet.UDPConn, first, second relayEnd) {
 	t.Helper()
-	env, dialer = udpRelayServe(t, &Relay{Idle: idle})
+	env, opener = mode.serve(t, &Relay{Idle: idle})
 	fam := udpFamilies[0]
 	conn = env.listenUDP(t, fam.client)
 	testSendTo(t, conn, []byte("to first"), fam.first)
-	first = dialer.next(t, env)
+	first = opener.next(t, env)
 	if got := first.recv(t); string(got) != "to first" {
 		t.Fatalf("first target got %q, want %q", got, "to first")
 	}
 	testSendTo(t, conn, []byte("to second"), fam.second)
-	second = dialer.next(t, env)
+	second = opener.next(t, env)
 	if got := second.recv(t); string(got) != "to second" {
 		t.Fatalf("second target got %q, want %q", got, "to second")
 	}
-	return env, dialer, conn, first, second
+	return env, opener, conn, first, second
 }
 
 func TestRelayUDPSessionDialsOnceEachTargetAndRepliesFromIt(t *testing.T) {
 	fam := udpFamilies[0]
-	env, dialer, conn, first, second := udpRelayTwoTargets(t, 0)
+	env, opener, conn, first, second := udpRelayTwoTargets(t, relayModes[0], 0)
+	dialer := opener.(relayDialled)
 	testSendTo(t, conn, []byte("again"), fam.first)
 	if got := first.recv(t); string(got) != "again" {
 		t.Fatalf("first target got %q, want the later datagram %q on the same socket", got, "again")
@@ -410,7 +463,8 @@ func TestRelayUDPSessionDialsOnceEachTargetAndRepliesFromIt(t *testing.T) {
 
 func TestRelayUDPReadErrorClosesOnlyThatTargetsSocket(t *testing.T) {
 	fam := udpFamilies[0]
-	env, dialer, conn, first, second := udpRelayTwoTargets(t, 0)
+	env, opener, conn, firstEnd, second := udpRelayTwoTargets(t, relayModes[0], 0)
+	dialer, first := opener.(relayDialled), firstEnd.(*udpRelayTarget)
 	// A past deadline fails Relay's pending Read as an ICMP port unreachable would.
 	first.dialled.SetReadDeadline(time.Now().Add(-time.Second))
 	select {
@@ -431,16 +485,20 @@ func TestRelayUDPReadErrorClosesOnlyThatTargetsSocket(t *testing.T) {
 		t.Fatalf("dialer.DialContext calls %+v, want a third dial to %v", dials, fam.first)
 	}
 	select {
-	case <-second.dialled.closed:
+	case <-second.gone():
 		t.Fatal("second target's socket closed, want only the failed one closed")
 	default:
 	}
 }
 
 func TestRelayUDPSessionIdleClosesEverySocket(t *testing.T) {
-	_, _, _, first, second := udpRelayTwoTargets(t, 200*time.Millisecond)
-	udpRelayExpectClosed(t, first, "first target of a session idle past Relay.Idle 200ms")
-	udpRelayExpectClosed(t, second, "second target of a session idle past Relay.Idle 200ms")
+	for _, mode := range relayModes {
+		t.Run(mode.name, func(t *testing.T) {
+			_, _, _, first, second := udpRelayTwoTargets(t, mode, 200*time.Millisecond)
+			udpRelayExpectClosed(t, first, "first target of a session idle past Relay.Idle 200ms")
+			udpRelayExpectClosed(t, second, "second target of a session idle past Relay.Idle 200ms")
+		})
+	}
 }
 
 func TestRelayIdleDefaultsTo60Seconds(t *testing.T) {
@@ -452,51 +510,57 @@ func TestRelayIdleDefaultsTo60Seconds(t *testing.T) {
 	}
 }
 
-// udpRelayOpen opens a flow to Relay{Idle: idle} and returns its client conn and target once the first datagram arrived.
-func udpRelayOpen(t *testing.T, idle time.Duration) (net.Conn, *udpRelayTarget) {
+// udpRelayOpen opens a flow to Relay{Idle: idle} in mode and returns its client conn and target once the first datagram arrived.
+func udpRelayOpen(t *testing.T, mode relayMode, idle time.Duration) (net.Conn, relayEnd) {
 	t.Helper()
-	env, dialer := udpRelayServe(t, &Relay{Idle: idle})
+	env, opener := mode.serve(t, &Relay{Idle: idle})
 	conn := env.dialUDP(t, "10.0.0.9:5000")
 	testSend(t, conn, "open")
-	target := dialer.next(t, env)
+	target := opener.next(t, env)
 	target.recv(t)
 	return conn, target
 }
 
-func udpRelayExpectClosed(t *testing.T, target *udpRelayTarget, what string) {
+func udpRelayExpectClosed(t *testing.T, target relayEnd, what string) {
 	t.Helper()
 	select {
-	case <-target.dialled.closed:
+	case <-target.gone():
 	case <-time.After(udpRelayIdleBound):
-		t.Fatalf("%s: dialled conn still open %v later, want Relay.Idle to close it", what, udpRelayIdleBound)
+		t.Fatalf("%s: socket still open %v later, want Relay.Idle to close it", what, udpRelayIdleBound)
 	}
 }
 
 func TestRelayUDPFlowEndsAfterIdle(t *testing.T) {
-	_, target := udpRelayOpen(t, 200*time.Millisecond)
-	udpRelayExpectClosed(t, target, "flow idle past Relay.Idle 200ms")
+	for _, mode := range relayModes {
+		t.Run(mode.name, func(t *testing.T) {
+			_, target := udpRelayOpen(t, mode, 200*time.Millisecond)
+			udpRelayExpectClosed(t, target, "flow idle past Relay.Idle 200ms")
+		})
+	}
 }
 
 func TestRelayUDPTrafficEitherWayExtendsIdle(t *testing.T) {
 	const idle = 500 * time.Millisecond
-	for _, direction := range []string{"from the client", "from the target"} {
-		t.Run(direction, func(t *testing.T) {
-			conn, target := udpRelayOpen(t, idle)
-			for end := time.Now().Add(3 * idle); time.Now().Before(end); time.Sleep(idle / 5) {
-				if direction == "from the client" {
-					testSend(t, conn, "keep")
-					target.recv(t)
-				} else {
-					target.send(t, []byte("keep"))
-					udpRelayClientRead(t, conn)
+	for _, mode := range relayModes {
+		for _, direction := range []string{"from the client", "from the target"} {
+			t.Run(mode.name+" "+direction, func(t *testing.T) {
+				conn, target := udpRelayOpen(t, mode, idle)
+				for end := time.Now().Add(3 * idle); time.Now().Before(end); time.Sleep(idle / 5) {
+					if direction == "from the client" {
+						testSend(t, conn, "keep")
+						target.recv(t)
+					} else {
+						target.send(t, []byte("keep"))
+						udpRelayClientRead(t, conn)
+					}
+					select {
+					case <-target.gone():
+						t.Fatalf("Relay closed the flow while datagrams flowed %s every %v, want each to push back Relay.Idle %v", direction, idle/5, idle)
+					default:
+					}
 				}
-				select {
-				case <-target.dialled.closed:
-					t.Fatalf("Relay closed the flow while datagrams flowed %s every %v, want each to push back Relay.Idle %v", direction, idle/5, idle)
-				default:
-				}
-			}
-			udpRelayExpectClosed(t, target, "flow idle after datagrams "+direction)
-		})
+				udpRelayExpectClosed(t, target, "flow idle after datagrams "+direction)
+			})
+		}
 	}
 }
