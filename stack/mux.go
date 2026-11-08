@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -37,21 +40,36 @@ type HandlerFunc func(context.Context, Flow)
 // ServeFlow calls h(ctx, f).
 func (h HandlerFunc) ServeFlow(ctx context.Context, f Flow) { h(ctx, f) }
 
-// Mux dispatches each flow to the handler registered for its network and destination port, else to its network's fallback, else rejects it.
-// A UDP session goes by its first datagram's destination port, its handler then serving its datagrams to every target.
+// Mux dispatches each flow by its network and destination to the handler whose pattern matches it, else to Fallback, else rejects it.
+// A UDP session goes by its first datagram's destination, its handler then serving its datagrams to every target.
+//
+// A pattern is "" for any address and port, host for that host and any port, host:port, or :port for any address and that port.
+// host is an IP address or a CIDR prefix, its host bits masked off, IPv6 in brackets when a port follows; an IPv4-mapped IPv6 address is taken as IPv4.
+// Port 0 means any port.
+//
+// The registered hosts form layers, longest prefix first, an address being a full-length prefix, and the any-address layer last.
+// A flow goes to the first layer containing its destination address, of its family, with a handler for its port or for any port; one with neither passes the flow on to the next layer.
+//
+// A Mux is a Handler, so one can serve a layer of another; it then dispatches with its own patterns and Fallback, never handing a flow back to the outer Mux.
 type Mux struct {
+	// Fallback serves the flows no pattern matches; nil rejects them. Set it before the Mux serves flows.
+	Fallback Handler
+
 	mu       sync.RWMutex
-	handlers map[muxKey]Handler
+	handlers map[muxRoute]Handler
+	// layers holds each network's registered prefixes, longest first; the any-address layer, the zero Prefix, is not in it.
+	layers map[string][]netip.Prefix
 }
 
-type muxKey struct {
+type muxRoute struct {
 	network string
+	prefix  netip.Prefix
 	port    uint16
 }
 
 // NewMux returns an empty Mux, which rejects every flow.
 func NewMux() *Mux {
-	return &Mux{handlers: make(map[muxKey]Handler)}
+	return &Mux{handlers: make(map[muxRoute]Handler), layers: make(map[string][]netip.Prefix)}
 }
 
 // DefaultMux returns a Mux relaying every TCP connection and UDP flow through dialer, the DNS flows to UDP port 53 over TCP.
@@ -62,44 +80,120 @@ func DefaultMux(dialer Dialer) *Mux {
 		udp.ListenConfig = lc
 	}
 	m := NewMux()
-	m.Handle("tcp", 0, &Relay{Dialer: dialer})
-	m.Handle("udp", 53, &DNS{Dialer: dialer})
-	m.Handle("udp", 0, udp)
+	m.Handle("tcp", "", &Relay{Dialer: dialer})
+	m.Handle("udp", ":53", &DNS{Dialer: dialer})
+	m.Handle("udp", "", udp)
 	return m
 }
 
-// Handle registers h for the flows of network, "tcp" or "udp", to port; port 0 registers the network's fallback.
-// It panics on another network, a nil handler or a registration already made.
-func (m *Mux) Handle(network string, port uint16, h Handler) {
+// Handle registers h for the flows of network, "tcp" or "udp", whose destination matches pattern.
+// It panics on another network, a nil handler, an invalid pattern or one already registered for network.
+func (m *Mux) Handle(network, pattern string, h Handler) {
 	if network != "tcp" && network != "udp" {
 		panic(fmt.Sprintf("stack: Mux.Handle of network %q, want tcp or udp", network))
 	}
 	if h == nil {
-		panic(fmt.Sprintf("stack: Mux.Handle of a nil handler for %s/%d", network, port))
+		panic(fmt.Sprintf("stack: Mux.Handle of a nil handler for %s %q", network, pattern))
+	}
+	prefix, port, err := parseMuxPattern(pattern)
+	if err != nil {
+		panic(fmt.Sprintf("stack: Mux.Handle of %s pattern %q: %v", network, pattern, err))
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := muxKey{network, port}
-	if _, ok := m.handlers[key]; ok {
-		panic(fmt.Sprintf("stack: Mux.Handle of %s/%d registered twice", network, port))
+	route := muxRoute{network, prefix, port}
+	if _, ok := m.handlers[route]; ok {
+		panic(fmt.Sprintf("stack: Mux.Handle of %s pattern %q registered twice", network, pattern))
 	}
-	m.handlers[key] = h
+	m.handlers[route] = h
+	layers := m.layers[network]
+	if prefix.IsValid() && !slices.Contains(layers, prefix) {
+		i := slices.IndexFunc(layers, func(p netip.Prefix) bool { return p.Bits() < prefix.Bits() })
+		if i < 0 {
+			i = len(layers)
+		}
+		m.layers[network] = slices.Insert(layers, i, prefix)
+	}
 }
 
-// ServeFlow hands f to the handler for its network and port, else to its network's fallback, else rejects it.
+// parseMuxPattern returns pattern's masked prefix, the zero Prefix for any address, and its port, 0 for any port.
+func parseMuxPattern(pattern string) (netip.Prefix, uint16, error) {
+	if pattern == "" {
+		return netip.Prefix{}, 0, nil
+	}
+	whole := pattern
+	if strings.HasPrefix(whole, "[") && strings.HasSuffix(whole, "]") {
+		whole = whole[1 : len(whole)-1]
+	}
+	if prefix, err := parseMuxHost(whole); err == nil {
+		return prefix, 0, nil
+	}
+	host, portText, err := net.SplitHostPort(pattern)
+	if err != nil {
+		return netip.Prefix{}, 0, err
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil {
+		return netip.Prefix{}, 0, fmt.Errorf("port %q: want 0 to 65535", portText)
+	}
+	if host == "" {
+		return netip.Prefix{}, uint16(port), nil
+	}
+	prefix, err := parseMuxHost(host)
+	if err != nil {
+		return netip.Prefix{}, 0, err
+	}
+	return prefix, uint16(port), nil
+}
+
+// parseMuxHost parses an IP address as its full-length prefix, or a CIDR prefix masked.
+func parseMuxHost(host string) (netip.Prefix, error) {
+	if strings.Contains(host, "/") {
+		prefix, err := netip.ParsePrefix(host)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+		return prefix.Masked(), nil
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	addr = addr.Unmap()
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
+}
+
+// ServeFlow hands f to the handler its network and target match, else to Fallback, else rejects it.
 func (m *Mux) ServeFlow(ctx context.Context, f Flow) {
-	if h := m.handler(f.Network(), f.Target().Port()); h != nil {
+	if h := m.handler(f.Network(), f.Target()); h != nil {
 		h.ServeFlow(ctx, f)
+		return
+	}
+	if m.Fallback != nil {
+		m.Fallback.ServeFlow(ctx, f)
 		return
 	}
 	f.Reject()
 }
 
-func (m *Mux) handler(network string, port uint16) Handler {
+func (m *Mux) handler(network string, target netip.AddrPort) Handler {
+	addr, port := target.Addr().Unmap(), target.Port()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if h, ok := m.handlers[muxKey{network, port}]; ok {
+	for _, prefix := range m.layers[network] {
+		if prefix.Contains(addr) {
+			if h := m.layerHandler(network, prefix, port); h != nil {
+				return h
+			}
+		}
+	}
+	return m.layerHandler(network, netip.Prefix{}, port)
+}
+
+// layerHandler returns the handler of network's layer prefix for port, else for any port.
+func (m *Mux) layerHandler(network string, prefix netip.Prefix, port uint16) Handler {
+	if h, ok := m.handlers[muxRoute{network, prefix, port}]; ok {
 		return h
 	}
-	return m.handlers[muxKey{network, 0}]
+	return m.handlers[muxRoute{network, prefix, 0}]
 }

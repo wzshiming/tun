@@ -686,7 +686,7 @@ func udpRelayServe(t *testing.T, relay *Relay) (*testEnv, *udpRelayDialer) {
 	relay.Dialer = dialer
 	env := testServeWith(t, Options{Addresses: testAddresses}, func(*fakeDialer) Handler {
 		m := NewMux()
-		m.Handle("udp", 0, relay)
+		m.Handle("udp", "", relay)
 		return m
 	})
 	return env, dialer

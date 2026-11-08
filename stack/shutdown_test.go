@@ -21,7 +21,7 @@ func TestServeKeepsAbortingEndpointsWhileServeFlowIsOutstanding(t *testing.T) {
 	accepted := make(chan struct{}, 1)
 	// The handler ignores ctx and outlives the cancel until two re-abort rounds ran, or 2s passed.
 	env := testServeMux(t, func(m *Mux) {
-		m.Handle("tcp", 0, HandlerFunc(func(_ context.Context, f Flow) {
+		m.Handle("tcp", "", HandlerFunc(func(_ context.Context, f Flow) {
 			if _, err := f.Accept(); err != nil {
 				return
 			}
@@ -46,7 +46,7 @@ func TestServeKeepsAbortingEndpointsWhileServeFlowIsOutstanding(t *testing.T) {
 
 func TestServeCancelWithoutFlowsReturnsWithin100ms(t *testing.T) {
 	env := testServeMux(t, func(m *Mux) {
-		m.Handle("tcp", 0, HandlerFunc(func(context.Context, Flow) {}))
+		m.Handle("tcp", "", HandlerFunc(func(context.Context, Flow) {}))
 	})
 	start := time.Now()
 	env.cancel()

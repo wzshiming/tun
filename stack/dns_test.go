@@ -21,7 +21,7 @@ func testServeDNS(t *testing.T, idle time.Duration) *testEnv {
 	t.Helper()
 	return testServeWith(t, Options{Addresses: testAddresses}, func(d *fakeDialer) Handler {
 		m := NewMux()
-		m.Handle("udp", 53, &DNS{Dialer: d, Idle: idle})
+		m.Handle("udp", ":53", &DNS{Dialer: d, Idle: idle})
 		return m
 	})
 }
@@ -190,7 +190,7 @@ func TestUDPDNSIdleCountsTheWholeSessionNotEachServer(t *testing.T) {
 func TestDNSRejectsTCP(t *testing.T) {
 	env := testServeWith(t, Options{Addresses: testAddresses}, func(d *fakeDialer) Handler {
 		m := NewMux()
-		m.Handle("tcp", 53, &DNS{Dialer: d})
+		m.Handle("tcp", ":53", &DNS{Dialer: d})
 		return m
 	})
 	env.dialTCPRefused(t, "10.0.0.53:53")

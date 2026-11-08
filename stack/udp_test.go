@@ -37,8 +37,8 @@ func TestServeNilHandlerAnswersUDPWithPortUnreachable(t *testing.T) {
 func TestUDPWithoutHandlerIsDropped(t *testing.T) {
 	env := testServeWith(t, Options{Addresses: testAddresses}, func(d *fakeDialer) Handler {
 		m := NewMux()
-		m.Handle("tcp", 0, &Relay{Dialer: d})
-		m.Handle("udp", 53, &DNS{Dialer: d})
+		m.Handle("tcp", "", &Relay{Dialer: d})
+		m.Handle("udp", ":53", &DNS{Dialer: d})
 		return m
 	})
 	conn := env.dialUDP(t, "10.0.0.9:1234")
@@ -108,7 +108,7 @@ func udpSessionServe(t *testing.T, handle func(context.Context, Flow)) (*testEnv
 	t.Helper()
 	served := new(atomic.Int32)
 	env := testServeMux(t, func(m *Mux) {
-		m.Handle("udp", 0, HandlerFunc(func(ctx context.Context, f Flow) {
+		m.Handle("udp", "", HandlerFunc(func(ctx context.Context, f Flow) {
 			served.Add(1)
 			handle(ctx, f)
 		}))
@@ -445,7 +445,7 @@ func TestUDPSessionClosedByHandlerFreesClientEndpoint(t *testing.T) {
 func TestUDPSessionRejectedByMuxIsRemoved(t *testing.T) {
 	reads := make(chan udpRead, 4)
 	env := testServeMux(t, func(m *Mux) {
-		m.Handle("udp", 5353, HandlerFunc(func(_ context.Context, f Flow) {
+		m.Handle("udp", ":5353", HandlerFunc(func(_ context.Context, f Flow) {
 			conn, err := f.Accept()
 			if err != nil {
 				return
@@ -482,13 +482,13 @@ func TestUDPSessionQueueDropsNewDatagramsBeyond128(t *testing.T) {
 	accepted := make(chan net.Conn, 1)
 	release := make(chan struct{})
 	env := testServeMux(t, func(m *Mux) {
-		m.Handle("udp", 0, HandlerFunc(func(_ context.Context, f Flow) {
+		m.Handle("udp", "", HandlerFunc(func(_ context.Context, f Flow) {
 			if conn, err := f.Accept(); err == nil {
 				accepted <- conn
 			}
 			<-release
 		}))
-		m.Handle("tcp", 0, HandlerFunc(func(_ context.Context, f Flow) {
+		m.Handle("tcp", "", HandlerFunc(func(_ context.Context, f Flow) {
 			if conn, err := f.Accept(); err == nil {
 				io.Copy(conn, conn)
 			}

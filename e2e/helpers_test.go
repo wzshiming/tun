@@ -33,7 +33,7 @@ const ttDNSQuery = "\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\
 // ttCaptureLab is a capture list covering only the benchmarking and documentation ranges.
 var ttCaptureLab = []netip.Prefix{netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("2001:db8::/32")}
 
-// ttUDPEchoTarget is a TEST-NET-2 destination whose UDP port ttServeDev relays, which tests redirect to a loopback echo server.
+// ttUDPEchoTarget is a TEST-NET-2 destination whose prefix ttServeDev relays, which tests redirect to a loopback echo server.
 var ttUDPEchoTarget = netip.MustParseAddrPort("198.51.100.1:5000")
 
 // ttConeSecondTarget is a second echo target on ttUDPEchoTarget's port, and ttConeInjectedSource a source the client never sends to.
@@ -121,12 +121,12 @@ func ttOpen(t *testing.T, ctx context.Context, cfg tun.Config) *tun.Device {
 	return dev
 }
 
-// ttServeDev runs stack.Serve on dev until ctx ends, relaying TCP, DNS and, full cone, UDP to ttUDPEchoTarget's port through dialer; the channel receives its result.
+// ttServeDev runs stack.Serve on dev until ctx ends, relaying TCP, DNS and, full cone, UDP to ttUDPEchoTarget's TEST-NET-2 prefix through dialer; the channel receives its result.
 func ttServeDev(ctx context.Context, dev *tun.Device, cfg tun.Config, dialer *ttDialRecorder) <-chan error {
 	mux := stack.NewMux()
-	mux.Handle("tcp", 0, &stack.Relay{Dialer: dialer})
-	mux.Handle("udp", 53, &stack.DNS{Dialer: dialer})
-	mux.Handle("udp", ttUDPEchoTarget.Port(), &stack.Relay{Dialer: dialer, ListenConfig: dialer})
+	mux.Handle("tcp", "", &stack.Relay{Dialer: dialer})
+	mux.Handle("udp", ":53", &stack.DNS{Dialer: dialer})
+	mux.Handle("udp", "198.51.100.0/24", &stack.Relay{Dialer: dialer, ListenConfig: dialer})
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- stack.Serve(ctx, dev, mux, stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
