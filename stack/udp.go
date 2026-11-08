@@ -121,7 +121,7 @@ func (c *udpConn) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// WriteTo sends b to the client as a datagram from addr, a *net.UDPAddr of the client's IP family.
+// WriteTo sends b to the client as a datagram from addr, a specified *net.UDPAddr of the client's IP family, an IPv4-mapped one counting as IPv4.
 func (c *udpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	src, ok := addr.(*net.UDPAddr)
 	if !ok {
@@ -140,9 +140,12 @@ func (c *udpConn) writeFrom(b []byte, src netip.AddrPort) (int, error) {
 		return 0, net.ErrClosed
 	default:
 	}
-	ip, maxSize := src.Addr(), 65527
+	ip, maxSize := src.Addr().Unmap(), 65527
+	if ip.IsUnspecified() {
+		return 0, fmt.Errorf("stack: write udp from unspecified address %v", src)
+	}
 	if c.netProto == header.IPv4ProtocolNumber {
-		ip, maxSize = ip.Unmap(), 65507
+		maxSize = 65507
 		if !ip.Is4() {
 			return 0, fmt.Errorf("stack: write udp from %v to IPv4 client %v", src, c.client)
 		}

@@ -266,6 +266,64 @@ func TestUDPSessionWriteToDeliversFromAnySource(t *testing.T) {
 	}
 }
 
+// udpFixWriteFrom opens a session from client fam and returns the client socket and the error of the handler's WriteTo from src.
+func udpFixWriteFrom(t *testing.T, fam netip.Addr, src netip.AddrPort) (*gonet.UDPConn, error) {
+	t.Helper()
+	errs := make(chan error, 1)
+	env, _ := udpSessionServe(t, func(_ context.Context, f Flow) {
+		conn, err := f.Accept()
+		if err != nil {
+			errs <- err
+			return
+		}
+		conn.SetReadDeadline(time.Now().Add(testWait))
+		udpReadFrom(conn)
+		_, err = conn.(net.PacketConn).WriteTo([]byte("from "+src.String()), net.UDPAddrFromAddrPort(src))
+		errs <- err
+	})
+	conn := env.listenUDP(t, fam)
+	first := udpFamilies[0].first
+	if fam.Is6() {
+		first = udpFamilies[1].first
+	}
+	testSendTo(t, conn, []byte("open"), first)
+	return conn, testReceive(t, errs, "handler WriteTo")
+}
+
+func TestUDPSessionWriteToFromIPv4MappedSourceDeliversPlainIPv4(t *testing.T) {
+	src := netip.MustParseAddrPort("[::ffff:10.0.0.77]:7777")
+	conn, err := udpFixWriteFrom(t, testClient4, src)
+	if err != nil {
+		t.Fatalf("WriteTo(_, %v) to an IPv4 client = %v, want nil", src, err)
+	}
+	if got, want := testRecvFrom(t, conn), (udpRead{"from " + src.String(), netip.MustParseAddrPort("10.0.0.77:7777"), nil}); got != want {
+		t.Fatalf("client got %+v, want %+v", got, want)
+	}
+}
+
+func TestUDPSessionWriteToFromIPv4MappedSourceToIPv6ClientFails(t *testing.T) {
+	src := netip.MustParseAddrPort("[::ffff:10.0.0.77]:7777")
+	if _, err := udpFixWriteFrom(t, testClient6, src); err == nil {
+		t.Fatalf("WriteTo(_, %v) to an IPv6 client = nil error, want a wrong-family error", src)
+	}
+}
+
+func TestUDPSessionWriteToFromUnspecifiedSourceFails(t *testing.T) {
+	for _, tc := range []struct {
+		client netip.Addr
+		src    netip.AddrPort
+	}{
+		{testClient4, netip.MustParseAddrPort("0.0.0.0:7777")},
+		{testClient6, netip.MustParseAddrPort("[::]:7777")},
+	} {
+		t.Run(tc.src.String(), func(t *testing.T) {
+			if _, err := udpFixWriteFrom(t, tc.client, tc.src); err == nil {
+				t.Fatalf("WriteTo(_, %v) = nil error, want an error for an unspecified source", tc.src)
+			}
+		})
+	}
+}
+
 func TestUDPSessionWriteToCarriesLargestDatagramAndRejectsLarger(t *testing.T) {
 	for _, fam := range udpFamilies {
 		t.Run(fam.name, func(t *testing.T) {
