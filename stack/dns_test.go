@@ -2,6 +2,7 @@ package stack
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -149,6 +150,40 @@ func TestUDPDNSSessionDialsOnceEachServerAndRepliesFromIt(t *testing.T) {
 	testWriteFrame(t, firstServer, "r1")
 	if got, want := testRecvFrom(t, conn), (udpRead{"r1", first, nil}); got != want {
 		t.Fatalf("client got %+v, want %+v", got, want)
+	}
+}
+
+func TestUDPDNSIdleCountsTheWholeSessionNotEachServer(t *testing.T) {
+	const idle = 200 * time.Millisecond
+	env := testServeDNS(t, idle)
+	busy, silent := netip.MustParseAddrPort("10.0.0.53:53"), netip.MustParseAddrPort("10.0.0.54:53")
+	conn := env.listenUDP(t, testClient4)
+	testSendTo(t, conn, []byte("q"), busy)
+	busyServer := env.nextTarget(t)
+	testReadFrame(t, busyServer)
+	testSendTo(t, conn, []byte("q"), silent)
+	silentServer := env.nextTarget(t)
+	testReadFrame(t, silentServer)
+	var last time.Time
+	for start := time.Now(); time.Since(start) < 3*idle; {
+		time.Sleep(80 * time.Millisecond)
+		testSendTo(t, conn, []byte("q"), busy)
+		last = time.Now()
+		testReadFrame(t, busyServer)
+	}
+	silentServer.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	var netErr net.Error
+	if _, err := silentServer.Read(make([]byte, 1)); !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("silent server's conn Read() = %v after %v of queries to %v every 80ms, want a timeout: DNS.Idle %v counts the whole session", err, 3*idle, busy, idle)
+	}
+	for _, server := range []net.Conn{busyServer, silentServer} {
+		if err := server.SetReadDeadline(time.Now().Add(testIdleBound)); err != nil {
+			t.Fatal(err)
+		}
+		testReadEOF(t, server, "server conn of a session silent since its last query")
+	}
+	if ended := time.Since(last); ended < idle*3/4 || ended > 2*time.Second {
+		t.Fatalf("session ended %v after its last query, want about DNS.Idle %v", ended, idle)
 	}
 }
 
