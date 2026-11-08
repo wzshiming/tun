@@ -38,6 +38,8 @@ type udpRelayDialer struct {
 	stalled bool
 	opened  []*udpRelayTarget
 	targets chan *udpRelayTarget
+	// slow holds each dial to an address it names this long, or until the dial's ctx ends.
+	slow map[string]time.Duration
 }
 
 // udpRelayTarget is the far end of one dial: remote receives the datagrams Relay writes to dialled; remote is nil when stalled.
@@ -61,8 +63,15 @@ func (c *udpRelayConn) Close() error {
 func (d *udpRelayDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	d.mu.Lock()
 	d.dials = append(d.dials, fakeDial{network: network, address: address, client: ClientAddr(ctx)})
-	err, stalled := d.err, d.stalled
+	err, stalled, delay := d.err, d.stalled, d.slow[address]
 	d.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +116,15 @@ func (d *udpRelayDialer) fail(err error) {
 func (d *udpRelayDialer) stall() {
 	d.mu.Lock()
 	d.stalled = true
+	d.mu.Unlock()
+}
+
+func (d *udpRelayDialer) slowDial(address string, delay time.Duration) {
+	d.mu.Lock()
+	if d.slow == nil {
+		d.slow = make(map[string]time.Duration)
+	}
+	d.slow[address] = delay
 	d.mu.Unlock()
 }
 
@@ -489,6 +507,45 @@ func TestRelayUDPReadErrorClosesOnlyThatTargetsSocket(t *testing.T) {
 		t.Fatal("second target's socket closed, want only the failed one closed")
 	default:
 	}
+}
+
+// relayStallBound is how long a datagram may take to reach its target while another target of its session dials.
+const relayStallBound = 500 * time.Millisecond
+
+func TestRelayUDPSlowDialDoesNotDelayOtherTargets(t *testing.T) {
+	fam := udpFamilies[0]
+	env, dialer := udpRelayServe(t, &Relay{})
+	dialer.slowDial(fam.second.String(), 2*time.Second)
+	conn := env.listenUDP(t, fam.client)
+	testSendTo(t, conn, []byte("to slow"), fam.second)
+	start := time.Now()
+	testSendTo(t, conn, []byte("to fast"), fam.first)
+	fast := dialer.next(t, env).recv(t)
+	if elapsed := time.Since(start); elapsed > relayStallBound {
+		t.Fatalf("datagram to %v reached a target %v after sending while the dial to %v took 2s, want within %v", fam.first, elapsed.Round(time.Millisecond), fam.second, relayStallBound)
+	}
+	if string(fast) != "to fast" {
+		t.Fatalf("first target reached got %q, want %q", fast, "to fast")
+	}
+	if got := dialer.next(t, env).recv(t); string(got) != "to slow" {
+		t.Fatalf("slow target got %q once dialled, want %q", got, "to slow")
+	}
+}
+
+func TestRelayUDPIdleCountsForTheWholeSession(t *testing.T) {
+	const idle = 300 * time.Millisecond
+	fam := udpFamilies[0]
+	_, _, conn, first, second := udpRelayTwoTargets(t, relayModes[0], idle)
+	for end := time.Now().Add(3 * idle); time.Now().Before(end); time.Sleep(idle / 5) {
+		testSendTo(t, conn, []byte("keep"), fam.first)
+		first.recv(t)
+		select {
+		case <-second.gone():
+			t.Fatalf("second target's socket closed while datagrams flowed to the first every %v, want Relay.Idle %v to count for the whole session", idle/5, idle)
+		default:
+		}
+	}
+	udpRelayExpectClosed(t, second, "second target once the session idled")
 }
 
 func TestRelayUDPSessionIdleClosesEverySocket(t *testing.T) {

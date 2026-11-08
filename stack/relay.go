@@ -1,6 +1,7 @@
 package stack
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"net"
@@ -59,14 +60,17 @@ func (r *Relay) idle() time.Duration {
 	return cmp.Or(r.Idle, 60*time.Second)
 }
 
+// relayQueueLen is how many datagrams a target holds while it dials or sends; more are dropped.
+const relayQueueLen = 64
+
 // relaySession sends each datagram of conn, a UDP session's, to the remote dial opened for its target on the target's first datagram, and each remote's replies back from its target, until conn fails, ctx ends or idle passes without a datagram either way; it then closes conn and every remote.
-// A remote failing to dial, send or receive is dropped alone, and its target's next datagram dials again.
+// Each target dials and sends on its own goroutine, so a slow one delays no other; a remote failing to dial, send or receive is dropped alone, and its target's next datagram dials again.
 func relaySession(ctx context.Context, conn net.Conn, idle time.Duration, dial func(target string) (net.Conn, error), send func(remote net.Conn, datagram []byte) error, recv func(remote net.Conn, buf []byte) ([]byte, error)) {
 	pc, ok := conn.(net.PacketConn)
 	if !ok {
 		return
 	}
-	s := &sessionRelay{conn: pc, dial: dial, send: send, recv: recv, remotes: make(map[netip.AddrPort]net.Conn)}
+	s := &sessionRelay{conn: pc, dial: dial, send: send, recv: recv, targets: make(map[netip.AddrPort]*sessionTarget)}
 	stop := context.AfterFunc(ctx, s.end)
 	defer stop()
 	touch, stopIdle := afterIdle(idle, s.end)
@@ -74,7 +78,7 @@ func relaySession(ctx context.Context, conn net.Conn, idle time.Duration, dial f
 	s.touch = touch
 	s.relayQueries()
 	s.end()
-	s.replies.Wait()
+	s.workers.Wait()
 }
 
 type sessionRelay struct {
@@ -86,8 +90,17 @@ type sessionRelay struct {
 
 	mu      sync.Mutex
 	ended   bool
-	remotes map[netip.AddrPort]net.Conn
-	replies sync.WaitGroup
+	targets map[netip.AddrPort]*sessionTarget
+	workers sync.WaitGroup
+}
+
+// sessionTarget is one target of a session: the datagrams queued for it and, once dialled, its remote.
+type sessionTarget struct {
+	queue chan []byte
+	// done is closed when the target is dropped; remote and closed are guarded by sessionRelay.mu.
+	done   chan struct{}
+	remote net.Conn
+	closed bool
 }
 
 func (s *sessionRelay) relayQueries() {
@@ -101,45 +114,73 @@ func (s *sessionRelay) relayQueries() {
 		if !ok {
 			continue
 		}
-		target := udpAddr.AddrPort()
-		remote := s.remote(target)
-		if remote == nil {
-			continue
+		tg := s.target(udpAddr.AddrPort())
+		if tg == nil {
+			return
 		}
-		if err := s.send(remote, buf[:n]); err != nil {
-			s.drop(target, remote)
-			continue
+		select {
+		case tg.queue <- bytes.Clone(buf[:n]):
+		default:
 		}
-		s.touch()
 	}
 }
 
-// remote returns target's remote, dialling it first if none is open; nil if the dial failed or the session ended.
-func (s *sessionRelay) remote(target netip.AddrPort) net.Conn {
-	s.mu.Lock()
-	remote, ok := s.remotes[target]
-	s.mu.Unlock()
-	if ok {
-		return remote
-	}
-	remote, err := s.dial(target.String())
-	if err != nil {
-		return nil
-	}
+// target returns the session's target at addr, starting it if new; nil once the session ended.
+func (s *sessionRelay) target(addr netip.AddrPort) *sessionTarget {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ended {
-		remote.Close()
 		return nil
 	}
-	s.remotes[target] = remote
-	s.replies.Go(func() { s.relayReplies(target, remote) })
-	return remote
+	if tg, ok := s.targets[addr]; ok {
+		return tg
+	}
+	tg := &sessionTarget{queue: make(chan []byte, relayQueueLen), done: make(chan struct{})}
+	s.targets[addr] = tg
+	s.workers.Go(func() { s.relayTarget(addr, tg) })
+	return tg
 }
 
-func (s *sessionRelay) relayReplies(target netip.AddrPort, remote net.Conn) {
-	defer s.drop(target, remote)
-	src := net.UDPAddrFromAddrPort(target)
+// relayTarget dials tg's remote and sends it tg's queued datagrams until tg is dropped.
+func (s *sessionRelay) relayTarget(addr netip.AddrPort, tg *sessionTarget) {
+	remote, err := s.dial(addr.String())
+	if err != nil {
+		s.drop(addr, tg)
+		return
+	}
+	if !s.attach(tg, remote) {
+		remote.Close()
+		return
+	}
+	s.workers.Go(func() { s.relayReplies(addr, tg, remote) })
+	for {
+		select {
+		case datagram := <-tg.queue:
+			if err := s.send(remote, datagram); err != nil {
+				s.drop(addr, tg)
+				return
+			}
+			s.touch()
+		case <-tg.done:
+			return
+		}
+	}
+}
+
+// attach gives tg its remote, unless tg was dropped meanwhile.
+func (s *sessionRelay) attach(tg *sessionTarget, remote net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if tg.closed {
+		return false
+	}
+	tg.remote = remote
+	return true
+}
+
+func (s *sessionRelay) relayReplies(addr netip.AddrPort, tg *sessionTarget, remote net.Conn) {
+	defer s.drop(addr, tg)
+	src := net.UDPAddrFromAddrPort(addr)
 	buf := make([]byte, 65535)
 	for {
 		reply, err := s.recv(remote, buf)
@@ -153,23 +194,34 @@ func (s *sessionRelay) relayReplies(target netip.AddrPort, remote net.Conn) {
 	}
 }
 
-func (s *sessionRelay) drop(target netip.AddrPort, remote net.Conn) {
+func (s *sessionRelay) drop(addr netip.AddrPort, tg *sessionTarget) {
 	s.mu.Lock()
-	if s.remotes[target] == remote {
-		delete(s.remotes, target)
+	defer s.mu.Unlock()
+	if s.targets[addr] == tg {
+		delete(s.targets, addr)
 	}
-	s.mu.Unlock()
-	remote.Close()
+	tg.close()
+}
+
+// close stops tg and closes its remote; the caller holds sessionRelay.mu.
+func (tg *sessionTarget) close() {
+	if tg.closed {
+		return
+	}
+	tg.closed = true
+	close(tg.done)
+	if tg.remote != nil {
+		tg.remote.Close()
+	}
 }
 
 func (s *sessionRelay) end() {
 	s.conn.Close()
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.ended = true
-	remotes := s.remotes
-	s.remotes = nil
-	s.mu.Unlock()
-	for _, remote := range remotes {
-		remote.Close()
+	for _, tg := range s.targets {
+		tg.close()
 	}
+	s.targets = nil
 }
