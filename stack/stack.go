@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
@@ -45,7 +47,7 @@ func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	g := &gateway{ctx: runCtx, handler: handler}
+	g := &gateway{ctx: runCtx, handler: handler, sessions: make(map[netip.AddrPort]*udpConn)}
 	s, ep, err := g.newStack(dev, opts)
 	if err != nil {
 		dev.Close()
@@ -109,10 +111,12 @@ func (g *gateway) abortUntilDrained(s *stack.Stack) {
 type gateway struct {
 	ctx     context.Context
 	handler Handler
+	s       *stack.Stack
 
-	mu      sync.Mutex
-	stopped bool
-	flows   sync.WaitGroup
+	mu       sync.Mutex
+	stopped  bool
+	flows    sync.WaitGroup
+	sessions map[netip.AddrPort]*udpConn // live UDP sessions by client endpoint
 }
 
 // start counts a new flow in; it reports false once Serve is shutting down.
@@ -125,10 +129,15 @@ func (g *gateway) start() bool {
 	return !g.stopped
 }
 
+// stop refuses new flows and closes the live UDP sessions, which have no endpoint for Close to abort.
 func (g *gateway) stop() {
 	g.mu.Lock()
 	g.stopped = true
+	sessions := slices.Collect(maps.Values(g.sessions))
 	g.mu.Unlock()
+	for _, c := range sessions {
+		c.Close()
+	}
 }
 
 // serve runs the handler on a flow counted in by start and ends the flow once it returns.
@@ -255,7 +264,11 @@ func (g *gateway) newStack(dev wgtun.Device, opts Options) (_ *stack.Stack, _ *c
 	s.SetTransportProtocolHandler(icmp.ProtocolNumber4, consumeEcho)
 	s.SetTransportProtocolHandler(icmp.ProtocolNumber6, consumeEcho)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(s, 0, 2048, g.forwardTCP).HandlePacket)
-	s.SetTransportProtocolHandler(udp.ProtocolNumber, udp.NewForwarder(s, g.forwardUDP).HandlePacket)
+	// Without a handler UDP finds no endpoint, which the stack answers with ICMP port unreachable.
+	if g.handler != nil {
+		g.s = s
+		s.SetTransportProtocolHandler(udp.ProtocolNumber, g.handleUDP)
+	}
 	return s, ep, nil
 }
 

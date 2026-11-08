@@ -486,6 +486,18 @@ func (e *testEnv) dialUDP(t *testing.T, address string) *gonet.UDPConn {
 	return conn
 }
 
+// listenUDP opens an unconnected client socket on local, which can send to and receive from any address.
+func (e *testEnv) listenUDP(t *testing.T, local netip.Addr) *gonet.UDPConn {
+	t.Helper()
+	conn, err := e.client.ListenUDPAddrPort(netip.AddrPortFrom(local, 0))
+	if err != nil {
+		t.Fatalf("client listen udp on %v: %v", local, err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	conn.SetDeadline(time.Now().Add(testWait))
+	return conn
+}
+
 // nextTarget returns the target end of the next connection Serve dialed.
 func (e *testEnv) nextTarget(t *testing.T) net.Conn {
 	t.Helper()

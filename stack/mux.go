@@ -8,18 +8,19 @@ import (
 	"sync"
 )
 
-// Flow is a TCP connection or UDP flow captured by Serve, not yet answered.
+// Flow is a TCP connection or UDP session captured by Serve, not yet answered.
+// A UDP session carries every datagram one client address and port sends, to any target, until its conn is closed or the flow rejected.
 type Flow interface {
 	// Network is "tcp" or "udp".
 	Network() string
-	// Target is the destination the client dialled.
+	// Target is the destination the client dialled; for udp the destination of the session's first datagram.
 	Target() netip.AddrPort
 	// Client is the flow's source.
 	Client() netip.AddrPort
-	// Accept answers the flow and returns its connection: for tcp it completes the handshake; for udp each Read returns one whole datagram, the first one already queued, and Write sends one back to the client.
+	// Accept answers the flow and returns its connection: for tcp it completes the handshake; for udp it is also a net.PacketConn whose ReadFrom returns each datagram, the first one already queued, with the target the client sent it to, and whose WriteTo sends one to the client from any address; Read and Write are its view connected to Target.
 	// It may be called once; a second call, or one after Reject, returns an error.
 	Accept() (net.Conn, error)
-	// Reject refuses the flow: tcp resets the client, udp drops the flow's datagrams without an ICMP error. After Accept it does nothing.
+	// Reject refuses the flow: tcp resets the client, udp drops the session's datagrams without an ICMP error. After Accept it does nothing.
 	Reject()
 }
 
@@ -37,6 +38,7 @@ type HandlerFunc func(context.Context, Flow)
 func (h HandlerFunc) ServeFlow(ctx context.Context, f Flow) { h(ctx, f) }
 
 // Mux dispatches each flow to the handler registered for its network and destination port, else to its network's fallback, else rejects it.
+// A UDP session goes by its first datagram's destination port, its handler then serving its datagrams to every target.
 type Mux struct {
 	mu       sync.RWMutex
 	handlers map[muxKey]Handler
