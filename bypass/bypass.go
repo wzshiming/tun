@@ -32,28 +32,40 @@ func NewDialer(capture []netip.Prefix) *net.Dialer {
 }
 
 func newDialer(capture []netip.Prefix, lookup lookupFunc, bind bindFunc, now func() time.Time) *net.Dialer {
-	var cache routeCache
+	b := &defaultBinder{lookup: lookup, bind: bind, now: now}
 	d := &net.Dialer{
 		Control: func(network, address string, c syscall.RawConn) error {
 			ipv6, ok := shouldBind(network, address, capture)
 			if !ok {
 				return nil
 			}
-			iface, err := cache.get(ipv6, now(), lookup)
-			if err != nil {
-				return err
-			}
-			if err := bind(c, iface, ipv6); err != nil {
-				// The interface may be gone, so the next dial looks it up again.
-				cache.invalidate(ipv6)
-				return err
-			}
-			return nil
+			return b.bindSocket(c, ipv6)
 		},
 	}
 	// DNS server addresses are IP literals, so resolving through d never recurses.
 	d.Resolver = &net.Resolver{PreferGo: true, Dial: d.DialContext}
 	return d
+}
+
+// defaultBinder binds sockets to the family's default-route interface, looked up through a per-family cache.
+type defaultBinder struct {
+	cache  routeCache
+	lookup lookupFunc
+	bind   bindFunc
+	now    func() time.Time
+}
+
+func (b *defaultBinder) bindSocket(c syscall.RawConn, ipv6 bool) error {
+	iface, err := b.cache.get(ipv6, b.now(), b.lookup)
+	if err != nil {
+		return err
+	}
+	if err := b.bind(c, iface, ipv6); err != nil {
+		// The interface may be gone, so the next socket looks it up again.
+		b.cache.invalidate(ipv6)
+		return err
+	}
+	return nil
 }
 
 func lookupDefault(ipv6 bool) (boundIface, error) {
