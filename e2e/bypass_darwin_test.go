@@ -29,25 +29,7 @@ func TestE2EBypassBindsUDPToIPv4DefaultInterface(t *testing.T) {
 		t.Fatalf("DialContext(udp4, 198.18.0.1:9) error = %v", err)
 	}
 	defer conn.Close()
-	sc, ok := conn.(syscall.Conn)
-	if !ok {
-		t.Fatalf("%T is not a syscall.Conn", conn)
-	}
-	raw, err := sc.SyscallConn()
-	if err != nil {
-		t.Fatalf("SyscallConn error = %v", err)
-	}
-	var bound int
-	var optErr error
-	if err := raw.Control(func(fd uintptr) {
-		bound, optErr = unix.GetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_BOUND_IF)
-	}); err != nil {
-		t.Fatalf("RawConn.Control error = %v", err)
-	}
-	if optErr != nil {
-		t.Fatalf("getsockopt(IP_BOUND_IF) error = %v", optErr)
-	}
-	if bound != iface.Index {
+	if bound := bypassFixBoundIndex(t, conn); bound != iface.Index {
 		t.Errorf("IP_BOUND_IF = %d, want %d (%s holds the IPv4 default route)", bound, iface.Index, iface.Name)
 	}
 }
@@ -68,6 +50,14 @@ func TestE2EBypassListenConfigBindsUDPToIPv4DefaultInterface(t *testing.T) {
 		t.Fatalf("ListenPacket(udp4, :0) error = %v", err)
 	}
 	defer conn.Close()
+	if bound := bypassFixBoundIndex(t, conn); bound != iface.Index {
+		t.Errorf("IP_BOUND_IF = %d, want %d (%s holds the IPv4 default route)", bound, iface.Index, iface.Name)
+	}
+}
+
+// bypassFixBoundIndex returns the interface index conn's socket is bound to by IP_BOUND_IF.
+func bypassFixBoundIndex(t *testing.T, conn any) int {
+	t.Helper()
 	sc, ok := conn.(syscall.Conn)
 	if !ok {
 		t.Fatalf("%T is not a syscall.Conn", conn)
@@ -86,7 +76,5 @@ func TestE2EBypassListenConfigBindsUDPToIPv4DefaultInterface(t *testing.T) {
 	if optErr != nil {
 		t.Fatalf("getsockopt(IP_BOUND_IF) error = %v", optErr)
 	}
-	if bound != iface.Index {
-		t.Errorf("IP_BOUND_IF = %d, want %d (%s holds the IPv4 default route)", bound, iface.Index, iface.Name)
-	}
+	return bound
 }
