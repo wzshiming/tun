@@ -44,6 +44,24 @@ func ttUnicastIf(t *testing.T, network, address string, prefix netip.Prefix, lev
 		t.Fatalf("DialContext(%s, %s) error = %v", network, address, err)
 	}
 	defer conn.Close()
+	return ttSockoptUint(t, conn, level, opt)
+}
+
+// ttListenUnicastIf listens on network ":0" through a listen config capturing ttCaptureLab and reads the socket's level/opt back.
+func ttListenUnicastIf(t *testing.T, network string, level, opt int) uint32 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	conn, err := bypass.NewListenConfig(ttCaptureLab).ListenPacket(ctx, network, ":0")
+	if err != nil {
+		t.Fatalf("ListenPacket(%s, :0) error = %v", network, err)
+	}
+	defer conn.Close()
+	return ttSockoptUint(t, conn, level, opt)
+}
+
+func ttSockoptUint(t *testing.T, conn any, level, opt int) uint32 {
+	t.Helper()
 	sc, ok := conn.(syscall.Conn)
 	if !ok {
 		t.Fatalf("%T is not a syscall.Conn", conn)
@@ -87,6 +105,25 @@ func TestE2EBypassBindsUDPToIPv6DefaultInterface(t *testing.T) {
 	ttGate(t)
 	iface := ttDefaultInterface(t, true)
 	got := ttUnicastIf(t, "udp6", "[2606:4700:4700::1111]:53", netip.MustParsePrefix("2606:4700:4700::1111/128"), windows.IPPROTO_IPV6, ttIPv6UnicastIf)
+	if got != uint32(iface.Index) {
+		t.Errorf("IPV6_UNICAST_IF = %d, want %d (%s holds the IPv6 default route)", got, iface.Index, iface.Name)
+	}
+}
+
+func TestE2EBypassListenConfigBindsUDPToIPv4DefaultInterface(t *testing.T) {
+	ttGate(t)
+	iface := ttDefaultInterface(t, false)
+	got := ttListenUnicastIf(t, "udp4", windows.IPPROTO_IP, ttIPUnicastIf)
+	// Windows takes IP_UNICAST_IF in network byte order but reports it in host order.
+	if got != uint32(iface.Index) {
+		t.Errorf("IP_UNICAST_IF raw = %d, want index %d (%s holds the IPv4 default route)", got, iface.Index, iface.Name)
+	}
+}
+
+func TestE2EBypassListenConfigBindsUDPToIPv6DefaultInterface(t *testing.T) {
+	ttGate(t)
+	iface := ttDefaultInterface(t, true)
+	got := ttListenUnicastIf(t, "udp6", windows.IPPROTO_IPV6, ttIPv6UnicastIf)
 	if got != uint32(iface.Index) {
 		t.Errorf("IPV6_UNICAST_IF = %d, want %d (%s holds the IPv6 default route)", got, iface.Index, iface.Name)
 	}

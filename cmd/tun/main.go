@@ -85,8 +85,8 @@ func run(ctx context.Context, cfg tun.Config) error {
 		log.Printf("warning: %s", w)
 	}
 
-	dialer := &logDialer{dialer: bypass.NewDialer(capture)}
-	err = stack.Serve(ctx, dev.Device, dialer, stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
+	dialer := &logDialer{dialer: bypass.NewDialer(capture), listen: bypass.NewListenConfig(capture)}
+	err = stack.Serve(ctx, dev.Device, stack.DefaultMux(dialer), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
 	if ctx.Err() != nil {
 		log.Printf("interface %s down", dev.Interface)
 		return nil
@@ -96,6 +96,7 @@ func run(ctx context.Context, cfg tun.Config) error {
 
 type logDialer struct {
 	dialer *net.Dialer
+	listen stack.ListenConfig
 }
 
 func (d *logDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -111,6 +112,44 @@ func (d *logDialer) DialContext(ctx context.Context, network, address string) (n
 		return nil, err
 	}
 	return &logConn{Conn: conn, flow: flow, start: time.Now()}, nil
+}
+
+// Listen is unlogged, as the stack never calls it.
+func (d *logDialer) Listen(ctx context.Context, network, address string) (net.Listener, error) {
+	return d.listen.Listen(ctx, network, address)
+}
+
+// ListenPacket opens a UDP session's socket, which logs each target it first sends to as a flow.
+func (d *logDialer) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
+	pc, err := d.listen.ListenPacket(ctx, network, address)
+	client := "unknown"
+	if addr := stack.ClientAddr(ctx); addr != nil {
+		client = addr.String()
+	}
+	if err != nil {
+		log.Printf("%s -> %s %s: %v", client, network, address, err)
+		return nil, err
+	}
+	return &logPacketConn{PacketConn: pc, client: client, seen: make(map[string]bool)}, nil
+}
+
+type logPacketConn struct {
+	net.PacketConn
+	client string
+	mu     sync.Mutex
+	seen   map[string]bool
+}
+
+func (c *logPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	target := addr.String()
+	c.mu.Lock()
+	seen := c.seen[target]
+	c.seen[target] = true
+	c.mu.Unlock()
+	if !seen {
+		log.Printf("%s -> udp %s", c.client, target)
+	}
+	return c.PacketConn.WriteTo(b, addr)
 }
 
 type logConn struct {

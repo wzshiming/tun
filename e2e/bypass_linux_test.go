@@ -32,6 +32,38 @@ func TestE2EBypassBindsUDPToIPv4DefaultInterface(t *testing.T) {
 		t.Fatalf("DialContext(udp4, 198.18.0.1:9) error = %v", err)
 	}
 	defer conn.Close()
+	if device := bypassFixBoundDevice(t, conn); device != iface.Name {
+		t.Errorf("SO_BINDTODEVICE = %q, want %q (it holds the IPv4 default route)", device, iface.Name)
+	}
+}
+
+func TestE2EBypassListenConfigBindsUDPToIPv4DefaultInterface(t *testing.T) {
+	ttGate(t)
+	iface, err := bypass.DefaultInterface(false)
+	if errors.Is(err, bypass.ErrNoDefaultRoute) {
+		t.Skip("no IPv4 default route on this host")
+	}
+	if err != nil {
+		t.Fatalf("DefaultInterface(false) error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	conn, err := bypass.NewListenConfig(ttCaptureLab).ListenPacket(ctx, "udp4", ":0")
+	if errors.Is(err, syscall.EPERM) {
+		t.Skipf("SO_BINDTODEVICE needs privilege on this kernel: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("ListenPacket(udp4, :0) error = %v", err)
+	}
+	defer conn.Close()
+	if device := bypassFixBoundDevice(t, conn); device != iface.Name {
+		t.Errorf("SO_BINDTODEVICE = %q, want %q (it holds the IPv4 default route)", device, iface.Name)
+	}
+}
+
+// bypassFixBoundDevice returns the interface name conn's socket is bound to by SO_BINDTODEVICE.
+func bypassFixBoundDevice(t *testing.T, conn any) string {
+	t.Helper()
 	sc, ok := conn.(syscall.Conn)
 	if !ok {
 		t.Fatalf("%T is not a syscall.Conn", conn)
@@ -50,7 +82,5 @@ func TestE2EBypassBindsUDPToIPv4DefaultInterface(t *testing.T) {
 	if optErr != nil {
 		t.Fatalf("getsockopt(SO_BINDTODEVICE) error = %v", optErr)
 	}
-	if device != iface.Name {
-		t.Errorf("SO_BINDTODEVICE = %q, want %q (it holds the IPv4 default route)", device, iface.Name)
-	}
+	return device
 }

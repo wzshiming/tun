@@ -1,11 +1,14 @@
-// Package stack terminates the IP packets of a TUN device in a gVisor netstack and dials what it accepts through a Dialer.
+// Package stack terminates the IP packets of a TUN device in a gVisor netstack and hands the TCP connections and UDP flows it captures to a Handler.
 package stack
 
 import (
-	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"maps"
+	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
@@ -29,12 +32,12 @@ type Options struct {
 	MTU int
 	// Addresses are the gateway's own addresses, the only ones answering ICMP echo.
 	Addresses []netip.Prefix
-	// DNSIdle ends a DNS flow after this long without datagrams; 0 means 10s.
-	DNSIdle time.Duration
 }
 
-// Serve dials the TCP connections and DNS flows arriving on dev through dialer until ctx ends or reading dev fails, and always closes dev.
-func Serve(ctx context.Context, dev wgtun.Device, dialer Dialer, opts Options) error {
+// Serve hands each TCP connection and UDP flow arriving on dev to handler until ctx ends or reading dev fails, and always closes dev.
+// A nil handler refuses every flow: TCP with a reset, UDP with ICMP port unreachable.
+// Before returning it closes the conns still accepted and waits for every ServeFlow to return.
+func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options) error {
 	// The event goroutines of a native device block once its Events buffer is full.
 	stopEvents := make(chan struct{})
 	var drain sync.WaitGroup
@@ -44,7 +47,7 @@ func Serve(ctx context.Context, dev wgtun.Device, dialer Dialer, opts Options) e
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	g := &gateway{ctx: runCtx, dialer: dialer, dnsIdle: cmp.Or(opts.DNSIdle, 10*time.Second)}
+	g := &gateway{ctx: runCtx, handler: handler, sessions: make(map[netip.AddrPort]*udpConn)}
 	s, ep, err := g.newStack(dev, opts)
 	if err != nil {
 		dev.Close()
@@ -65,27 +68,55 @@ func Serve(ctx context.Context, dev wgtun.Device, dialer Dialer, opts Options) e
 		err = fmt.Errorf("stack: read packets: %w", err)
 	}
 
-	// No flow starts once the pumps are gone; without the NIC a late handshake fails at once, and Close aborts those in progress.
+	// No flow starts once the pumps are gone; without the NIC a late handshake fails at once, and Close aborts every endpoint, waking a ServeFlow blocked on its conn.
 	cancel()
 	dev.Close()
 	pumps.Wait()
 	g.stop()
 	s.RemoveNIC(nicID)
 	s.Close()
-	g.flows.Wait()
+	g.abortUntilDrained(s)
 	s.Wait()
 	return err
 }
 
-// gateway dials the flows the stack accepts and counts them so Serve can wait for them.
+var (
+	reabortInterval = 100 * time.Millisecond
+	reaborted       = func() {} // test hook, called after each re-abort round
+)
+
+// abortUntilDrained waits for every flow, re-aborting the stack's endpoints meanwhile: a handshake that found its route before RemoveNIC can register after Close took its snapshot.
+func (g *gateway) abortUntilDrained(s *stack.Stack) {
+	drained := make(chan struct{})
+	go func() {
+		g.flows.Wait()
+		close(drained)
+	}()
+	ticker := time.NewTicker(reabortInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-drained:
+			return
+		case <-ticker.C:
+			for _, e := range s.RegisteredEndpoints() {
+				e.Abort()
+			}
+			reaborted()
+		}
+	}
+}
+
+// gateway hands the flows the stack captures to its handler and counts them so Serve can wait for them.
 type gateway struct {
 	ctx     context.Context
-	dialer  Dialer
-	dnsIdle time.Duration
+	handler Handler
+	s       *stack.Stack
 
-	mu      sync.Mutex
-	stopped bool
-	flows   sync.WaitGroup
+	mu       sync.Mutex
+	stopped  bool
+	flows    sync.WaitGroup
+	sessions map[netip.AddrPort]*udpConn // live UDP sessions by client endpoint
 }
 
 // start counts a new flow in; it reports false once Serve is shutting down.
@@ -98,10 +129,80 @@ func (g *gateway) start() bool {
 	return !g.stopped
 }
 
+// stop refuses new flows and closes the live UDP sessions, which have no endpoint for Close to abort.
 func (g *gateway) stop() {
 	g.mu.Lock()
 	g.stopped = true
+	sessions := slices.Collect(maps.Values(g.sessions))
 	g.mu.Unlock()
+	for _, c := range sessions {
+		c.Close()
+	}
+}
+
+// serve runs the handler on a flow counted in by start and ends the flow once it returns.
+func (g *gateway) serve(f *flow) {
+	defer g.flows.Done()
+	defer f.end()
+	g.handler.ServeFlow(g.ctx, f)
+}
+
+var (
+	errAcceptTwice    = errors.New("stack: flow already accepted")
+	errAcceptRejected = errors.New("stack: flow already rejected")
+)
+
+// flow is a Flow whose protocol supplies accept and reject, each called at most once.
+type flow struct {
+	network        string
+	target, client netip.AddrPort
+	accept         func() (net.Conn, error)
+	reject         func()
+
+	mu       sync.Mutex
+	answered bool
+	conn     net.Conn
+}
+
+func (f *flow) Network() string        { return f.network }
+func (f *flow) Target() netip.AddrPort { return f.target }
+func (f *flow) Client() netip.AddrPort { return f.client }
+
+func (f *flow) Accept() (net.Conn, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.answered {
+		if f.conn != nil {
+			return nil, errAcceptTwice
+		}
+		return nil, errAcceptRejected
+	}
+	f.answered = true
+	conn, err := f.accept()
+	if err != nil {
+		return nil, err
+	}
+	f.conn = conn
+	return conn, nil
+}
+
+func (f *flow) Reject() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.answered {
+		f.answered = true
+		f.reject()
+	}
+}
+
+// end rejects the flow if unanswered and closes its accepted conn.
+func (f *flow) end() {
+	f.Reject()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.conn != nil {
+		f.conn.Close()
+	}
 }
 
 func (g *gateway) newStack(dev wgtun.Device, opts Options) (_ *stack.Stack, _ *channel.Endpoint, err error) {
@@ -162,8 +263,12 @@ func (g *gateway) newStack(dev wgtun.Device, opts Options) (_ *stack.Stack, _ *c
 	consumeEcho := func(id stack.TransportEndpointID, _ *stack.PacketBuffer) bool { return !own[id.LocalAddress] }
 	s.SetTransportProtocolHandler(icmp.ProtocolNumber4, consumeEcho)
 	s.SetTransportProtocolHandler(icmp.ProtocolNumber6, consumeEcho)
-	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(s, 0, 2048, g.handleTCP).HandlePacket)
-	s.SetTransportProtocolHandler(udp.ProtocolNumber, udp.NewForwarder(s, g.handleUDP).HandlePacket)
+	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(s, 0, 2048, g.forwardTCP).HandlePacket)
+	// Without a handler UDP finds no endpoint, which the stack answers with ICMP port unreachable.
+	if g.handler != nil {
+		g.s = s
+		s.SetTransportProtocolHandler(udp.ProtocolNumber, g.handleUDP)
+	}
 	return s, ep, nil
 }
 
