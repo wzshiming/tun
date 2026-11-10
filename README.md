@@ -1,56 +1,12 @@
 # tun
 
-`github.com/wzshiming/tun` captures a machine's IP traffic into a TUN device and hands every flow to a Go handler of your choice. It opens the TUN device with the privileges it needs (prompting the user when the process is not root/administrator), installs routes that capture everything except what must escape, runs a gVisor userspace network stack that turns packets back into TCP connections and UDP sessions and dispatches them by network and destination port, ships handlers that relay TCP through a `Dialer` and UDP full cone through a `ListenConfig` (symmetric through the `Dialer` without one), DNS on UDP port 53 over TCP, and provides a dialer and a listen config bound to the physical interface so forwarded traffic does not loop back into the TUN. It runs on macOS, Linux and Windows 10+.
-
-## Install
+Captures a machine's IP traffic into a TUN device for your program to serve flow by flow. `tun` opens the device, prompting for privileges when the process is not root/administrator, and installs the capture routes; `stack` runs a gVisor userspace stack that turns the packets back into TCP connections and UDP sessions and hands them to your `Handler`; `bypass` provides a dialer and a listen config bound to the physical interface so forwarded traffic is not captured again. Runs on macOS, Linux and Windows 10+.
 
 ```sh
 go get github.com/wzshiming/tun
 ```
 
-## Packages
-
-### `tun` — the device
-
-- `type Config struct { Addresses []netip.Prefix; MTU int; Bypass []netip.Prefix; Name string }` — the TUN's own addresses, its MTU, destinations never captured, and the interface name (default `tun`; ignored on macOS; Linux appends `%d` when absent; the adapter name on Windows).
-- `type Device struct { tun.Device; Interface string; Warnings []string }` — embeds a `golang.zx2c4.com/wireguard/tun` device, plus the real interface name and non-fatal setup warnings.
-- `func Open(ctx context.Context, cfg Config) (*Device, error)` — validates `cfg`, creates the device, assigns the addresses and installs the capture routes. Without root/administrator rights it re-executes the current binary as `<exe> tun-helper …` with elevated rights, so your `main` must dispatch that subcommand.
-- `const HelperCommand = "tun-helper"` and `func Helper(args []string) int` — the helper subcommand and its entry point; the return value is the exit code.
-- `func CaptureRoutes(cfg Config) []netip.Prefix` — the routes `Open` captures.
-- `var ErrDenied error` — the privilege prompt was refused. `var ErrUnsupported error` — the platform is not supported.
-
-### `stack` — the userspace network stack
-
-- `type Dialer interface { DialContext(ctx context.Context, network, address string) (net.Conn, error) }`
-- `type ListenConfig interface { Listen(ctx context.Context, network, address string) (net.Listener, error); ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) }` — opens listening sockets, shaped like the standard library's; `*net.ListenConfig` is one.
-- `type Flow interface { Network() string; Target() netip.AddrPort; Client() netip.AddrPort; Accept() (net.Conn, error); Reject() }` — a captured TCP connection or UDP session: `Accept` completes the TCP handshake or returns the UDP session's conn (see [UDP](#udp)), once; `Reject` resets the TCP client or drops the session's datagrams.
-- `type Handler interface { ServeFlow(ctx context.Context, f Flow) }` and `type HandlerFunc func(context.Context, Flow)` — called once per flow on its own goroutine; when it returns, an unanswered flow is rejected and an accepted conn is closed.
-- `type Mux struct { Fallback Handler }` with `func NewMux() *Mux`, `func (m *Mux) Handle(network, pattern string, h Handler)` and `func (m *Mux) ServeFlow(ctx context.Context, f Flow)` — dispatches by `"tcp"`/`"udp"` and a destination pattern in the standard library's host:port syntax: `""` any address and port, `host` any port, `host:port`, `:port` any address; `host` is an IP (`1.1.1.1`, `2001:db8::1`) or a CIDR prefix (`10.0.0.0/8`, host bits masked off), bracketed when IPv6 with a port (`[fd00::/8]:53`); port 0 means any port; an IPv4-mapped IPv6 address counts as IPv4; IPv4-mapped prefixes of /96 or longer count as IPv4; zones are rejected. A flow goes to the longest prefix containing its destination, of its family, that has a handler for its port or for any port, falling through to shorter prefixes and then the any-address patterns; with none it goes to `Fallback`, set before serving, or is rejected when `Fallback` is nil. `Handle` panics on another network, a nil handler, an invalid or duplicate pattern. A `Mux` is a `Handler`, so it can serve a pattern of another `Mux`, dispatching with its own patterns and `Fallback` and never back to the outer one. A UDP session goes by its first datagram's address and port.
-- `type Relay struct { Dialer Dialer; ListenConfig ListenConfig; Idle time.Duration }` — dials a TCP flow's target first, resetting the client when that fails, then pipes both ways. Accepts a UDP session and relays it full cone when `ListenConfig` is set, symmetric otherwise (see [UDP](#udp)), ending it after `Idle` (default 60s) without datagrams either way.
-- `type DNS struct { Dialer Dialer; Idle time.Duration }` — relays each datagram of a UDP session as a length-framed message over one TCP connection per server it sends to, dialled through `Dialer`, and the replies back from that server; the session ends after `Idle` (default 10s) without datagrams; rejects TCP.
-- `func DefaultMux(dialer Dialer) *Mux` — `Handle("tcp", "", Relay)`, `Handle("udp", ":53", DNS)` and `Handle("udp", "", Relay)`, no `Fallback`: `Relay` for every TCP and UDP destination, except `DNS` for UDP port 53. When `dialer` also implements `ListenConfig`, the UDP `Relay` gets it as `ListenConfig` and relays full cone; a wrapper around a dialer must forward `Listen` and `ListenPacket` to keep that.
-- `type Options struct { MTU int; Addresses []netip.Prefix }`
-- `func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options) error` — hands every captured flow of `dev`, a `golang.zx2c4.com/wireguard/tun` device such as `(*tun.Device).Device`, to `handler` (nil refuses them all, UDP with ICMP port unreachable); returns when `ctx` ends or the device fails, once every `ServeFlow` has returned, and closes the device.
-- `func ClientAddr(ctx context.Context) net.Addr` — inside `DialContext` or `ListenPacket`, the captured flow's source (`*net.TCPAddr` or `*net.UDPAddr`), nil when absent; `WithClientAddr` sets it.
-
-### `bypass` — escaping the TUN
-
-- `func NewDialer(capture []netip.Prefix) *net.Dialer` — a dialer that binds connections to captured destinations onto the default-route interface.
-- `func NewListenConfig(capture []netip.Prefix) *net.ListenConfig` — a listen config that binds every socket onto its family's default-route interface, fixed at creation; pass it as `Relay.ListenConfig` for direct egress.
-- `func DefaultInterface(ipv6 bool) (*net.Interface, error)` and `var ErrNoDefaultRoute error`.
-
-## UDP
-
-- **Sessions.** `Serve` gives each client socket, keyed by its address and port, one UDP session carrying every datagram it sends, to any target. `Flow.Target` is the first datagram's destination. The `Mux` picks the component by that first datagram's address and port and the whole session goes to it, so a socket that later sends to another address or port stays with the first component.
-- **The session conn** is a `net.Conn` and a `net.PacketConn`: `ReadFrom` returns each datagram with the `*net.UDPAddr` the client sent it to; `WriteTo(b, src)` delivers `b` to the client as if from `src`; `Read` and `Write` are the view connected to `Flow.Target`; read deadlines apply; `Close` ends the session, and the client's next datagram starts a new one.
-- **`Relay` full cone**, when `ListenConfig` is set: one unconnected `"udp4"` or `"udp6"` socket per session, by the client's family, sends every target's datagrams, and every datagram it receives, from any source, reaches the client with that source's real address. A failed `ListenPacket` ends the session silently.
-- **`Relay` symmetric**, when `ListenConfig` is nil: one connected socket dialled per target, replies coming only from that target; the only mode for dialers that cannot provide unconnected sockets, such as proxy chains. A slow dial delays only its own target.
-- **`DefaultMux`** relays full cone when its dialer is also a `ListenConfig`, symmetric otherwise. For direct egress, `bypass.NewListenConfig` is the `ListenConfig`.
-- **`DNS`** carries UDP port 53 over TCP: one TCP connection per server within a session.
-- **Unhandled UDP**, whose first datagram's address and port match no pattern of the `Mux` and which has no `Fallback`, is dropped; ICMP port unreachable is sent only when `Serve`'s handler is nil.
-- **Interface.** A relay socket stays on the interface it was bound to at creation: after a default-route change, new sessions use the new interface while running ones keep the old one until they idle out (60s by default).
-
-## Example
+## Usage
 
 ```go
 func main() {
@@ -69,86 +25,71 @@ func main() {
 		log.Fatal(err)
 	}
 	capture := tun.CaptureRoutes(cfg)
-	dialer := &logDialer{dialer: bypass.NewDialer(capture), listen: bypass.NewListenConfig(capture)}
-	err = stack.Serve(ctx, dev.Device, stack.DefaultMux(dialer), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
+	direct := egress{bypass.NewDialer(capture), bypass.NewListenConfig(capture)}
+	err = stack.Serve(ctx, dev.Device, stack.DefaultMux(direct), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
 	if err != nil && ctx.Err() == nil {
 		log.Fatal(err)
 	}
 }
 
-type logDialer struct {
-	dialer *net.Dialer
-	listen stack.ListenConfig
+// egress is a stack.Dialer and, through the embedded ListenConfig, a stack.ListenConfig, so UDP is relayed full cone.
+type egress struct {
+	*net.Dialer
+	*net.ListenConfig
 }
 
-func (d *logDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+func (e egress) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	log.Println(stack.ClientAddr(ctx), "->", network, address)
-	return d.dialer.DialContext(ctx, network, address)
-}
-
-// Listen and ListenPacket make logDialer a stack.ListenConfig, keeping DefaultMux's UDP relay full cone.
-func (d *logDialer) Listen(ctx context.Context, network, address string) (net.Listener, error) {
-	return d.listen.Listen(ctx, network, address)
-}
-
-func (d *logDialer) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
-	return d.listen.ListenPacket(ctx, network, address)
+	return e.Dialer.DialContext(ctx, network, address)
 }
 ```
 
-## Privileges
+## API
 
-A process running as root/administrator opens the device directly. Otherwise `Open` starts the current executable as `<exe> tun-helper …` with elevated rights; the helper creates the device and the routes. On macOS and Linux it hands the device's descriptor to the parent and exits once the parent closes the connection; on Windows it serves the session and exits when the parent closes the connection. A refused prompt makes `Open` return `ErrDenied`.
+### `tun`
 
-- **macOS**: an `osascript` administrator prompt.
-- **Linux**: `pkexec` (polkit). The helper configures the device with iproute2, so the `ip` command must be installed.
-- **Windows**: a UAC prompt on each `Open`. The elevated helper creates a Wintun adapter and relays packets to the parent over a token-checked loopback connection. Requires Windows 10 or later.
+- `Config`: `Addresses`, one or two prefixes with at most one per family; `MTU`, 1280 to 65535; `Bypass`, destinations never captured; `Name`, the interface name, `tun` when empty. macOS ignores `Name` and picks a `utunN`; Linux appends `%d` unless present, the pattern at most 15 bytes; Windows names the Wintun adapter with it, at most 127 bytes, and derives the adapter GUID from it.
+- `Open(ctx, cfg) (*Device, error)` validates `cfg`, creates the device, assigns the addresses and routes `CaptureRoutes(cfg)` into it. Without root/administrator rights it re-executes the current binary as `<exe> tun-helper …` with elevated rights, so `main` must dispatch `HelperCommand` to `Helper(args) int`, whose result is the exit code.
+- `Device` embeds a `golang.zx2c4.com/wireguard/tun` device; `Interface` is the real interface name and `Warnings` the configuration that failed without failing `Open`.
+- `CaptureRoutes(cfg) []netip.Prefix`: `0.0.0.0/0` and `::/0` for each address family the TUN has an address in, minus `Bypass`, the TUN's own addresses and a few fixed holes (loopback, link-local, multicast, broadcast).
+- `ErrDenied`: the privilege prompt was refused. `ErrUnsupported`: the platform has no TUN support.
 
-### Wintun
+### `stack`
 
-Windows builds embed the unmodified Wintun 0.14.1 DLL, made by WireGuard LLC, through [github.com/wzshiming/wintun](https://github.com/wzshiming/wintun), which loads it in memory, so no file is written. The DLL is distributed under the license in that module's [embedded/LICENSE.txt](https://github.com/wzshiming/wintun/blob/master/embedded/LICENSE.txt). Windows installs the Wintun driver on the first `Open`.
+- `Serve(ctx, dev, handler, opts) error` hands every TCP connection and UDP session of `dev` to `handler` until `ctx` ends or reading the device fails, waits for every `ServeFlow` to return, and closes the device.
+- `Options`: `MTU`, 0 takes the device's; `Addresses`, the gateway's own, the only ones answering ICMP echo.
+- `Handler` has one method, `ServeFlow(ctx, f)`, called once per flow on its own goroutine; when it returns, a flow neither accepted nor rejected is rejected and an accepted conn still open is closed. `HandlerFunc` makes a function a `Handler`.
+- `Flow`: `Network()` is `"tcp"` or `"udp"`, `Target()` the destination, `Client()` the source; `Accept()` completes the TCP handshake or returns the UDP session's conn, also a `net.PacketConn` whose `ReadFrom` gives each datagram's target and whose `WriteTo` answers from any specified address of the client's family; `Reject()` resets TCP or drops UDP. A UDP session groups the datagrams one client address and port sends, to any target, and is dispatched by its first datagram's destination address and port.
+- `Mux`, from `NewMux()`: `Handle(network, pattern, h)` registers `h` for `"tcp"` or `"udp"` and a destination pattern, `""` for any, `host`, `host:port` or `:port`, where `host` is an IP or a CIDR prefix, IPv6 bracketed before a port, and port 0 means any port; it panics on an invalid or duplicate pattern. A flow tries the prefixes containing its destination, longest first, each for its port then for any port, then the any-address patterns, then `Fallback`. A `Mux` is itself a `Handler`.
+- `Relay{Dialer, ListenConfig, Idle}` dials a TCP flow's target before accepting it, so a failed dial resets the client, then pipes both ways. It relays a UDP session full cone through one socket from `ListenConfig` when that is set, else symmetric through one dialled conn per target, and ends it after `Idle` without datagrams, 60s by default.
+- `DNS{Dialer, Idle}` relays a UDP session's datagrams as length-framed messages over one TCP connection per target, dialled through `Dialer`, and ends it after `Idle` without datagrams, 10s by default; it rejects TCP.
+- `DefaultMux(dialer)` is the default wiring, three patterns: `""` for `"tcp"` and for `"udp"` to `Relay` through `dialer`, and `":53"` for `"udp"` to `DNS` through `dialer`, so every TCP connection and UDP session is relayed, except a UDP session whose first datagram goes to port 53, which `DNS` carries over TCP. The UDP relay is full cone when `dialer` is also a `ListenConfig`, symmetric otherwise; a wrapper around a dialer must forward `Listen` and `ListenPacket` to keep full cone. To serve flows your own way, `Handle` your own `Handler` on a `Mux`, `DefaultMux`'s included for any other pattern, set `Fallback` for what no pattern matches, or pass any `Handler` straight to `Serve`. A flow nobody handles is rejected: TCP is reset, UDP is dropped; UDP is answered with ICMP port unreachable only when `Serve`'s handler is nil.
+- `Dialer` is `DialContext(ctx, network, address)`; `ListenConfig` is `Listen` plus `ListenPacket`, as `*net.ListenConfig` has them. In the dials of `Relay` and `DNS` and in `Relay`'s `ListenPacket`, `ClientAddr(ctx)` is the flow's source, a `*net.TCPAddr` or `*net.UDPAddr`.
 
-## What is captured
+### `bypass`
 
-`CaptureRoutes` returns `0.0.0.0/0` and `::/0` for each address family the TUN has an address in, minus `Config.Bypass`, the TUN's own addresses and a few fixed holes. `Open` routes exactly those prefixes into the TUN.
+- `NewDialer(capture) *net.Dialer` binds connections to destinations in `capture` onto the default-route interface at dial time (`IP_BOUND_IF` on macOS, `SO_BINDTODEVICE` on Linux, `IP_UNICAST_IF` on Windows) and resolves names through itself.
+- `NewListenConfig(capture) *net.ListenConfig` binds every IP socket onto its family's default-route interface, which `udp4`/`udp6` or a literal address picks, or none when `capture` is empty; the interface is fixed when the socket is created, so a full-cone UDP session keeps it after a route change.
+- `DefaultInterface(ipv6) (*net.Interface, error)` returns the interface holding the family's default route, or `ErrNoDefaultRoute`.
 
-Traffic forwarded to the real network must not be captured again. The `bypass` dialer binds connections to captured destinations, and its listen config every socket, onto the default-route interface: `IP_BOUND_IF` on macOS, `SO_BINDTODEVICE` on Linux, `IP_UNICAST_IF` on Windows.
+## Platforms
 
-## Limits
-
-- UDP: see [UDP](#udp) — a session is dispatched by its first datagram's address and port, and a relay socket keeps the interface it was created on.
-- Linux: binding to an interface with `SO_BINDTODEVICE` without privileges requires kernel 5.7 or later.
-
-## Command `cmd/tun`
-
-`cmd/tun` captures the traffic, forwards every flow directly through the physical interface, UDP full cone, and logs it: the flow (`<client> -> <network> <address>`), dial and listen errors, and on close the bytes read and written and the duration; a UDP session logs `<client> -> udp <address>` once for each target it sends to.
-
-```sh
-go run ./cmd/tun [flags]
-```
-
-| Flag | Default | Meaning |
+| | Prompt | Notes |
 | --- | --- | --- |
-| `-addr` | `198.18.0.1/30` and `fd00:6a77:7761::1/64` | TUN address in CIDR form, repeatable |
-| `-mtu` | `1500` | TUN MTU |
-| `-bypass` | none | destination CIDR never captured, repeatable |
-| `-name` | `tun` | interface name (ignored on macOS) |
+| macOS | `osascript` | the helper hands the device descriptor to the parent and exits |
+| Linux | `pkexec` | as macOS; needs the `ip` command; unprivileged `SO_BINDTODEVICE` needs kernel 5.7+ |
+| Windows 10+ | UAC on each `Open` | 386, amd64 and arm64; the elevated helper runs a Wintun adapter and relays packets to the parent over a token-checked loopback connection; the first `Open` installs the Wintun driver |
 
-It exits 0 on SIGINT/SIGTERM once the device is open and 1 on any error; a SIGINT/SIGTERM while the device is still opening, such as during the privilege prompt, exits 1.
+## `cmd/tun`
 
-## End-to-end tests
-
-The end-to-end tests in `./e2e` open real TUN devices, a Wintun adapter on Windows, change the machine's routes and bind sockets to its default interface. Every test skips unless `TUN_E2E=1`; with it set, each runs when the process has the privileges it needs and skips otherwise. The test binary is its own helper.
+Captures the traffic, forwards every flow directly and logs it.
 
 ```sh
-TUN_E2E=1 go test ./e2e -v                          # TestE2EHelper: starts its helper with sudo -n
-go test -c -o tun-e2e.test ./e2e
-sudo -n env TUN_E2E=1 ./tun-e2e.test -test.v        # TestE2ERoot: needs root and an IPv4 default route
+go run ./cmd/tun [-addr CIDR]... [-mtu 1500] [-bypass CIDR]... [-name tun]
 ```
 
-- **macOS and Linux**: `TestE2EHelper` runs as a normal user and starts its helper with `sudo -n`, so it skips unless passwordless `sudo` is available; `TestE2ERoot` runs as root. The bypass test needs a default route, and on Linux before 5.7 root.
-- **Windows**: 386, amd64 or arm64. `TestE2EWindowsLocal` and `TestE2EWindowsHelper` need an elevated process; `TestE2EWindowsHelperRunas` additionally needs `TUN_E2E_RUNAS=1`, as it goes through UAC. The bypass tests need no elevation.
+`-addr` defaults to `198.18.0.1/30` and `fd00:6a77:7761::1/64`. Exits 0 on SIGINT/SIGTERM once the device is open, 1 otherwise.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The embedded Wintun DLL is covered by its own license, see [Wintun](#wintun).
+MIT, see [LICENSE](LICENSE).
