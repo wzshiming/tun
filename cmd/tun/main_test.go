@@ -6,8 +6,13 @@ import (
 	"errors"
 	"log"
 	"net"
+	"net/netip"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/wzshiming/tun/stack"
 )
@@ -124,4 +129,119 @@ func TestLogConnCloseWriteIsUnsupportedWithoutTheInnerOne(t *testing.T) {
 	if err := cw.CloseWrite(); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("CloseWrite = %v, want errors.ErrUnsupported", err)
 	}
+}
+
+// testClient is the source of every flow testServeUDP serves.
+var testClient = netip.MustParseAddrPort("198.18.0.1:4000")
+
+// testServeUDP serves h a UDP flow to target carrying one datagram, through a logDialer whose dials and listens all fail, and returns what it logged.
+func testServeUDP(t *testing.T, h func(stack.Dialer) stack.Handler, target string) string {
+	logged := &syncBuffer{}
+	flags, out := log.Flags(), log.Writer()
+	log.SetFlags(0)
+	log.SetOutput(logged)
+	t.Cleanup(func() {
+		log.SetFlags(flags)
+		log.SetOutput(out)
+	})
+	refused := errors.New("dial refused")
+	d := &logDialer{
+		dialer: &net.Dialer{Control: func(string, string, syscall.RawConn) error { return refused }},
+		listen: failingListener{errors.New("listen refused")},
+	}
+	f := &testFlow{client: testClient, target: netip.MustParseAddrPort(target), closed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h(d).ServeFlow(ctx, f)
+	}()
+	for deadline := time.Now().Add(5 * time.Second); logged.String() == ""; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("nothing logged 5s after serving a UDP flow to %s", target)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("ServeFlow of a UDP flow to %s did not return 5s after its ctx ended", target)
+	}
+	return logged.String()
+}
+
+func TestHandlerDialsUDPPort53OverTCPToItsTarget(t *testing.T) {
+	logged := testServeUDP(t, newHandler, "192.0.2.53:53")
+	if first, _, _ := strings.Cut(logged, "\n"); first != "198.18.0.1:4000 -> tcp 192.0.2.53:53" {
+		t.Errorf("logged %q, want first the tcp dial line %q", logged, "198.18.0.1:4000 -> tcp 192.0.2.53:53")
+	}
+}
+
+func TestHandlerDoesNotDialTCPForOtherUDPPorts(t *testing.T) {
+	if logged := testServeUDP(t, newHandler, "192.0.2.53:5353"); strings.Contains(logged, " -> tcp ") {
+		t.Errorf("logged %q for UDP to port 5353, want no tcp dial", logged)
+	}
+}
+
+// testFlow is a UDP flow whose session yields one datagram to target, then blocks until closed.
+type testFlow struct {
+	client, target netip.AddrPort
+	read           atomic.Bool
+	closed         chan struct{}
+	closeOnce      sync.Once
+}
+
+func (f *testFlow) Network() string           { return "udp" }
+func (f *testFlow) Target() netip.AddrPort    { return f.target }
+func (f *testFlow) Client() netip.AddrPort    { return f.client }
+func (f *testFlow) Accept() (net.Conn, error) { return testSession{f}, nil }
+func (f *testFlow) Reject()                   {}
+
+// testSession is the conn of a testFlow; the stack's relays call only these methods.
+type testSession struct{ f *testFlow }
+
+func (s testSession) ReadFrom(b []byte) (int, net.Addr, error) {
+	if !s.f.read.Swap(true) {
+		return copy(b, "query"), net.UDPAddrFromAddrPort(s.f.target), nil
+	}
+	<-s.f.closed
+	return 0, nil, net.ErrClosed
+}
+
+func (s testSession) WriteTo(b []byte, _ net.Addr) (int, error) { return len(b), nil }
+
+func (s testSession) Read(b []byte) (int, error) {
+	n, _, err := s.ReadFrom(b)
+	return n, err
+}
+
+func (s testSession) Write(b []byte) (int, error) { return len(b), nil }
+
+func (s testSession) Close() error {
+	s.f.closeOnce.Do(func() { close(s.f.closed) })
+	return nil
+}
+
+func (s testSession) LocalAddr() net.Addr              { return net.UDPAddrFromAddrPort(s.f.target) }
+func (s testSession) RemoteAddr() net.Addr             { return net.UDPAddrFromAddrPort(s.f.client) }
+func (s testSession) SetDeadline(time.Time) error      { return nil }
+func (s testSession) SetReadDeadline(time.Time) error  { return nil }
+func (s testSession) SetWriteDeadline(time.Time) error { return nil }
+
+// syncBuffer is a bytes.Buffer safe to read while the log writes it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

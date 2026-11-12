@@ -21,6 +21,7 @@ import (
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/bypass"
 	"github.com/wzshiming/tun/stack"
+	"github.com/wzshiming/tun/stack/dns"
 )
 
 type prefixes []netip.Prefix
@@ -94,8 +95,11 @@ func run(ctx context.Context, cfg tun.Config) error {
 	return err
 }
 
+// newHandler relays every flow through dialer, the DNS queries to UDP port 53 over TCP.
 func newHandler(dialer stack.Dialer) stack.Handler {
-	return stack.DefaultMux(dialer)
+	m := stack.DefaultMux(dialer)
+	m.Handle("udp", ":53", &dns.Handler{Dialer: dialer})
+	return m
 }
 
 type logDialer struct {
