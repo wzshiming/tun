@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +24,17 @@ var (
 	_ stack.ListenConfig = (*logDialer)(nil)
 	_ stack.Dialer       = (*logDialer)(nil)
 )
+
+// testRunMainEnv set to 1 makes the test binary run main instead of the tests.
+const testRunMainEnv = "TUN_CMD_TEST_RUN_MAIN"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(testRunMainEnv) == "1" {
+		main()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func TestLogDialerListenPacketLogsEachNewTargetOnce(t *testing.T) {
 	var logged bytes.Buffer
@@ -134,8 +147,8 @@ func TestLogConnCloseWriteIsUnsupportedWithoutTheInnerOne(t *testing.T) {
 // testClient is the source of every flow testServeUDP serves.
 var testClient = netip.MustParseAddrPort("198.18.0.1:4000")
 
-// testServeUDP serves h a UDP flow to target carrying one datagram, through a logDialer whose dials and listens all fail, and returns what it logged.
-func testServeUDP(t *testing.T, h func(stack.Dialer) stack.Handler, target string) string {
+// testServeUDP serves newHandler with dnsTarget a UDP flow to target carrying one datagram, through a logDialer whose dials and listens all fail, and returns what it logged.
+func testServeUDP(t *testing.T, dnsTarget, target string) string {
 	logged := &syncBuffer{}
 	flags, out := log.Flags(), log.Writer()
 	log.SetFlags(0)
@@ -154,7 +167,8 @@ func testServeUDP(t *testing.T, h func(stack.Dialer) stack.Handler, target strin
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h(d).ServeFlow(ctx, f)
+		h := newHandler(d, dnsTarget)
+		h.ServeFlow(ctx, f)
 	}()
 	for deadline := time.Now().Add(5 * time.Second); logged.String() == ""; time.Sleep(10 * time.Millisecond) {
 		if time.Now().After(deadline) {
@@ -171,15 +185,63 @@ func testServeUDP(t *testing.T, h func(stack.Dialer) stack.Handler, target strin
 }
 
 func TestHandlerDialsUDPPort53OverTCPToItsTarget(t *testing.T) {
-	logged := testServeUDP(t, newHandler, "192.0.2.53:53")
+	logged := testServeUDP(t, "", "192.0.2.53:53")
 	if first, _, _ := strings.Cut(logged, "\n"); first != "198.18.0.1:4000 -> tcp 192.0.2.53:53" {
 		t.Errorf("logged %q, want first the tcp dial line %q", logged, "198.18.0.1:4000 -> tcp 192.0.2.53:53")
 	}
 }
 
+func TestHandlerDialsUDPPort53OverTCPToTheDNSTarget(t *testing.T) {
+	logged := testServeUDP(t, "203.0.113.5:5353", "192.0.2.53:53")
+	if first, _, _ := strings.Cut(logged, "\n"); first != "198.18.0.1:4000 -> tcp 203.0.113.5:5353" {
+		t.Errorf("logged %q, want first the tcp dial line %q to the -dns target", logged, "198.18.0.1:4000 -> tcp 203.0.113.5:5353")
+	}
+}
+
 func TestHandlerDoesNotDialTCPForOtherUDPPorts(t *testing.T) {
-	if logged := testServeUDP(t, newHandler, "192.0.2.53:5353"); strings.Contains(logged, " -> tcp ") {
-		t.Errorf("logged %q for UDP to port 5353, want no tcp dial", logged)
+	for _, dnsTarget := range []string{"", "203.0.113.5:5353"} {
+		if logged := testServeUDP(t, dnsTarget, "192.0.2.53:5353"); strings.Contains(logged, " -> tcp ") {
+			t.Errorf("logged %q for UDP to port 5353 with -dns %q, want no tcp dial", logged, dnsTarget)
+		}
+	}
+}
+
+// testRunMain runs main in a child process of the test binary with args and returns its exit code and stderr.
+func testRunMain(t *testing.T, args ...string) (int, string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Env = append(os.Environ(), testRunMainEnv+"=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+		return ee.ExitCode(), stderr.String()
+	}
+	if err != nil {
+		t.Fatalf("run main %q: %v", args, err)
+	}
+	return 0, stderr.String()
+}
+
+func TestMainRejectsAnInvalidDNSTargetLikeOtherFlags(t *testing.T) {
+	wantCode, _ := testRunMain(t, "-mtu", "x")
+	for _, value := range []string{"1.1.1.1", "1.1.1.1:", ":53", "1.1.1.1:domain", "1.1.1.1:70000"} {
+		code, stderr := testRunMain(t, "-dns", value)
+		if want := `invalid value "` + value + `" for flag -dns`; code != wantCode || !strings.Contains(stderr, want) {
+			t.Errorf("main -dns %q exited %d with stderr %q, want exit %d, as for -mtu x, with %q", value, code, stderr, wantCode, want)
+		}
+	}
+}
+
+func TestMainHelpListsTheDNSFlag(t *testing.T) {
+	code, stderr := testRunMain(t, "-h")
+	if code != 0 {
+		t.Errorf("main -h exited %d, want 0", code)
+	}
+	for _, name := range []string{"-addr", "-mtu", "-bypass", "-name", "-dns"} {
+		if !strings.Contains(stderr, "\n  "+name+" ") {
+			t.Errorf("main -h printed %q, want it to list %s", stderr, name)
+		}
 	}
 }
 
