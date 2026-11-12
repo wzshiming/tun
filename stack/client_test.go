@@ -6,6 +6,8 @@ import (
 	"testing"
 )
 
+var _ ListenConfig = (*net.ListenConfig)(nil)
+
 func TestClientAddrAbsentIsNil(t *testing.T) {
 	if got := ClientAddr(context.Background()); got != nil {
 		t.Errorf("ClientAddr(no client) = %v, want nil", got)

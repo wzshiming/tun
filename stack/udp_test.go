@@ -19,9 +19,9 @@ import (
 )
 
 func TestServeNilHandlerAnswersUDPWithPortUnreachable(t *testing.T) {
-	env := testServeWith(t, Options{Addresses: testAddresses}, func(*fakeDialer) Handler { return nil })
+	env := testServeWith(t, Options{Addresses: testAddresses}, nil)
 	conn := env.dialUDP(t, "10.0.0.9:1234")
-	testSend(t, conn, "not dns")
+	testSend(t, conn, "datagram")
 	err := testUDPError(t, env, conn, testWait)
 	if want := (&tcpip.ErrConnectionRefused{}).String(); !strings.Contains(err.Error(), want) {
 		t.Fatalf("client Read() error = %v, want %q from ICMP port unreachable", err, want)
@@ -29,20 +29,16 @@ func TestServeNilHandlerAnswersUDPWithPortUnreachable(t *testing.T) {
 	if n := env.dev.unreachable.Load(); n == 0 {
 		t.Fatal("Serve with a nil handler wrote no ICMP destination unreachable for UDP to port 1234")
 	}
-	if dials := env.dialer.recorded(); len(dials) != 0 {
-		t.Fatalf("dialer.DialContext called for UDP to port 1234: %+v, want no dial", dials)
-	}
 }
 
 func TestUDPWithoutHandlerIsDropped(t *testing.T) {
-	env := testServeWith(t, Options{Addresses: testAddresses}, func(d *fakeDialer) Handler {
-		m := NewMux()
-		m.Handle("tcp", "", &Relay{Dialer: d})
-		m.Handle("udp", ":53", &DNS{Dialer: d})
-		return m
+	served := make(chan string, 4)
+	env := testServeMux(t, func(m *Mux) {
+		m.Handle("tcp", "", testAnswer("tcp fallback", served))
+		m.Handle("udp", ":53", testAnswer("udp/53", served))
 	})
 	conn := env.dialUDP(t, "10.0.0.9:1234")
-	testSend(t, conn, "not dns")
+	testSend(t, conn, "datagram")
 	var netErr net.Error
 	if err := testUDPError(t, env, conn, testSilence); !errors.As(err, &netErr) || !netErr.Timeout() {
 		t.Fatalf("client Read() from 10.0.0.9:1234 = %v, want a timeout with no reply and no ICMP error", err)
@@ -50,9 +46,7 @@ func TestUDPWithoutHandlerIsDropped(t *testing.T) {
 	if n := env.dev.unreachable.Load(); n != 0 {
 		t.Fatalf("Serve wrote %d ICMP destination unreachable for UDP to port 1234, want the datagram dropped", n)
 	}
-	if dials := env.dialer.recorded(); len(dials) != 0 {
-		t.Fatalf("dialer.DialContext called for UDP to port 1234: %+v, want no dial", dials)
-	}
+	testNoneServed(t, served)
 }
 
 // testUDPError reads conn until an error other than a timeout, or the timeout once within has passed; a datagram read fails t.
@@ -337,9 +331,9 @@ func TestUDPSessionWriteToCarriesLargestDatagramAndRejectsLarger(t *testing.T) {
 				conn.SetReadDeadline(time.Now().Add(testWait))
 				udpReadFrom(conn)
 				pc, src := conn.(net.PacketConn), net.UDPAddrFromAddrPort(fam.unseen)
-				_, err = pc.WriteTo(udpRelayDatagram(fam.maxDatagram+1, 3), src)
+				_, err = pc.WriteTo(udpDatagram(fam.maxDatagram+1, 3), src)
 				errs <- err
-				_, err = pc.WriteTo(udpRelayDatagram(fam.maxDatagram, 4), src)
+				_, err = pc.WriteTo(udpDatagram(fam.maxDatagram, 4), src)
 				errs <- err
 			})
 			conn := env.listenUDP(t, fam.client)
@@ -351,11 +345,20 @@ func TestUDPSessionWriteToCarriesLargestDatagramAndRejectsLarger(t *testing.T) {
 				t.Fatalf("WriteTo of a %d-byte datagram = %v, want nil", fam.maxDatagram, err)
 			}
 			got := testRecvFrom(t, conn)
-			if got.from != fam.unseen || got.payload != string(udpRelayDatagram(fam.maxDatagram, 4)) {
+			if got.from != fam.unseen || got.payload != string(udpDatagram(fam.maxDatagram, 4)) {
 				t.Fatalf("client got %d bytes from %v, want the handler's %d bytes from %v", len(got.payload), got.from, fam.maxDatagram, fam.unseen)
 			}
 		})
 	}
+}
+
+// udpDatagram returns size bytes marked with tag.
+func udpDatagram(size int, tag byte) []byte {
+	datagram := make([]byte, size)
+	for i := range datagram {
+		datagram[i] = tag + byte(i)
+	}
+	return datagram
 }
 
 func TestUDPSessionReadDeadlineTimesOutAndCanBeExtended(t *testing.T) {
@@ -502,7 +505,7 @@ func TestUDPSessionQueueDropsNewDatagramsBeyond128(t *testing.T) {
 	}
 	// The stack handles packets in order, so an echo through it after the burst shows the burst handled without blocking.
 	echo := env.dialTCP(t, "10.0.0.9:7")
-	testRelay(t, echo, echo, "echo")
+	testDeliver(t, echo, echo, "echo")
 	session := testReceive(t, accepted, "the session's Accept")
 	var got []string
 	for {

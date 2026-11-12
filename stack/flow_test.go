@@ -14,11 +14,9 @@ import (
 // testServeMux serves a Mux register fills.
 func testServeMux(t *testing.T, register func(m *Mux)) *testEnv {
 	t.Helper()
-	return testServeWith(t, Options{Addresses: testAddresses}, func(*fakeDialer) Handler {
-		m := NewMux()
-		register(m)
-		return m
-	})
+	m := NewMux()
+	register(m)
+	return testServeWith(t, Options{Addresses: testAddresses}, m)
 }
 
 // testAnswer returns a handler that sends name on served, accepts the flow and answers one datagram with name.
@@ -89,11 +87,8 @@ func TestServeRefusesTCPWithoutHandler(t *testing.T) {
 }
 
 func TestServeNilHandlerRefusesTCP(t *testing.T) {
-	env := testServeWith(t, Options{Addresses: testAddresses}, func(*fakeDialer) Handler { return nil })
+	env := testServeWith(t, Options{Addresses: testAddresses}, nil)
 	env.dialTCPRefused(t, "10.0.0.9:443")
-	if dials := env.dialer.recorded(); len(dials) != 0 {
-		t.Fatalf("dialer.DialContext called with a nil handler: %+v, want no dial", dials)
-	}
 }
 
 func TestServeDispatchesUDPByPort(t *testing.T) {
