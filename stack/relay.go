@@ -29,6 +29,7 @@ type Relay struct {
 // ServeFlow dials a TCP flow's target before accepting, so a failed dial resets the client, then passes half-closes on and ends with ctx.
 // A UDP session is accepted first. With ListenConfig set, it listens on one "udp4" or "udp6" socket, by the client's family, which sends the session's datagrams to their targets and returns every datagram it receives from its source; a failed listen ends the session.
 // Without ListenConfig, each target it sends to gets its own dialled conn, its datagrams relayed one for one and the replies sent back from that target; a failed dial or conn drops that target's datagrams until the next one dials again.
+// It uses such a dialled conn as a datagram conn: one Write per datagram, each Read taken as one reply into a buffer that holds any datagram, 65535 bytes, and Close; it calls no other method.
 func (r *Relay) ServeFlow(ctx context.Context, f Flow) {
 	if f.Network() == "udp" {
 		r.serveUDP(ctx, f)
