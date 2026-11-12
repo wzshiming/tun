@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -211,143 +210,9 @@ func (d *fakeDevice) feedEvents(n int) (received *atomic.Int32, all <-chan struc
 
 func (d *fakeDevice) closedByServe() bool { return d.closeCalls.Load() > 0 }
 
-// fakeDialer records every dial and answers it with one end of a fresh loopback TCP connection, or once stalled with a stalledConn.
-type fakeDialer struct {
-	mu      sync.Mutex
-	dials   []fakeDial
-	err     error
-	stalled bool
-	opened  []net.Conn
-	targets chan net.Conn
-}
-
-// fakeDial is one recorded DialContext call; client is ClientAddr of its context.
-type fakeDial struct {
-	network, address string
-	client           net.Addr
-}
-
-func (d *fakeDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	d.mu.Lock()
-	d.dials = append(d.dials, fakeDial{network: network, address: address, client: ClientAddr(ctx)})
-	err, stalled := d.err, d.stalled
-	d.mu.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	var conn, target net.Conn
-	if stalled {
-		conn = &stalledConn{writing: make(chan struct{}), closed: make(chan struct{})}
-		target = conn
-	} else if conn, target, err = testLoopbackPair(); err != nil {
-		return nil, err
-	}
-	d.mu.Lock()
-	d.opened = append(d.opened, target)
-	d.mu.Unlock()
-	select {
-	case d.targets <- target:
-	default:
-	}
-	return conn, nil
-}
-
-func (d *fakeDialer) fail(err error) {
-	d.mu.Lock()
-	d.err = err
-	d.mu.Unlock()
-}
-
-// stall makes every later dial answer with a stalledConn, handed to the test as its own target.
-func (d *fakeDialer) stall() {
-	d.mu.Lock()
-	d.stalled = true
-	d.mu.Unlock()
-}
-
-func (d *fakeDialer) recorded() []fakeDial {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return slices.Clone(d.dials)
-}
-
-// expectOnly expects exactly one dial, of "tcp" to address, tagged with client's address.
-func (d *fakeDialer) expectOnly(t *testing.T, address string, client net.Addr) {
-	t.Helper()
-	dials := d.recorded()
-	if len(dials) != 1 {
-		t.Fatalf("dialer.DialContext called %d times %+v, want once", len(dials), dials)
-	}
-	if got := dials[0]; got.network != "tcp" || got.address != address {
-		t.Fatalf(`dialer.DialContext(%q, %q), want ("tcp", %q)`, got.network, got.address, address)
-	}
-	if got := dials[0].client; got == nil || fmt.Sprintf("%T %v", got, got) != fmt.Sprintf("%T %v", client, client) {
-		t.Fatalf("ClientAddr(dial ctx) = %T %v, want the client's %T %v", got, got, client, client)
-	}
-}
-
-func (d *fakeDialer) closeTargets() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for _, conn := range d.opened {
-		conn.Close()
-	}
-}
-
-// stalledConn is a connection to an upstream that never answers: Read and Write block until Close, deadlines notwithstanding.
-type stalledConn struct {
-	// writing is closed once a Write is blocked.
-	writing   chan struct{}
-	writeOnce sync.Once
-	closed    chan struct{}
-	closeOnce sync.Once
-}
-
-func (c *stalledConn) Read([]byte) (int, error) {
-	<-c.closed
-	return 0, net.ErrClosed
-}
-
-func (c *stalledConn) Write([]byte) (int, error) {
-	c.writeOnce.Do(func() { close(c.writing) })
-	<-c.closed
-	return 0, net.ErrClosed
-}
-
-func (c *stalledConn) Close() error {
-	c.closeOnce.Do(func() { close(c.closed) })
-	return nil
-}
-
-func (c *stalledConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
-func (c *stalledConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
-func (c *stalledConn) SetDeadline(time.Time) error      { return nil }
-func (c *stalledConn) SetReadDeadline(time.Time) error  { return nil }
-func (c *stalledConn) SetWriteDeadline(time.Time) error { return nil }
-
-// testLoopbackPair returns both ends of a real loopback TCP connection.
-func testLoopbackPair() (conn, target net.Conn, err error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, nil, err
-	}
-	defer listener.Close()
-	conn, err = net.Dial("tcp", listener.Addr().String())
-	if err != nil {
-		return nil, nil, err
-	}
-	target, err = listener.Accept()
-	if err != nil {
-		conn.Close()
-		return nil, nil, err
-	}
-	return conn, target, nil
-}
-
 // testEnv is one running Serve whose device is wired to a netstack client.
 type testEnv struct {
 	dev    *fakeDevice
-	dialer *fakeDialer
 	client *netstack.Net
 	cancel context.CancelFunc
 	// alive ends when Serve returns, so client operations fail fast if it returns early.
@@ -356,13 +221,20 @@ type testEnv struct {
 	err   error
 }
 
+// testEcho accepts every flow and writes back what it reads until its conn closes.
+var testEcho = HandlerFunc(func(_ context.Context, f Flow) {
+	if conn, err := f.Accept(); err == nil {
+		io.Copy(conn, conn)
+	}
+})
+
+// testServe serves testEcho.
 func testServe(t *testing.T, opts Options) *testEnv {
 	t.Helper()
-	return testServeWith(t, opts, func(d *fakeDialer) Handler { return DefaultMux(d) })
+	return testServeWith(t, opts, testEcho)
 }
 
-// testServeWith serves the handler newHandler builds over the env's dialer.
-func testServeWith(t *testing.T, opts Options, newHandler func(*fakeDialer) Handler) *testEnv {
+func testServeWith(t *testing.T, opts Options, handler Handler) *testEnv {
 	t.Helper()
 	clientDev, client, err := netstack.CreateNetTUN([]netip.Addr{testClient4, testClient6}, nil, testMTU)
 	if err != nil {
@@ -377,8 +249,6 @@ func testServeWith(t *testing.T, opts Options, newHandler func(*fakeDialer) Hand
 		closed:     make(chan struct{}),
 		events:     make(chan tun.Event), // unbuffered: a feedEvents send completes only once Serve receives it
 	}
-	dialer := &fakeDialer{targets: make(chan net.Conn, 16)}
-	t.Cleanup(dialer.closeTargets)
 
 	var lastSent atomic.Int64
 	pumped := make(chan struct{})
@@ -400,8 +270,7 @@ func testServeWith(t *testing.T, opts Options, newHandler func(*fakeDialer) Hand
 
 	ctx, cancel := context.WithCancel(context.Background())
 	alive, stop := context.WithCancel(context.Background())
-	env := &testEnv{dev: dev, dialer: dialer, client: client, cancel: cancel, alive: alive, done: make(chan struct{})}
-	handler := newHandler(dialer)
+	env := &testEnv{dev: dev, client: client, cancel: cancel, alive: alive, done: make(chan struct{})}
 	go func() {
 		env.err = Serve(ctx, dev, handler, opts)
 		close(env.done)
@@ -498,21 +367,6 @@ func (e *testEnv) listenUDP(t *testing.T, local netip.Addr) *gonet.UDPConn {
 	return conn
 }
 
-// nextTarget returns the target end of the next connection Serve dialed.
-func (e *testEnv) nextTarget(t *testing.T) net.Conn {
-	t.Helper()
-	select {
-	case target := <-e.dialer.targets:
-		target.SetDeadline(time.Now().Add(testWait))
-		return target
-	case <-e.done:
-		t.Fatalf("Serve returned %v without dialing through the dialer", e.err)
-	case <-time.After(testWait):
-		t.Fatalf("Serve did not dial through the dialer within %v", testWait)
-	}
-	return nil
-}
-
 // failOneRead makes one device Read return err instead of packets, returning once Serve's Read has taken it.
 func (e *testEnv) failOneRead(t *testing.T, err error) {
 	t.Helper()
@@ -537,13 +391,5 @@ func testDeliver(t *testing.T, from, to net.Conn, payload string) {
 	}
 	if string(got) != payload {
 		t.Fatalf("delivered %q, want %q", got, payload)
-	}
-}
-
-func testReadEOF(t *testing.T, conn net.Conn, what string) {
-	t.Helper()
-	n, err := conn.Read(make([]byte, 1))
-	if n != 0 || err != io.EOF {
-		t.Fatalf("%s: Read() = %d, %v, want 0, EOF", what, n, err)
 	}
 }

@@ -19,7 +19,7 @@ import (
 )
 
 func TestServeNilHandlerAnswersUDPWithPortUnreachable(t *testing.T) {
-	env := testServeWith(t, Options{Addresses: testAddresses}, func(*fakeDialer) Handler { return nil })
+	env := testServeWith(t, Options{Addresses: testAddresses}, nil)
 	conn := env.dialUDP(t, "10.0.0.9:1234")
 	testSend(t, conn, "datagram")
 	err := testUDPError(t, env, conn, testWait)
@@ -29,17 +29,13 @@ func TestServeNilHandlerAnswersUDPWithPortUnreachable(t *testing.T) {
 	if n := env.dev.unreachable.Load(); n == 0 {
 		t.Fatal("Serve with a nil handler wrote no ICMP destination unreachable for UDP to port 1234")
 	}
-	if dials := env.dialer.recorded(); len(dials) != 0 {
-		t.Fatalf("dialer.DialContext called for UDP to port 1234: %+v, want no dial", dials)
-	}
 }
 
 func TestUDPWithoutHandlerIsDropped(t *testing.T) {
-	env := testServeWith(t, Options{Addresses: testAddresses}, func(d *fakeDialer) Handler {
-		m := NewMux()
-		m.Handle("tcp", "", &Relay{Dialer: d})
-		m.Handle("udp", ":53", &Relay{Dialer: d})
-		return m
+	served := make(chan string, 4)
+	env := testServeMux(t, func(m *Mux) {
+		m.Handle("tcp", "", testAnswer("tcp fallback", served))
+		m.Handle("udp", ":53", testAnswer("udp/53", served))
 	})
 	conn := env.dialUDP(t, "10.0.0.9:1234")
 	testSend(t, conn, "datagram")
@@ -50,9 +46,7 @@ func TestUDPWithoutHandlerIsDropped(t *testing.T) {
 	if n := env.dev.unreachable.Load(); n != 0 {
 		t.Fatalf("Serve wrote %d ICMP destination unreachable for UDP to port 1234, want the datagram dropped", n)
 	}
-	if dials := env.dialer.recorded(); len(dials) != 0 {
-		t.Fatalf("dialer.DialContext called for UDP to port 1234: %+v, want no dial", dials)
-	}
+	testNoneServed(t, served)
 }
 
 // testUDPError reads conn until an error other than a timeout, or the timeout once within has passed; a datagram read fails t.

@@ -3,7 +3,6 @@ package stack
 import (
 	"context"
 	"errors"
-	"io"
 	"net/netip"
 	"testing"
 	"time"
@@ -30,35 +29,41 @@ func TestServeReturnsContextErrorAndClosesDevice(t *testing.T) {
 	}
 }
 
-func TestServeCancelClosesTargetConns(t *testing.T) {
-	env := testServe(t, Options{Addresses: testAddresses})
+func TestServeCancelEndsServeFlowContext(t *testing.T) {
+	served, ended := make(chan string, 2), make(chan string, 2)
+	// The handler ignores its conn, so only its ctx ending lets it report.
+	handler := HandlerFunc(func(ctx context.Context, f Flow) {
+		if _, err := f.Accept(); err != nil {
+			return
+		}
+		served <- f.Network()
+		select {
+		case <-ctx.Done():
+			ended <- f.Network()
+		case <-time.After(testWait):
+		}
+	})
+	env := testServeMux(t, func(m *Mux) {
+		m.Handle("tcp", "", handler)
+		m.Handle("udp", "", handler)
+	})
 	env.dialTCP(t, "10.0.0.9:443")
-	tcpTarget := env.nextTarget(t)
 	testSend(t, env.dialUDP(t, "10.0.0.9:5000"), "datagram")
-	udpTarget := env.nextTarget(t)
-	if _, err := io.ReadFull(udpTarget, make([]byte, len("datagram"))); err != nil {
-		t.Fatalf("UDP flow's target read the datagram: %v", err)
+	for range 2 {
+		testReceive(t, served, "a served flow")
 	}
 	env.cancel()
-	testReadEOF(t, tcpTarget, "TCP flow's target after cancel")
-	testReadEOF(t, udpTarget, "UDP flow's target after cancel")
-}
-
-func TestServeUDPShutdownWithStalledRemote(t *testing.T) {
-	env := testServe(t, Options{Addresses: testAddresses})
-	env.dialer.stall()
-	testSend(t, env.dialUDP(t, "10.0.0.9:5000"), "datagram")
-	remote := env.nextTarget(t).(*stalledConn)
-	select {
-	case <-remote.writing:
-	case <-time.After(testWait):
-		t.Fatalf("the UDP relay did not write the datagram to its dialled conn within %v%s", testWait, env.returned())
+	got := map[string]bool{}
+	for range 2 {
+		select {
+		case network := <-ended:
+			got[network] = true
+		case <-time.After(testWait):
+			t.Fatalf("ServeFlow's ctx ended for %v of tcp and udp within %v of Serve's ctx ending, want both", got, testWait)
+		}
 	}
-	env.cancel()
-	select {
-	case <-env.done:
-	case <-time.After(testStopBound):
-		t.Fatalf("Serve did not return within %v of its context ending while a UDP relay was blocked writing to a stalled dialled conn, want shutdown to close that conn", testStopBound)
+	if !got["tcp"] || !got["udp"] {
+		t.Fatalf("ServeFlow's ctx ended for %v, want tcp and udp", got)
 	}
 }
 
@@ -78,9 +83,7 @@ func TestServeKeepsReadingAfterTooManySegments(t *testing.T) {
 	env := testServe(t, Options{Addresses: testAddresses})
 	env.failOneRead(t, tun.ErrTooManySegments)
 	conn := env.dialTCP(t, "10.0.0.9:443")
-	target := env.nextTarget(t)
-	testDeliver(t, conn, target, "from the client")
-	testDeliver(t, target, conn, "from the target")
+	testDeliver(t, conn, conn, "echoed both ways")
 }
 
 func TestServeDeliversPacketsReadWithTooManySegments(t *testing.T) {
@@ -96,9 +99,7 @@ func TestServeDeliversPacketsReadWithTooManySegments(t *testing.T) {
 		t.Fatal("the client's SYN bypassed the device Read returning tun.ErrTooManySegments")
 	}
 	conn.SetDeadline(time.Now().Add(testWait))
-	target := env.nextTarget(t)
-	testDeliver(t, conn, target, "from the client")
-	testDeliver(t, target, conn, "from the target")
+	testDeliver(t, conn, conn, "echoed both ways")
 }
 
 func TestServeDrainsDeviceEvents(t *testing.T) {
