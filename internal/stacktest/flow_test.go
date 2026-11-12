@@ -17,7 +17,7 @@ var (
 	testOther  = netip.MustParseAddrPort("10.0.0.54:53")
 )
 
-func testFlow(t *testing.T) (*stacktest.Flow, net.Conn) {
+func testPipeFlow(t *testing.T) (*stacktest.Flow, net.Conn) {
 	t.Helper()
 	a, b := net.Pipe()
 	t.Cleanup(func() {
@@ -35,7 +35,7 @@ func TestFlowReportsWhatItWasBuiltWith(t *testing.T) {
 }
 
 func TestFlowAcceptReturnsItsConn(t *testing.T) {
-	f, conn := testFlow(t)
+	f, conn := testPipeFlow(t)
 	got, err := f.Accept()
 	if err != nil || got != conn {
 		t.Fatalf("Accept() = %v, %v; want the conn it was built with", got, err)
@@ -46,7 +46,7 @@ func TestFlowAcceptReturnsItsConn(t *testing.T) {
 }
 
 func TestFlowSecondAcceptFails(t *testing.T) {
-	f, _ := testFlow(t)
+	f, _ := testPipeFlow(t)
 	f.Accept()
 	if got, err := f.Accept(); err == nil {
 		t.Fatalf("second Accept() = %v, nil; want an error", got)
@@ -54,7 +54,7 @@ func TestFlowSecondAcceptFails(t *testing.T) {
 }
 
 func TestFlowAcceptAfterRejectFails(t *testing.T) {
-	f, _ := testFlow(t)
+	f, _ := testPipeFlow(t)
 	f.Reject()
 	if got, err := f.Accept(); err == nil {
 		t.Fatalf("Accept() after Reject = %v, nil; want an error", got)
@@ -65,7 +65,7 @@ func TestFlowAcceptAfterRejectFails(t *testing.T) {
 }
 
 func TestFlowRecordsReject(t *testing.T) {
-	f, _ := testFlow(t)
+	f, _ := testPipeFlow(t)
 	if f.Rejected() {
 		t.Fatal("Rejected() = true before Reject")
 	}
@@ -76,7 +76,7 @@ func TestFlowRecordsReject(t *testing.T) {
 }
 
 func TestFlowRejectAfterAcceptDoesNothing(t *testing.T) {
-	f, _ := testFlow(t)
+	f, _ := testPipeFlow(t)
 	f.Accept()
 	f.Reject()
 	if f.Rejected() {
