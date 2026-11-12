@@ -21,7 +21,7 @@ import (
 	"github.com/wzshiming/tun/stack"
 )
 
-// logDialer must listen too, so stack.DefaultMux relays UDP full cone.
+// logDialer must listen too, as newHandler's udp.Handler relays UDP full cone through it.
 var (
 	_ stack.ListenConfig = (*logDialer)(nil)
 	_ stack.Dialer       = (*logDialer)(nil)
@@ -223,6 +223,26 @@ func TestHandlerDoesNotDialTCPForOtherUDPPorts(t *testing.T) {
 		if logged := testServeUDP(t, dnsTarget, "192.0.2.53:5353"); strings.Contains(logged, " -> tcp ") {
 			t.Errorf("logged %q for UDP to port 5353 with -dns %q, want no tcp dial", logged, dnsTarget)
 		}
+	}
+}
+
+func TestHandlerListensPacketsForOtherUDPPorts(t *testing.T) {
+	want := "198.18.0.1:4000 -> udp4 :0: listen refused"
+	if first, _, _ := strings.Cut(testServeUDP(t, "", "192.0.2.53:5353"), "\n"); first != want {
+		t.Errorf("logged first %q for UDP to port 5353, want the full cone ListenPacket line %q", first, want)
+	}
+}
+
+func TestHandlerDialsTCPToTheFlowsTarget(t *testing.T) {
+	conn, peer := net.Pipe()
+	t.Cleanup(func() {
+		conn.Close()
+		peer.Close()
+	})
+	to := netip.MustParseAddrPort("192.0.2.9:443")
+	logged := testServeLogged(t, "", stacktest.NewFlow("tcp", testClient, to, conn))
+	if first, _, _ := strings.Cut(logged, "\n"); first != "198.18.0.1:4000 -> tcp 192.0.2.9:443" {
+		t.Errorf("logged %q, want first the tcp dial line %q", logged, "198.18.0.1:4000 -> tcp 192.0.2.9:443")
 	}
 }
 

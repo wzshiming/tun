@@ -23,6 +23,8 @@ import (
 	"github.com/wzshiming/tun/bypass"
 	"github.com/wzshiming/tun/stack"
 	"github.com/wzshiming/tun/stack/dns"
+	"github.com/wzshiming/tun/stack/tcp"
+	"github.com/wzshiming/tun/stack/udp"
 )
 
 type prefixes []netip.Prefix
@@ -111,9 +113,11 @@ func run(ctx context.Context, cfg tun.Config, dnsTarget string) error {
 	return err
 }
 
-// newHandler relays every flow through dialer, the DNS queries to UDP port 53 over TCP, to dnsTarget if set.
-func newHandler(dialer stack.Dialer, dnsTarget string) stack.Handler {
-	m := stack.DefaultMux(dialer)
+// newHandler relays every flow through dialer, UDP full cone through its ListenPacket, the DNS queries to UDP port 53 over TCP, to dnsTarget if set.
+func newHandler(dialer *logDialer, dnsTarget string) stack.Handler {
+	m := stack.NewMux()
+	m.Handle("tcp", "", &tcp.Handler{Dialer: dialer})
+	m.Handle("udp", "", &udp.Handler{Dialer: dialer, ListenConfig: dialer})
 	m.Handle("udp", ":53", &dns.Handler{Dialer: dialer, Target: dnsTarget})
 	return m
 }
