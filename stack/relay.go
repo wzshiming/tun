@@ -58,16 +58,7 @@ func (r *Relay) serveUDP(ctx context.Context, f Flow) {
 		r.serveCone(ctx, conn, f.Client())
 		return
 	}
-	relaySession(ctx, conn, r.idle(),
-		func(target string) (net.Conn, error) { return r.Dialer.DialContext(ctx, "udp", target) },
-		func(remote net.Conn, datagram []byte) error {
-			_, err := remote.Write(datagram)
-			return err
-		},
-		func(remote net.Conn, buf []byte) ([]byte, error) {
-			n, err := remote.Read(buf)
-			return buf[:n], err
-		})
+	relaySession(ctx, conn, r.idle(), func(target string) (net.Conn, error) { return r.Dialer.DialContext(ctx, "udp", target) })
 }
 
 func (r *Relay) idle() time.Duration {
@@ -135,12 +126,12 @@ const relayQueueLen = 64
 
 // relaySession sends each datagram of conn, a UDP session's, to the remote dial opened for its target on the target's first datagram, and each remote's replies back from its target, until conn fails, ctx ends or idle passes without a datagram either way; it then closes conn and every remote.
 // Each target dials and sends on its own goroutine, so a slow one delays no other; a remote failing to dial, send or receive is dropped alone, and its target's next datagram dials again.
-func relaySession(ctx context.Context, conn net.Conn, idle time.Duration, dial func(target string) (net.Conn, error), send func(remote net.Conn, datagram []byte) error, recv func(remote net.Conn, buf []byte) ([]byte, error)) {
+func relaySession(ctx context.Context, conn net.Conn, idle time.Duration, dial func(target string) (net.Conn, error)) {
 	pc, ok := conn.(net.PacketConn)
 	if !ok {
 		return
 	}
-	s := &sessionRelay{conn: pc, dial: dial, send: send, recv: recv, targets: make(map[netip.AddrPort]*sessionTarget)}
+	s := &sessionRelay{conn: pc, dial: dial, targets: make(map[netip.AddrPort]*sessionTarget)}
 	stop := context.AfterFunc(ctx, s.end)
 	defer stop()
 	touch, stopIdle := afterIdle(idle, s.end)
@@ -154,8 +145,6 @@ func relaySession(ctx context.Context, conn net.Conn, idle time.Duration, dial f
 type sessionRelay struct {
 	conn  net.PacketConn
 	dial  func(target string) (net.Conn, error)
-	send  func(remote net.Conn, datagram []byte) error
-	recv  func(remote net.Conn, buf []byte) ([]byte, error)
 	touch func()
 
 	mu      sync.Mutex
@@ -226,7 +215,7 @@ func (s *sessionRelay) relayTarget(addr netip.AddrPort, tg *sessionTarget) {
 	for {
 		select {
 		case datagram := <-tg.queue:
-			if err := s.send(remote, datagram); err != nil {
+			if _, err := remote.Write(datagram); err != nil {
 				s.drop(addr, tg)
 				return
 			}
@@ -253,11 +242,11 @@ func (s *sessionRelay) relayReplies(addr netip.AddrPort, tg *sessionTarget, remo
 	src := net.UDPAddrFromAddrPort(addr)
 	buf := make([]byte, 65535)
 	for {
-		reply, err := s.recv(remote, buf)
+		n, err := remote.Read(buf)
 		if err != nil {
 			return
 		}
-		if _, err := s.conn.WriteTo(reply, src); err != nil {
+		if _, err := s.conn.WriteTo(buf[:n], src); err != nil {
 			return
 		}
 		s.touch()
