@@ -162,6 +162,14 @@ var testClient = netip.MustParseAddrPort("198.18.0.1:4000")
 
 // testServeUDP serves newHandler with dnsTarget a UDP flow to target carrying one datagram, through a logDialer whose dials and listens all fail, and returns what it logged.
 func testServeUDP(t *testing.T, dnsTarget, target string) string {
+	to := netip.MustParseAddrPort(target)
+	session := stacktest.NewSession(testClient, to)
+	session.Send([]byte("query"), to)
+	return testServeLogged(t, dnsTarget, stacktest.NewFlow("udp", testClient, to, session))
+}
+
+// testServeLogged serves f with newHandler and dnsTarget through a logDialer whose dials and listens all fail, and returns what it logged.
+func testServeLogged(t *testing.T, dnsTarget string, f *stacktest.Flow) string {
 	logged := &syncBuffer{}
 	flags, out := log.Flags(), log.Writer()
 	log.SetFlags(0)
@@ -175,10 +183,6 @@ func testServeUDP(t *testing.T, dnsTarget, target string) string {
 		dialer: &net.Dialer{Control: func(string, string, syscall.RawConn) error { return refused }},
 		listen: failingListener{errors.New("listen refused")},
 	}
-	to := netip.MustParseAddrPort(target)
-	session := stacktest.NewSession(testClient, to)
-	session.Send([]byte("query"), to)
-	f := stacktest.NewFlow("udp", testClient, to, session)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -188,14 +192,14 @@ func testServeUDP(t *testing.T, dnsTarget, target string) string {
 	}()
 	for deadline := time.Now().Add(5 * time.Second); logged.String() == ""; time.Sleep(10 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatalf("nothing logged 5s after serving a UDP flow to %s", target)
+			t.Fatalf("nothing logged 5s after serving a %s flow to %v", f.Network(), f.Target())
 		}
 	}
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatalf("ServeFlow of a UDP flow to %s did not return 5s after its ctx ended", target)
+		t.Fatalf("ServeFlow of a %s flow to %v did not return 5s after its ctx ended", f.Network(), f.Target())
 	}
 	return logged.String()
 }
