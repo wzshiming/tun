@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/netip"
@@ -28,8 +30,19 @@ var (
 // testRunMainEnv set to 1 makes the test binary run main instead of the tests.
 const testRunMainEnv = "TUN_CMD_TEST_RUN_MAIN"
 
+// testStopFlag ends every argument list testRunMain passes, so a child main that parses up to it exits there, never opening a device.
+const (
+	testStopFlag     = "-tun-cmd-test-stop"
+	testStopExitCode = 3
+)
+
 func TestMain(m *testing.M) {
 	if os.Getenv(testRunMainEnv) == "1" {
+		flag.BoolFunc(testStopFlag[1:], "exits the test child before main gets past flag parsing", func(string) error {
+			fmt.Fprintf(os.Stderr, "main parsed up to %s; every argument before it was accepted\n", testStopFlag)
+			os.Exit(testStopExitCode)
+			return nil
+		})
 		main()
 		os.Exit(0)
 	}
@@ -206,14 +219,28 @@ func TestHandlerDoesNotDialTCPForOtherUDPPorts(t *testing.T) {
 	}
 }
 
-// testRunMain runs main in a child process of the test binary with args and returns its exit code and stderr.
+// testRunMainTimeout bounds a child of testRunMain, which exits within flag parsing.
+const testRunMainTimeout = 30 * time.Second
+
+// testRunMain runs main in a child process of the test binary with args, each one flag in -name or -name=value form, then testStopFlag, and returns its exit code and stderr.
 func testRunMain(t *testing.T, args ...string) (int, string) {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], args...)
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") || arg == "-" || arg == "--" {
+			t.Fatalf("run main %q: %q is not one flag, so parsing could stop before %s", args, arg, testStopFlag)
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), testRunMainTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], append(args, testStopFlag)...)
 	cmd.Env = append(os.Environ(), testRunMainEnv+"=1")
+	cmd.WaitDelay = time.Second
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("run main %q: still running after %s, killed; stderr %q", args, testRunMainTimeout, stderr.String())
+	}
 	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 		return ee.ExitCode(), stderr.String()
 	}
@@ -224,9 +251,12 @@ func testRunMain(t *testing.T, args ...string) (int, string) {
 }
 
 func TestMainRejectsAnInvalidDNSTargetLikeOtherFlags(t *testing.T) {
-	wantCode, _ := testRunMain(t, "-mtu", "x")
+	wantCode, _ := testRunMain(t, "-mtu=x")
+	if wantCode == testStopExitCode {
+		t.Fatalf("main -mtu=x parsed up to %s, want -mtu x rejected", testStopFlag)
+	}
 	for _, value := range []string{"1.1.1.1", "1.1.1.1:", ":53", "1.1.1.1:domain", "1.1.1.1:70000"} {
-		code, stderr := testRunMain(t, "-dns", value)
+		code, stderr := testRunMain(t, "-dns="+value)
 		if want := `invalid value "` + value + `" for flag -dns`; code != wantCode || !strings.Contains(stderr, want) {
 			t.Errorf("main -dns %q exited %d with stderr %q, want exit %d, as for -mtu x, with %q", value, code, stderr, wantCode, want)
 		}
