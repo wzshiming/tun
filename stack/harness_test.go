@@ -525,8 +525,8 @@ func (e *testEnv) failOneRead(t *testing.T, err error) {
 	}
 }
 
-// testRelay writes payload on from and expects it to arrive on to.
-func testRelay(t *testing.T, from, to net.Conn, payload string) {
+// testDeliver writes payload on from and expects it to arrive on to.
+func testDeliver(t *testing.T, from, to net.Conn, payload string) {
 	t.Helper()
 	if _, err := io.WriteString(from, payload); err != nil {
 		t.Fatalf("write %q: %v", payload, err)
@@ -536,7 +536,7 @@ func testRelay(t *testing.T, from, to net.Conn, payload string) {
 		t.Fatalf("read %q on the other side of Serve: %v", payload, err)
 	}
 	if string(got) != payload {
-		t.Fatalf("relayed %q, want %q", got, payload)
+		t.Fatalf("delivered %q, want %q", got, payload)
 	}
 }
 

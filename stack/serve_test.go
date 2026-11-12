@@ -79,8 +79,8 @@ func TestServeKeepsReadingAfterTooManySegments(t *testing.T) {
 	env.failOneRead(t, tun.ErrTooManySegments)
 	conn := env.dialTCP(t, "10.0.0.9:443")
 	target := env.nextTarget(t)
-	testRelay(t, conn, target, "from the client")
-	testRelay(t, target, conn, "from the target")
+	testDeliver(t, conn, target, "from the client")
+	testDeliver(t, target, conn, "from the target")
 }
 
 func TestServeDeliversPacketsReadWithTooManySegments(t *testing.T) {
@@ -97,8 +97,8 @@ func TestServeDeliversPacketsReadWithTooManySegments(t *testing.T) {
 	}
 	conn.SetDeadline(time.Now().Add(testWait))
 	target := env.nextTarget(t)
-	testRelay(t, conn, target, "from the client")
-	testRelay(t, target, conn, "from the target")
+	testDeliver(t, conn, target, "from the client")
+	testDeliver(t, target, conn, "from the target")
 }
 
 func TestServeDrainsDeviceEvents(t *testing.T) {

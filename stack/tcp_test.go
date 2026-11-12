@@ -17,8 +17,8 @@ func TestTCPRelaysBytesBothWays(t *testing.T) {
 	env := testServe(t, Options{Addresses: testAddresses})
 	conn := env.dialTCP(t, "10.0.0.9:443")
 	target := env.nextTarget(t)
-	testRelay(t, conn, target, "from the client")
-	testRelay(t, target, conn, "from the target")
+	testDeliver(t, conn, target, "from the client")
+	testDeliver(t, target, conn, "from the target")
 }
 
 func TestTCPDialFailureRefusesClient(t *testing.T) {
@@ -40,7 +40,7 @@ func TestTCPHalfCloseReachesBothEnds(t *testing.T) {
 	if request, err := io.ReadAll(target); err != nil || string(request) != "request" {
 		t.Fatalf(`target ReadAll() = %q, %v after the client's CloseWrite, want "request" ending in EOF`, request, err)
 	}
-	testRelay(t, target, conn, "late reply")
+	testDeliver(t, target, conn, "late reply")
 	if err := target.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatal(err)
 	}

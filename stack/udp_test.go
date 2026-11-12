@@ -502,7 +502,7 @@ func TestUDPSessionQueueDropsNewDatagramsBeyond128(t *testing.T) {
 	}
 	// The stack handles packets in order, so an echo through it after the burst shows the burst handled without blocking.
 	echo := env.dialTCP(t, "10.0.0.9:7")
-	testRelay(t, echo, echo, "echo")
+	testDeliver(t, echo, echo, "echo")
 	session := testReceive(t, accepted, "the session's Accept")
 	var got []string
 	for {
