@@ -74,6 +74,12 @@ func (r *Relay) idle() time.Duration {
 	return cmp.Or(r.Idle, 60*time.Second)
 }
 
+// afterIdle calls onIdle once d passes without a touch; stop cancels it.
+func afterIdle(d time.Duration, onIdle func()) (touch func(), stop func() bool) {
+	timer := time.AfterFunc(d, onIdle)
+	return func() { timer.Reset(d) }, timer.Stop
+}
+
 // serveCone relays conn, the session of client, through one socket from r.ListenConfig until conn or the socket fails, ctx ends or the session idles.
 func (r *Relay) serveCone(ctx context.Context, conn net.Conn, client netip.AddrPort) {
 	session, ok := conn.(net.PacketConn)

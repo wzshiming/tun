@@ -34,12 +34,6 @@ func (d *DNS) ServeFlow(ctx context.Context, f Flow) {
 		writeFrame, readFrame)
 }
 
-// afterIdle calls onIdle once d passes without a touch; stop cancels it.
-func afterIdle(d time.Duration, onIdle func()) (touch func(), stop func() bool) {
-	timer := time.AfterFunc(d, onIdle)
-	return func() { timer.Reset(d) }, timer.Stop
-}
-
 // writeFrame writes message prefixed with its 2-byte big-endian length.
 func writeFrame(remote net.Conn, message []byte) error {
 	frame := binary.BigEndian.AppendUint16(make([]byte, 0, 2+len(message)), uint16(len(message)))
