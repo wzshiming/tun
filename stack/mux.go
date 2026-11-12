@@ -72,19 +72,6 @@ func NewMux() *Mux {
 	return &Mux{handlers: make(map[muxRoute]Handler), layers: make(map[string][]netip.Prefix)}
 }
 
-// DefaultMux returns a Mux relaying every TCP connection and UDP flow through dialer, with a Relay for each network.
-// A dialer that is also a ListenConfig relays UDP full cone, as Relay.ListenConfig; a wrapper around a dialer must forward Listen and ListenPacket to keep it.
-func DefaultMux(dialer Dialer) *Mux {
-	udp := &Relay{Dialer: dialer}
-	if lc, ok := dialer.(ListenConfig); ok {
-		udp.ListenConfig = lc
-	}
-	m := NewMux()
-	m.Handle("tcp", "", &Relay{Dialer: dialer})
-	m.Handle("udp", "", udp)
-	return m
-}
-
 // Handle registers h for the flows of network, "tcp" or "udp", whose destination matches pattern.
 // It panics on another network, a nil handler, an invalid pattern or one already registered for network.
 func (m *Mux) Handle(network, pattern string, h Handler) {
