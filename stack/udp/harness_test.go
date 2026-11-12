@@ -99,11 +99,15 @@ func (env *testEnv) reply(t *testing.T) udpRead {
 	return udpRead{string(b), from}
 }
 
-func (env *testEnv) replyBytes(t *testing.T) []byte {
+// replyFromTarget returns the next datagram delivered to the client, failing unless its source is the flow's target.
+func (env *testEnv) replyFromTarget(t *testing.T) []byte {
 	t.Helper()
-	b, _, ok := env.session.NextReply(testWait)
+	b, from, ok := env.session.NextReply(testWait)
 	if !ok {
 		t.Fatalf("client got no datagram within %v", testWait)
+	}
+	if from != env.target {
+		t.Fatalf("client got a %d-byte datagram from %v, want it from the target %v it addressed", len(b), from, env.target)
 	}
 	return b
 }

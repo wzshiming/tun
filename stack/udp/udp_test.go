@@ -211,7 +211,7 @@ func TestKeepsDatagramsWholeAndInOrderBothWays(t *testing.T) {
 				target.send(t, udpRelayDatagram(size, byte(100+i)))
 			}
 			for i, size := range sizes {
-				if got, want := env.replyBytes(t), udpRelayDatagram(size, byte(100+i)); !bytes.Equal(got, want) {
+				if got, want := env.replyFromTarget(t), udpRelayDatagram(size, byte(100+i)); !bytes.Equal(got, want) {
 					t.Fatalf("client datagram %d is %d bytes %x..., want the target's %d-byte datagram %d", i, len(got), got[:min(len(got), 8)], size, i)
 				}
 			}
@@ -232,7 +232,7 @@ func TestKeepsDatagramsAbove32KiBWholeBothWays(t *testing.T) {
 			t.Run(fmt.Sprint(mode.name, " ", size, " from the target"), func(t *testing.T) {
 				env, target := udpRelayOpen(t, mode, 0)
 				target.send(t, udpRelayDatagram(size, 2))
-				if got := env.replyBytes(t); !bytes.Equal(got, udpRelayDatagram(size, 2)) {
+				if got := env.replyFromTarget(t); !bytes.Equal(got, udpRelayDatagram(size, 2)) {
 					t.Fatalf("client got a %d-byte datagram, want the target's %d bytes unchanged", len(got), size)
 				}
 			})
@@ -523,7 +523,7 @@ func TestTrafficEitherWayExtendsIdle(t *testing.T) {
 						target.recv(t)
 					} else {
 						target.send(t, []byte("keep"))
-						env.replyBytes(t)
+						env.replyFromTarget(t)
 					}
 					select {
 					case <-target.gone():
