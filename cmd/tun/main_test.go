@@ -13,11 +13,11 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/wzshiming/tun/internal/stacktest"
 	"github.com/wzshiming/tun/stack"
 )
 
@@ -175,7 +175,10 @@ func testServeUDP(t *testing.T, dnsTarget, target string) string {
 		dialer: &net.Dialer{Control: func(string, string, syscall.RawConn) error { return refused }},
 		listen: failingListener{errors.New("listen refused")},
 	}
-	f := &testFlow{client: testClient, target: netip.MustParseAddrPort(target), closed: make(chan struct{})}
+	to := netip.MustParseAddrPort(target)
+	session := stacktest.NewSession(testClient, to)
+	session.Send([]byte("query"), to)
+	f := stacktest.NewFlow("udp", testClient, to, session)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -274,51 +277,6 @@ func TestMainHelpListsTheDNSFlag(t *testing.T) {
 		}
 	}
 }
-
-// testFlow is a UDP flow whose session yields one datagram to target, then blocks until closed.
-type testFlow struct {
-	client, target netip.AddrPort
-	read           atomic.Bool
-	closed         chan struct{}
-	closeOnce      sync.Once
-}
-
-func (f *testFlow) Network() string           { return "udp" }
-func (f *testFlow) Target() netip.AddrPort    { return f.target }
-func (f *testFlow) Client() netip.AddrPort    { return f.client }
-func (f *testFlow) Accept() (net.Conn, error) { return testSession{f}, nil }
-func (f *testFlow) Reject()                   {}
-
-// testSession is the conn of a testFlow; the stack's relays call only these methods.
-type testSession struct{ f *testFlow }
-
-func (s testSession) ReadFrom(b []byte) (int, net.Addr, error) {
-	if !s.f.read.Swap(true) {
-		return copy(b, "query"), net.UDPAddrFromAddrPort(s.f.target), nil
-	}
-	<-s.f.closed
-	return 0, nil, net.ErrClosed
-}
-
-func (s testSession) WriteTo(b []byte, _ net.Addr) (int, error) { return len(b), nil }
-
-func (s testSession) Read(b []byte) (int, error) {
-	n, _, err := s.ReadFrom(b)
-	return n, err
-}
-
-func (s testSession) Write(b []byte) (int, error) { return len(b), nil }
-
-func (s testSession) Close() error {
-	s.f.closeOnce.Do(func() { close(s.f.closed) })
-	return nil
-}
-
-func (s testSession) LocalAddr() net.Addr              { return net.UDPAddrFromAddrPort(s.f.target) }
-func (s testSession) RemoteAddr() net.Addr             { return net.UDPAddrFromAddrPort(s.f.client) }
-func (s testSession) SetDeadline(time.Time) error      { return nil }
-func (s testSession) SetReadDeadline(time.Time) error  { return nil }
-func (s testSession) SetWriteDeadline(time.Time) error { return nil }
 
 // syncBuffer is a bytes.Buffer safe to read while the log writes it.
 type syncBuffer struct {
