@@ -9,10 +9,10 @@ import (
 	"net/netip"
 	"os"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/wzshiming/tun/internal/stacktest"
 	"github.com/wzshiming/tun/stack"
 )
 
@@ -34,86 +34,6 @@ const testTarget = "192.0.2.1:5353"
 type datagram struct {
 	data string
 	addr netip.AddrPort
-}
-
-// fakeSession is a UDP session's conn: ReadFrom returns what the client sends, WriteTo delivers to the client.
-type fakeSession struct {
-	queries   chan datagram
-	replies   chan datagram
-	closed    chan struct{}
-	closeOnce sync.Once
-}
-
-func newFakeSession() *fakeSession {
-	return &fakeSession{queries: make(chan datagram, 64), replies: make(chan datagram, 64), closed: make(chan struct{})}
-}
-
-func (s *fakeSession) ReadFrom(b []byte) (int, net.Addr, error) {
-	select {
-	case <-s.closed:
-		return 0, nil, net.ErrClosed
-	default:
-	}
-	select {
-	case d := <-s.queries:
-		return copy(b, d.data), net.UDPAddrFromAddrPort(d.addr), nil
-	case <-s.closed:
-		return 0, nil, net.ErrClosed
-	}
-}
-
-func (s *fakeSession) WriteTo(b []byte, addr net.Addr) (int, error) {
-	select {
-	case <-s.closed:
-		return 0, net.ErrClosed
-	default:
-	}
-	select {
-	case s.replies <- datagram{string(b), addr.(*net.UDPAddr).AddrPort()}:
-		return len(b), nil
-	case <-s.closed:
-		return 0, net.ErrClosed
-	}
-}
-
-func (s *fakeSession) Close() error {
-	s.closeOnce.Do(func() { close(s.closed) })
-	return nil
-}
-
-func (s *fakeSession) isClosed() bool {
-	select {
-	case <-s.closed:
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *fakeSession) Read([]byte) (int, error)         { return 0, errors.ErrUnsupported }
-func (s *fakeSession) Write([]byte) (int, error)        { return 0, errors.ErrUnsupported }
-func (s *fakeSession) LocalAddr() net.Addr              { return net.UDPAddrFromAddrPort(testServer) }
-func (s *fakeSession) RemoteAddr() net.Addr             { return net.UDPAddrFromAddrPort(testClient) }
-func (s *fakeSession) SetDeadline(time.Time) error      { return errors.ErrUnsupported }
-func (s *fakeSession) SetReadDeadline(time.Time) error  { return errors.ErrUnsupported }
-func (s *fakeSession) SetWriteDeadline(time.Time) error { return errors.ErrUnsupported }
-
-// fakeFlow is a flow from testClient to testServer whose Accept returns its session.
-type fakeFlow struct {
-	network  string
-	session  *fakeSession
-	accepted atomic.Bool
-	rejected atomic.Bool
-}
-
-func (f *fakeFlow) Network() string        { return f.network }
-func (f *fakeFlow) Target() netip.AddrPort { return testServer }
-func (f *fakeFlow) Client() netip.AddrPort { return testClient }
-func (f *fakeFlow) Reject()                { f.rejected.Store(true) }
-
-func (f *fakeFlow) Accept() (net.Conn, error) {
-	f.accepted.Store(true)
-	return f.session, nil
 }
 
 type dialRecord struct {
@@ -180,17 +100,17 @@ func (d *fakeDialer) recorded() []dialRecord {
 
 type testEnv struct {
 	dialer  *fakeDialer
-	flow    *fakeFlow
-	session *fakeSession
+	flow    *stacktest.Flow
+	session *stacktest.Session
 	cancel  context.CancelFunc
 	done    chan struct{}
 }
 
-// testServe runs h, its Dialer set to a fakeDialer, on a flow of network until the test ends.
+// testServe runs h, its Dialer set to a fakeDialer, on a flow of network from testClient to testServer until the test ends.
 func testServe(t *testing.T, h *Handler, network string) *testEnv {
 	t.Helper()
-	env := &testEnv{dialer: &fakeDialer{servers: make(chan *fakeServer, 64)}, session: newFakeSession(), done: make(chan struct{})}
-	env.flow = &fakeFlow{network: network, session: env.session}
+	env := &testEnv{dialer: &fakeDialer{servers: make(chan *fakeServer, 64)}, session: stacktest.NewSession(testClient, testServer), done: make(chan struct{})}
+	env.flow = stacktest.NewFlow(network, testClient, testServer, env.session)
 	h.Dialer = env.dialer
 	ctx, cancel := context.WithCancel(context.Background())
 	env.cancel = cancel
@@ -223,7 +143,7 @@ func testServeUDP(t *testing.T, target string, idle time.Duration) *testEnv {
 }
 
 func (env *testEnv) send(data string, to netip.AddrPort) {
-	env.session.queries <- datagram{data, to}
+	env.session.Send([]byte(data), to)
 }
 
 func (env *testEnv) nextServer(t *testing.T) *fakeServer {
@@ -242,13 +162,11 @@ func (env *testEnv) nextServer(t *testing.T) *fakeServer {
 
 func (env *testEnv) nextReply(t *testing.T) datagram {
 	t.Helper()
-	select {
-	case d := <-env.session.replies:
-		return d
-	case <-time.After(testWait):
+	data, from, ok := env.session.NextReply(testWait)
+	if !ok {
 		t.Fatalf("no datagram delivered to the client within %v", testWait)
 	}
-	return datagram{}
+	return datagram{string(data), from}
 }
 
 // waitDone waits within bound for ServeFlow to return.
@@ -346,7 +264,7 @@ func TestSessionEndsAfterIdle(t *testing.T) {
 	testReadFrame(t, server)
 	testReadEOF(t, server, testIdleBound, "server conn of a session idle past Handler.Idle 200ms")
 	env.waitDone(t, testIdleBound, "the session idled")
-	if !env.session.isClosed() {
+	if !env.session.Closed() {
 		t.Fatal("ServeFlow returned with the session conn open")
 	}
 }
@@ -380,7 +298,7 @@ func testStalledServer(t *testing.T, env *testEnv) *fakeServer {
 
 func (env *testEnv) expectAllClosed(t *testing.T, servers ...*fakeServer) {
 	t.Helper()
-	if !env.session.isClosed() {
+	if !env.session.Closed() {
 		t.Error("ServeFlow returned with the session conn open")
 	}
 	for _, s := range servers {
@@ -493,8 +411,8 @@ func TestIdleCountsTheWholeSessionNotEachServer(t *testing.T) {
 func TestRejectsTCP(t *testing.T) {
 	env := testServe(t, &Handler{}, "tcp")
 	env.waitDone(t, testWait, "a tcp flow")
-	if !env.flow.rejected.Load() || env.flow.accepted.Load() {
-		t.Fatalf("tcp flow rejected %v, accepted %v, want rejected and not accepted", env.flow.rejected.Load(), env.flow.accepted.Load())
+	if !env.flow.Rejected() || env.flow.Accepted() {
+		t.Fatalf("tcp flow rejected %v, accepted %v, want rejected and not accepted", env.flow.Rejected(), env.flow.Accepted())
 	}
 	if dials := env.dialer.recorded(); len(dials) != 0 {
 		t.Fatalf("dialer.DialContext called for a tcp flow: %+v, want no dial", dials)
