@@ -25,6 +25,7 @@ import (
 
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/stack"
+	"github.com/wzshiming/tun/stack/dns"
 )
 
 // ttDNSQuery is a DNS query for the A record of example.com.
@@ -125,7 +126,7 @@ func ttOpen(t *testing.T, ctx context.Context, cfg tun.Config) *tun.Device {
 func ttServeDev(ctx context.Context, dev *tun.Device, cfg tun.Config, dialer *ttDialRecorder) <-chan error {
 	mux := stack.NewMux()
 	mux.Handle("tcp", "", &stack.Relay{Dialer: dialer})
-	mux.Handle("udp", ":53", &stack.DNS{Dialer: dialer})
+	mux.Handle("udp", ":53", &dns.Handler{Dialer: dialer})
 	mux.Handle("udp", "198.51.100.0/24", &stack.Relay{Dialer: dialer, ListenConfig: dialer})
 	errCh := make(chan error, 1)
 	go func() {

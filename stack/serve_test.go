@@ -3,6 +3,7 @@ package stack
 import (
 	"context"
 	"errors"
+	"io"
 	"net/netip"
 	"testing"
 	"time"
@@ -33,22 +34,31 @@ func TestServeCancelClosesTargetConns(t *testing.T) {
 	env := testServe(t, Options{Addresses: testAddresses})
 	env.dialTCP(t, "10.0.0.9:443")
 	tcpTarget := env.nextTarget(t)
-	testSend(t, env.dialUDP(t, "10.0.0.53:53"), "query")
-	dnsTarget := env.nextTarget(t)
-	testReadFrame(t, dnsTarget)
+	testSend(t, env.dialUDP(t, "10.0.0.9:5000"), "datagram")
+	udpTarget := env.nextTarget(t)
+	if _, err := io.ReadFull(udpTarget, make([]byte, len("datagram"))); err != nil {
+		t.Fatalf("UDP flow's target read the datagram: %v", err)
+	}
 	env.cancel()
 	testReadEOF(t, tcpTarget, "TCP flow's target after cancel")
-	testReadEOF(t, dnsTarget, "DNS flow's target after cancel")
+	testReadEOF(t, udpTarget, "UDP flow's target after cancel")
 }
 
-func TestServeDNSShutdownWithStalledRemote(t *testing.T) {
+func TestServeUDPShutdownWithStalledRemote(t *testing.T) {
 	env := testServe(t, Options{Addresses: testAddresses})
-	testStalledDNS(t, env)
+	env.dialer.stall()
+	testSend(t, env.dialUDP(t, "10.0.0.9:5000"), "datagram")
+	remote := env.nextTarget(t).(*stalledConn)
+	select {
+	case <-remote.writing:
+	case <-time.After(testWait):
+		t.Fatalf("the UDP relay did not write the datagram to its dialled conn within %v%s", testWait, env.returned())
+	}
 	env.cancel()
 	select {
 	case <-env.done:
 	case <-time.After(testStopBound):
-		t.Fatalf("Serve did not return within %v of its context ending while a DNS relay was blocked writing to a stalled TCP/53 conn, want shutdown to close that conn", testStopBound)
+		t.Fatalf("Serve did not return within %v of its context ending while a UDP relay was blocked writing to a stalled dialled conn, want shutdown to close that conn", testStopBound)
 	}
 }
 

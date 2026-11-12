@@ -333,12 +333,12 @@ func testRoutes(t *testing.T, entries ...any) map[muxRoute]Handler {
 	return routes
 }
 
-func TestDefaultMuxRegistersRelayDNSAndUDPRelay(t *testing.T) {
+func TestDefaultMuxRegistersOnlyTCPAndUDPRelays(t *testing.T) {
 	d := &fakeDialer{}
-	want := testRoutes(t, "tcp", "", &Relay{Dialer: d}, "udp", ":53", &DNS{Dialer: d}, "udp", "", &Relay{Dialer: d})
+	want := testRoutes(t, "tcp", "", &Relay{Dialer: d}, "udp", "", &Relay{Dialer: d})
 	m := DefaultMux(d)
 	if !reflect.DeepEqual(m.handlers, want) || m.Fallback != nil {
-		t.Fatalf("DefaultMux registers %v with Fallback %v, want exactly tcp \"\" Relay, udp \":53\" DNS and udp \"\" Relay over its dialer and no Fallback", m.handlers, m.Fallback)
+		t.Fatalf("DefaultMux registers %v with Fallback %v, want exactly tcp \"\" Relay and udp \"\" Relay over its dialer and no Fallback", m.handlers, m.Fallback)
 	}
 }
 
@@ -350,9 +350,9 @@ type relayDialListener struct {
 
 func TestDefaultMuxGivesUDPRelayTheDialersListenConfig(t *testing.T) {
 	d := relayDialListener{&udpRelayDialer{}, &coneListener{}}
-	want := testRoutes(t, "tcp", "", &Relay{Dialer: d}, "udp", ":53", &DNS{Dialer: d}, "udp", "", &Relay{Dialer: d, ListenConfig: d})
+	want := testRoutes(t, "tcp", "", &Relay{Dialer: d}, "udp", "", &Relay{Dialer: d, ListenConfig: d})
 	if got := DefaultMux(d).handlers; !reflect.DeepEqual(got, want) {
-		t.Fatalf("DefaultMux registers %v, want tcp \"\" Relay, udp \":53\" DNS and udp \"\" Relay with the dialer as its ListenConfig", got)
+		t.Fatalf("DefaultMux registers %v, want tcp \"\" Relay and udp \"\" Relay with the dialer as its ListenConfig", got)
 	}
 }
 
@@ -400,7 +400,7 @@ func TestDefaultMuxRelaysUDPSymmetricForADialerWithoutListen(t *testing.T) {
 
 func TestDefaultMuxRoutesUDPByPort(t *testing.T) {
 	for _, tc := range []struct{ name, target, network string }{
-		{"port 53 to DNS over tcp", "10.0.0.53:53", "tcp"},
+		{"port 53 to Relay over udp", "10.0.0.53:53", "udp"},
 		{"other port to Relay over udp", "10.0.0.9:5000", "udp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

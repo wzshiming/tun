@@ -5,7 +5,7 @@ import (
 	"net"
 )
 
-// Dialer dials the targets of the flows Relay and DNS serve.
+// Dialer dials the targets of the flows Relay serves.
 type Dialer interface {
 	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 }
@@ -17,7 +17,7 @@ func WithClientAddr(ctx context.Context, addr net.Addr) context.Context {
 	return context.WithValue(ctx, clientAddrKey{}, addr)
 }
 
-// ClientAddr returns the client address ctx carries, or nil; the dials of Relay and DNS, and Relay's ListenPacket calls, carry the flow's *net.TCPAddr or *net.UDPAddr source.
+// ClientAddr returns the client address ctx carries, or nil; Relay's dials and ListenPacket calls carry the flow's *net.TCPAddr or *net.UDPAddr source.
 func ClientAddr(ctx context.Context) net.Addr {
 	addr, _ := ctx.Value(clientAddrKey{}).(net.Addr)
 	return addr

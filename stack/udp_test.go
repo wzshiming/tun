@@ -21,7 +21,7 @@ import (
 func TestServeNilHandlerAnswersUDPWithPortUnreachable(t *testing.T) {
 	env := testServeWith(t, Options{Addresses: testAddresses}, func(*fakeDialer) Handler { return nil })
 	conn := env.dialUDP(t, "10.0.0.9:1234")
-	testSend(t, conn, "not dns")
+	testSend(t, conn, "datagram")
 	err := testUDPError(t, env, conn, testWait)
 	if want := (&tcpip.ErrConnectionRefused{}).String(); !strings.Contains(err.Error(), want) {
 		t.Fatalf("client Read() error = %v, want %q from ICMP port unreachable", err, want)
@@ -38,11 +38,11 @@ func TestUDPWithoutHandlerIsDropped(t *testing.T) {
 	env := testServeWith(t, Options{Addresses: testAddresses}, func(d *fakeDialer) Handler {
 		m := NewMux()
 		m.Handle("tcp", "", &Relay{Dialer: d})
-		m.Handle("udp", ":53", &DNS{Dialer: d})
+		m.Handle("udp", ":53", &Relay{Dialer: d})
 		return m
 	})
 	conn := env.dialUDP(t, "10.0.0.9:1234")
-	testSend(t, conn, "not dns")
+	testSend(t, conn, "datagram")
 	var netErr net.Error
 	if err := testUDPError(t, env, conn, testSilence); !errors.As(err, &netErr) || !netErr.Timeout() {
 		t.Fatalf("client Read() from 10.0.0.9:1234 = %v, want a timeout with no reply and no ICMP error", err)
