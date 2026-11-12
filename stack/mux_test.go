@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -316,101 +315,6 @@ func TestMuxFallbackNotCalledForMatchedFlows(t *testing.T) {
 	m.ServeFlow(t.Context(), testFlowTo("tcp", "10.1.2.3:53"))
 	if len(served) != 1 || served[0] != "10.0.0.0/8:53" {
 		t.Fatalf("matched flow served by %q, want only 10.0.0.0/8:53", served)
-	}
-}
-
-// testRoutes returns the handlers keyed by the route each network and pattern pair parses to.
-func testRoutes(t *testing.T, entries ...any) map[muxRoute]Handler {
-	t.Helper()
-	routes := make(map[muxRoute]Handler)
-	for i := 0; i < len(entries); i += 3 {
-		m := NewMux()
-		m.Handle(entries[i].(string), entries[i+1].(string), entries[i+2].(Handler))
-		for r, h := range m.handlers {
-			routes[r] = h
-		}
-	}
-	return routes
-}
-
-func TestDefaultMuxRegistersOnlyTCPAndUDPRelays(t *testing.T) {
-	d := &fakeDialer{}
-	want := testRoutes(t, "tcp", "", &Relay{Dialer: d}, "udp", "", &Relay{Dialer: d})
-	m := DefaultMux(d)
-	if !reflect.DeepEqual(m.handlers, want) || m.Fallback != nil {
-		t.Fatalf("DefaultMux registers %v with Fallback %v, want exactly tcp \"\" Relay and udp \"\" Relay over its dialer and no Fallback", m.handlers, m.Fallback)
-	}
-}
-
-// relayDialListener is a Dialer that is also a ListenConfig.
-type relayDialListener struct {
-	*udpRelayDialer
-	*coneListener
-}
-
-func TestDefaultMuxGivesUDPRelayTheDialersListenConfig(t *testing.T) {
-	d := relayDialListener{&udpRelayDialer{}, &coneListener{}}
-	want := testRoutes(t, "tcp", "", &Relay{Dialer: d}, "udp", "", &Relay{Dialer: d, ListenConfig: d})
-	if got := DefaultMux(d).handlers; !reflect.DeepEqual(got, want) {
-		t.Fatalf("DefaultMux registers %v, want tcp \"\" Relay and udp \"\" Relay with the dialer as its ListenConfig", got)
-	}
-}
-
-func TestDefaultMuxRelaysUDPFullConeThroughADialersListenConfig(t *testing.T) {
-	dialer := &udpRelayDialer{targets: make(chan *udpRelayTarget, 16)}
-	t.Cleanup(dialer.closeAll)
-	listener := newConeListener(t)
-	env := testServeWith(t, Options{Addresses: testAddresses}, func(*fakeDialer) Handler {
-		return DefaultMux(relayDialListener{dialer, listener})
-	})
-	testSend(t, env.dialUDP(t, "10.0.0.9:5000"), "datagram")
-	if got := listener.nextCone(t, env).recv(t); string(got) != "datagram" {
-		t.Fatalf("target got %q, want %q", got, "datagram")
-	}
-	if calls, dials := listener.recorded(), dialer.recorded(); len(calls) != 1 || len(dials) != 0 {
-		t.Fatalf("DefaultMux's UDP Relay listened %+v and dialled %+v, want one ListenPacket and no DialContext", calls, dials)
-	}
-}
-
-// dialerWithoutListen is a Dialer with ListenPacket but no Listen.
-type dialerWithoutListen struct {
-	*udpRelayDialer
-	packets *coneListener
-}
-
-func (d dialerWithoutListen) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
-	return d.packets.ListenPacket(ctx, network, address)
-}
-
-func TestDefaultMuxRelaysUDPSymmetricForADialerWithoutListen(t *testing.T) {
-	dialer := &udpRelayDialer{targets: make(chan *udpRelayTarget, 16)}
-	t.Cleanup(dialer.closeAll)
-	listener := newConeListener(t)
-	env := testServeWith(t, Options{Addresses: testAddresses}, func(*fakeDialer) Handler {
-		return DefaultMux(dialerWithoutListen{dialer, listener})
-	})
-	testSend(t, env.dialUDP(t, "10.0.0.9:5000"), "datagram")
-	if got := dialer.next(t, env).recv(t); string(got) != "datagram" {
-		t.Fatalf("target got %q, want %q", got, "datagram")
-	}
-	if calls, dials := listener.recorded(), dialer.recorded(); len(calls) != 0 || len(dials) != 1 {
-		t.Fatalf("DefaultMux's UDP Relay listened %+v and dialled %+v, want no ListenPacket and one DialContext", calls, dials)
-	}
-}
-
-func TestDefaultMuxRoutesUDPByPort(t *testing.T) {
-	for _, tc := range []struct{ name, target, network string }{
-		{"port 53 to Relay over udp", "10.0.0.53:53", "udp"},
-		{"other port to Relay over udp", "10.0.0.9:5000", "udp"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := testServe(t, Options{Addresses: testAddresses})
-			testSend(t, env.dialUDP(t, tc.target), "datagram")
-			env.nextTarget(t)
-			if dials := env.dialer.recorded(); len(dials) != 1 || dials[0].network != tc.network || dials[0].address != tc.target {
-				t.Fatalf("DefaultMux dialed %+v for UDP to %s, want one %s dial", dials, tc.target, tc.network)
-			}
-		})
 	}
 }
 

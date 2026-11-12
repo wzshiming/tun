@@ -337,9 +337,9 @@ func TestUDPSessionWriteToCarriesLargestDatagramAndRejectsLarger(t *testing.T) {
 				conn.SetReadDeadline(time.Now().Add(testWait))
 				udpReadFrom(conn)
 				pc, src := conn.(net.PacketConn), net.UDPAddrFromAddrPort(fam.unseen)
-				_, err = pc.WriteTo(udpRelayDatagram(fam.maxDatagram+1, 3), src)
+				_, err = pc.WriteTo(udpDatagram(fam.maxDatagram+1, 3), src)
 				errs <- err
-				_, err = pc.WriteTo(udpRelayDatagram(fam.maxDatagram, 4), src)
+				_, err = pc.WriteTo(udpDatagram(fam.maxDatagram, 4), src)
 				errs <- err
 			})
 			conn := env.listenUDP(t, fam.client)
@@ -351,11 +351,20 @@ func TestUDPSessionWriteToCarriesLargestDatagramAndRejectsLarger(t *testing.T) {
 				t.Fatalf("WriteTo of a %d-byte datagram = %v, want nil", fam.maxDatagram, err)
 			}
 			got := testRecvFrom(t, conn)
-			if got.from != fam.unseen || got.payload != string(udpRelayDatagram(fam.maxDatagram, 4)) {
+			if got.from != fam.unseen || got.payload != string(udpDatagram(fam.maxDatagram, 4)) {
 				t.Fatalf("client got %d bytes from %v, want the handler's %d bytes from %v", len(got.payload), got.from, fam.maxDatagram, fam.unseen)
 			}
 		})
 	}
+}
+
+// udpDatagram returns size bytes marked with tag.
+func udpDatagram(size int, tag byte) []byte {
+	datagram := make([]byte, size)
+	for i := range datagram {
+		datagram[i] = tag + byte(i)
+	}
+	return datagram
 }
 
 func TestUDPSessionReadDeadlineTimesOutAndCanBeExtended(t *testing.T) {
