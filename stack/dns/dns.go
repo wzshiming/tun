@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wzshiming/tun/stack"
+	"github.com/wzshiming/tun/stack/udp"
 )
 
 var _ stack.Handler = (*Handler)(nil)
@@ -31,10 +32,10 @@ func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
 		f.Reject()
 		return
 	}
-	(&stack.Relay{Dialer: frameDialer{h.Dialer, h.Target}, Idle: cmp.Or(h.Idle, 10*time.Second)}).ServeFlow(ctx, f)
+	(&udp.Handler{Dialer: frameDialer{h.Dialer, h.Target}, Idle: cmp.Or(h.Idle, 10*time.Second)}).ServeFlow(ctx, f)
 }
 
-// frameDialer turns the "udp" dials of a stack.Relay into "tcp" dials, to target if set, of length-framed conns.
+// frameDialer turns the "udp" dials of a symmetric udp.Handler into "tcp" dials, to target if set, of length-framed conns.
 type frameDialer struct {
 	dialer stack.Dialer
 	target string
@@ -61,7 +62,7 @@ func (c frameConn) Write(message []byte) (int, error) {
 	return len(message), nil
 }
 
-// Read needs b to hold any message, 65535 bytes, as stack.Relay's buffer does.
+// Read needs b to hold any message, 65535 bytes, as udp.Handler's buffer does.
 func (c frameConn) Read(b []byte) (int, error) {
 	var size [2]byte
 	if _, err := io.ReadFull(c.Conn, size[:]); err != nil {
