@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,9 @@ import (
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/bypass"
 	"github.com/wzshiming/tun/stack"
+	"github.com/wzshiming/tun/stack/dns"
+	"github.com/wzshiming/tun/stack/tcp"
+	"github.com/wzshiming/tun/stack/udp"
 )
 
 type prefixes []netip.Prefix
@@ -53,6 +57,21 @@ func main() {
 	flag.IntVar(&cfg.MTU, "mtu", 1500, "TUN MTU")
 	flag.Var(&bypassed, "bypass", "destination CIDR never captured, repeatable")
 	flag.StringVar(&cfg.Name, "name", "tun", "interface name (ignored on macOS)")
+	var dnsTarget string
+	flag.Func("dns", "host:port every DNS query to UDP port 53 is sent to over TCP (default the server the query is addressed to)", func(v string) error {
+		host, port, err := net.SplitHostPort(v)
+		if err != nil {
+			return err
+		}
+		if host == "" {
+			return errors.New("missing host")
+		}
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+			return fmt.Errorf("port %q is not a number from 1 to 65535", port)
+		}
+		dnsTarget = v
+		return nil
+	})
 	flag.Parse()
 	if len(addrs) == 0 {
 		addrs = prefixes{netip.MustParsePrefix("198.18.0.1/30"), netip.MustParsePrefix("fd00:6a77:7761::1/64")}
@@ -63,7 +82,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, cfg); err != nil {
+	if err := run(ctx, cfg, dnsTarget); err != nil {
 		if errors.Is(err, tun.ErrDenied) {
 			fmt.Fprintln(os.Stderr, "tun: the privilege prompt was refused; accept it or run as root/administrator")
 		} else {
@@ -74,7 +93,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, cfg tun.Config) error {
+func run(ctx context.Context, cfg tun.Config, dnsTarget string) error {
 	dev, err := tun.Open(ctx, cfg)
 	if err != nil {
 		return err
@@ -86,12 +105,21 @@ func run(ctx context.Context, cfg tun.Config) error {
 	}
 
 	dialer := &logDialer{dialer: bypass.NewDialer(capture), listen: bypass.NewListenConfig(capture)}
-	err = stack.Serve(ctx, dev.Device, stack.DefaultMux(dialer), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
+	err = stack.Serve(ctx, dev.Device, newHandler(dialer, dnsTarget), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
 	if ctx.Err() != nil {
 		log.Printf("interface %s down", dev.Interface)
 		return nil
 	}
 	return err
+}
+
+// newHandler relays every flow through dialer, UDP full cone through its ListenPacket, the DNS queries to UDP port 53 over TCP, to dnsTarget if set.
+func newHandler(dialer *logDialer, dnsTarget string) stack.Handler {
+	m := stack.NewMux()
+	m.Handle("tcp", "", &tcp.Handler{Dialer: dialer})
+	m.Handle("udp", "", &udp.Handler{Dialer: dialer, ListenConfig: dialer})
+	m.Handle("udp", ":53", &dns.Handler{Dialer: dialer, Target: dnsTarget})
+	return m
 }
 
 type logDialer struct {

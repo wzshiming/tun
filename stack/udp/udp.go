@@ -1,4 +1,6 @@
-package stack
+// Package udp relays the datagrams of a UDP session to their targets and the replies back to the client.
+// Mount its Handler on a stack.Mux for the "udp" network, e.g. m.Handle("udp", "", &udp.Handler{Dialer: d, ListenConfig: lc}); the package registers nothing itself.
+package udp
 
 import (
 	"bytes"
@@ -9,73 +11,56 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/wzshiming/tun/stack"
 )
 
-// ListenConfig opens listening sockets; *net.ListenConfig is one.
-type ListenConfig interface {
-	Listen(ctx context.Context, network, address string) (net.Listener, error)
-	ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error)
-}
+var _ stack.Handler = (*Handler)(nil)
 
-// Relay serves a flow by dialing its target through Dialer, on the flow's network, and passing the two connections' data into each other.
-type Relay struct {
-	Dialer Dialer
-	// ListenConfig, when set, relays a UDP session full cone: through one socket from its ListenPacket, to every target, delivering datagrams from any source.
-	ListenConfig ListenConfig
-	// Idle ends a UDP session after this long without datagrams either way to any target; 0 means 60s.
+// Handler serves a UDP session by relaying its datagrams to their targets and the replies back to the client; it rejects other flows.
+type Handler struct {
+	// Dialer dials a "udp" conn per target when ListenConfig is nil.
+	Dialer stack.Dialer
+	// ListenConfig, when set, relays a session full cone: through one socket from its ListenPacket, to every target, delivering datagrams from any source.
+	ListenConfig stack.ListenConfig
+	// Idle ends a session after this long without datagrams either way to any target; 0 means 60s.
 	Idle time.Duration
 }
 
-// ServeFlow dials a TCP flow's target before accepting, so a failed dial resets the client, then passes half-closes on and ends with ctx.
-// A UDP session is accepted first. With ListenConfig set, it listens on one "udp4" or "udp6" socket, by the client's family, which sends the session's datagrams to their targets and returns every datagram it receives from its source; a failed listen ends the session.
+// ServeFlow accepts a UDP session and relays it until it idles, its conn fails or ctx ends, and then closes the session and every dialled conn or socket.
+// With ListenConfig set, it listens on one "udp4" or "udp6" socket, by the client's family, which sends the session's datagrams to their targets and returns every datagram it receives from its source; a failed listen ends the session.
 // Without ListenConfig, each target it sends to gets its own dialled conn, its datagrams relayed one for one and the replies sent back from that target; a failed dial or conn drops that target's datagrams until the next one dials again.
-func (r *Relay) ServeFlow(ctx context.Context, f Flow) {
-	if f.Network() == "udp" {
-		r.serveUDP(ctx, f)
-		return
-	}
-	remote, err := r.Dialer.DialContext(WithClientAddr(ctx, net.TCPAddrFromAddrPort(f.Client())), "tcp", f.Target().String())
-	if err != nil {
+// It uses such a dialled conn as a datagram conn: one Write per datagram, each Read taken as one reply into a buffer that holds any datagram, 65535 bytes, and Close; it calls no other method.
+func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
+	if f.Network() != "udp" {
 		f.Reject()
 		return
 	}
 	conn, err := f.Accept()
 	if err != nil {
-		remote.Close()
-		return
-	}
-	tunnel(ctx, conn, remote)
-}
-
-func (r *Relay) serveUDP(ctx context.Context, f Flow) {
-	conn, err := f.Accept()
-	if err != nil {
 		return
 	}
 	defer conn.Close()
-	ctx = WithClientAddr(ctx, net.UDPAddrFromAddrPort(f.Client()))
-	if r.ListenConfig != nil {
-		r.serveCone(ctx, conn, f.Client())
+	ctx = stack.WithClientAddr(ctx, net.UDPAddrFromAddrPort(f.Client()))
+	if h.ListenConfig != nil {
+		h.serveCone(ctx, conn, f.Client())
 		return
 	}
-	relaySession(ctx, conn, r.idle(),
-		func(target string) (net.Conn, error) { return r.Dialer.DialContext(ctx, "udp", target) },
-		func(remote net.Conn, datagram []byte) error {
-			_, err := remote.Write(datagram)
-			return err
-		},
-		func(remote net.Conn, buf []byte) ([]byte, error) {
-			n, err := remote.Read(buf)
-			return buf[:n], err
-		})
+	relaySession(ctx, conn, h.idle(), func(target string) (net.Conn, error) { return h.Dialer.DialContext(ctx, "udp", target) })
 }
 
-func (r *Relay) idle() time.Duration {
-	return cmp.Or(r.Idle, 60*time.Second)
+func (h *Handler) idle() time.Duration {
+	return cmp.Or(h.Idle, 60*time.Second)
 }
 
-// serveCone relays conn, the session of client, through one socket from r.ListenConfig until conn or the socket fails, ctx ends or the session idles.
-func (r *Relay) serveCone(ctx context.Context, conn net.Conn, client netip.AddrPort) {
+// afterIdle calls onIdle once d passes without a touch; stop cancels it.
+func afterIdle(d time.Duration, onIdle func()) (touch func(), stop func() bool) {
+	timer := time.AfterFunc(d, onIdle)
+	return func() { timer.Reset(d) }, timer.Stop
+}
+
+// serveCone relays conn, the session of client, through one socket from h.ListenConfig until conn or the socket fails, ctx ends or the session idles.
+func (h *Handler) serveCone(ctx context.Context, conn net.Conn, client netip.AddrPort) {
 	session, ok := conn.(net.PacketConn)
 	if !ok {
 		return
@@ -84,7 +69,7 @@ func (r *Relay) serveCone(ctx context.Context, conn net.Conn, client netip.AddrP
 	if client.Addr().Unmap().Is4() {
 		network = "udp4"
 	}
-	remote, err := r.ListenConfig.ListenPacket(ctx, network, ":0")
+	remote, err := h.ListenConfig.ListenPacket(ctx, network, ":0")
 	if err != nil {
 		return
 	}
@@ -94,7 +79,7 @@ func (r *Relay) serveCone(ctx context.Context, conn net.Conn, client netip.AddrP
 	})
 	stop := context.AfterFunc(ctx, end)
 	defer stop()
-	touch, stopIdle := afterIdle(r.idle(), end)
+	touch, stopIdle := afterIdle(h.idle(), end)
 	defer stopIdle()
 	var replies sync.WaitGroup
 	replies.Go(func() {
@@ -129,12 +114,12 @@ const relayQueueLen = 64
 
 // relaySession sends each datagram of conn, a UDP session's, to the remote dial opened for its target on the target's first datagram, and each remote's replies back from its target, until conn fails, ctx ends or idle passes without a datagram either way; it then closes conn and every remote.
 // Each target dials and sends on its own goroutine, so a slow one delays no other; a remote failing to dial, send or receive is dropped alone, and its target's next datagram dials again.
-func relaySession(ctx context.Context, conn net.Conn, idle time.Duration, dial func(target string) (net.Conn, error), send func(remote net.Conn, datagram []byte) error, recv func(remote net.Conn, buf []byte) ([]byte, error)) {
+func relaySession(ctx context.Context, conn net.Conn, idle time.Duration, dial func(target string) (net.Conn, error)) {
 	pc, ok := conn.(net.PacketConn)
 	if !ok {
 		return
 	}
-	s := &sessionRelay{conn: pc, dial: dial, send: send, recv: recv, targets: make(map[netip.AddrPort]*sessionTarget)}
+	s := &sessionRelay{conn: pc, dial: dial, targets: make(map[netip.AddrPort]*sessionTarget)}
 	stop := context.AfterFunc(ctx, s.end)
 	defer stop()
 	touch, stopIdle := afterIdle(idle, s.end)
@@ -148,8 +133,6 @@ func relaySession(ctx context.Context, conn net.Conn, idle time.Duration, dial f
 type sessionRelay struct {
 	conn  net.PacketConn
 	dial  func(target string) (net.Conn, error)
-	send  func(remote net.Conn, datagram []byte) error
-	recv  func(remote net.Conn, buf []byte) ([]byte, error)
 	touch func()
 
 	mu      sync.Mutex
@@ -220,7 +203,7 @@ func (s *sessionRelay) relayTarget(addr netip.AddrPort, tg *sessionTarget) {
 	for {
 		select {
 		case datagram := <-tg.queue:
-			if err := s.send(remote, datagram); err != nil {
+			if _, err := remote.Write(datagram); err != nil {
 				s.drop(addr, tg)
 				return
 			}
@@ -247,11 +230,11 @@ func (s *sessionRelay) relayReplies(addr netip.AddrPort, tg *sessionTarget, remo
 	src := net.UDPAddrFromAddrPort(addr)
 	buf := make([]byte, 65535)
 	for {
-		reply, err := s.recv(remote, buf)
+		n, err := remote.Read(buf)
 		if err != nil {
 			return
 		}
-		if _, err := s.conn.WriteTo(reply, src); err != nil {
+		if _, err := s.conn.WriteTo(buf[:n], src); err != nil {
 			return
 		}
 		s.touch()

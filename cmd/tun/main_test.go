@@ -4,19 +4,50 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"log"
 	"net"
+	"net/netip"
+	"os"
+	"os/exec"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
+	"github.com/wzshiming/tun/internal/stacktest"
 	"github.com/wzshiming/tun/stack"
 )
 
-// logDialer must listen too, so stack.DefaultMux relays UDP full cone.
+// logDialer must listen too, as newHandler's udp.Handler relays UDP full cone through it.
 var (
 	_ stack.ListenConfig = (*logDialer)(nil)
 	_ stack.Dialer       = (*logDialer)(nil)
 )
+
+// testRunMainEnv set to 1 makes the test binary run main instead of the tests.
+const testRunMainEnv = "TUN_CMD_TEST_RUN_MAIN"
+
+// testStopFlag ends every argument list testRunMain passes, so a child main that parses up to it exits there, never opening a device.
+const (
+	testStopFlag     = "-tun-cmd-test-stop"
+	testStopExitCode = 3
+)
+
+func TestMain(m *testing.M) {
+	if os.Getenv(testRunMainEnv) == "1" {
+		flag.BoolFunc(testStopFlag[1:], "exits the test child before main gets past flag parsing", func(string) error {
+			fmt.Fprintf(os.Stderr, "main parsed up to %s; every argument before it was accepted\n", testStopFlag)
+			os.Exit(testStopExitCode)
+			return nil
+		})
+		main()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func TestLogDialerListenPacketLogsEachNewTargetOnce(t *testing.T) {
 	var logged bytes.Buffer
@@ -124,4 +155,167 @@ func TestLogConnCloseWriteIsUnsupportedWithoutTheInnerOne(t *testing.T) {
 	if err := cw.CloseWrite(); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("CloseWrite = %v, want errors.ErrUnsupported", err)
 	}
+}
+
+// testClient is the source of every flow testServeUDP serves.
+var testClient = netip.MustParseAddrPort("198.18.0.1:4000")
+
+// testServeUDP serves newHandler with dnsTarget a UDP flow to target carrying one datagram, through a logDialer whose dials and listens all fail, and returns what it logged.
+func testServeUDP(t *testing.T, dnsTarget, target string) string {
+	to := netip.MustParseAddrPort(target)
+	session := stacktest.NewSession(testClient, to)
+	session.Send([]byte("query"), to)
+	return testServeLogged(t, dnsTarget, stacktest.NewFlow("udp", testClient, to, session))
+}
+
+// testServeLogged serves f with newHandler and dnsTarget through a logDialer whose dials and listens all fail, and returns what it logged.
+func testServeLogged(t *testing.T, dnsTarget string, f *stacktest.Flow) string {
+	logged := &syncBuffer{}
+	flags, out := log.Flags(), log.Writer()
+	log.SetFlags(0)
+	log.SetOutput(logged)
+	t.Cleanup(func() {
+		log.SetFlags(flags)
+		log.SetOutput(out)
+	})
+	refused := errors.New("dial refused")
+	d := &logDialer{
+		dialer: &net.Dialer{Control: func(string, string, syscall.RawConn) error { return refused }},
+		listen: failingListener{errors.New("listen refused")},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h := newHandler(d, dnsTarget)
+		h.ServeFlow(ctx, f)
+	}()
+	for deadline := time.Now().Add(5 * time.Second); logged.String() == ""; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("nothing logged 5s after serving a %s flow to %v", f.Network(), f.Target())
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("ServeFlow of a %s flow to %v did not return 5s after its ctx ended", f.Network(), f.Target())
+	}
+	return logged.String()
+}
+
+func TestHandlerDialsUDPPort53OverTCPToItsTarget(t *testing.T) {
+	logged := testServeUDP(t, "", "192.0.2.53:53")
+	if first, _, _ := strings.Cut(logged, "\n"); first != "198.18.0.1:4000 -> tcp 192.0.2.53:53" {
+		t.Errorf("logged %q, want first the tcp dial line %q", logged, "198.18.0.1:4000 -> tcp 192.0.2.53:53")
+	}
+}
+
+func TestHandlerDialsUDPPort53OverTCPToTheDNSTarget(t *testing.T) {
+	logged := testServeUDP(t, "203.0.113.5:5353", "192.0.2.53:53")
+	if first, _, _ := strings.Cut(logged, "\n"); first != "198.18.0.1:4000 -> tcp 203.0.113.5:5353" {
+		t.Errorf("logged %q, want first the tcp dial line %q to the -dns target", logged, "198.18.0.1:4000 -> tcp 203.0.113.5:5353")
+	}
+}
+
+func TestHandlerDoesNotDialTCPForOtherUDPPorts(t *testing.T) {
+	for _, dnsTarget := range []string{"", "203.0.113.5:5353"} {
+		if logged := testServeUDP(t, dnsTarget, "192.0.2.53:5353"); strings.Contains(logged, " -> tcp ") {
+			t.Errorf("logged %q for UDP to port 5353 with -dns %q, want no tcp dial", logged, dnsTarget)
+		}
+	}
+}
+
+func TestHandlerListensPacketsForOtherUDPPorts(t *testing.T) {
+	want := "198.18.0.1:4000 -> udp4 :0: listen refused"
+	if first, _, _ := strings.Cut(testServeUDP(t, "", "192.0.2.53:5353"), "\n"); first != want {
+		t.Errorf("logged first %q for UDP to port 5353, want the full cone ListenPacket line %q", first, want)
+	}
+}
+
+func TestHandlerDialsTCPToTheFlowsTarget(t *testing.T) {
+	conn, peer := net.Pipe()
+	t.Cleanup(func() {
+		conn.Close()
+		peer.Close()
+	})
+	to := netip.MustParseAddrPort("192.0.2.9:443")
+	logged := testServeLogged(t, "", stacktest.NewFlow("tcp", testClient, to, conn))
+	if first, _, _ := strings.Cut(logged, "\n"); first != "198.18.0.1:4000 -> tcp 192.0.2.9:443" {
+		t.Errorf("logged %q, want first the tcp dial line %q", logged, "198.18.0.1:4000 -> tcp 192.0.2.9:443")
+	}
+}
+
+// testRunMainTimeout bounds a child of testRunMain, which exits within flag parsing.
+const testRunMainTimeout = 30 * time.Second
+
+// testRunMain runs main in a child process of the test binary with args, each one flag in -name or -name=value form, then testStopFlag, and returns its exit code and stderr.
+func testRunMain(t *testing.T, args ...string) (int, string) {
+	t.Helper()
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") || arg == "-" || arg == "--" {
+			t.Fatalf("run main %q: %q is not one flag, so parsing could stop before %s", args, arg, testStopFlag)
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), testRunMainTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], append(args, testStopFlag)...)
+	cmd.Env = append(os.Environ(), testRunMainEnv+"=1")
+	cmd.WaitDelay = time.Second
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("run main %q: still running after %s, killed; stderr %q", args, testRunMainTimeout, stderr.String())
+	}
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+		return ee.ExitCode(), stderr.String()
+	}
+	if err != nil {
+		t.Fatalf("run main %q: %v", args, err)
+	}
+	return 0, stderr.String()
+}
+
+func TestMainRejectsAnInvalidDNSTargetLikeOtherFlags(t *testing.T) {
+	wantCode, _ := testRunMain(t, "-mtu=x")
+	if wantCode == testStopExitCode {
+		t.Fatalf("main -mtu=x parsed up to %s, want -mtu x rejected", testStopFlag)
+	}
+	for _, value := range []string{"1.1.1.1", "1.1.1.1:", ":53", "1.1.1.1:domain", "1.1.1.1:70000"} {
+		code, stderr := testRunMain(t, "-dns="+value)
+		if want := `invalid value "` + value + `" for flag -dns`; code != wantCode || !strings.Contains(stderr, want) {
+			t.Errorf("main -dns %q exited %d with stderr %q, want exit %d, as for -mtu x, with %q", value, code, stderr, wantCode, want)
+		}
+	}
+}
+
+func TestMainHelpListsTheDNSFlag(t *testing.T) {
+	code, stderr := testRunMain(t, "-h")
+	if code != 0 {
+		t.Errorf("main -h exited %d, want 0", code)
+	}
+	for _, name := range []string{"-addr", "-mtu", "-bypass", "-name", "-dns"} {
+		if !strings.Contains(stderr, "\n  "+name+" ") {
+			t.Errorf("main -h printed %q, want it to list %s", stderr, name)
+		}
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe to read while the log writes it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
