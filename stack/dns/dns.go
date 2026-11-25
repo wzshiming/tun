@@ -21,7 +21,7 @@ type Handler struct {
 	Dialer stack.Dialer
 	// Target, when set, is the host:port every TCP connection dials instead of the server the client addressed; replies still come back from that server. Empty dials the addressed server.
 	Target string
-	// Idle ends a session after this long without datagrams either way to any server; 0 means 10s.
+	// Idle ends a session after this long without datagrams either way to any server, and a TCP dial not back within it is abandoned; 0 means 10s.
 	Idle time.Duration
 }
 
@@ -32,21 +32,8 @@ func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
 		f.Reject()
 		return
 	}
-	(&udp.Handler{Dialer: frameDialer{h.Dialer, h.Target}, Idle: cmp.Or(h.Idle, 10*time.Second)}).ServeFlow(ctx, f)
-}
-
-// frameDialer turns the "udp" dials of a symmetric udp.Handler into "tcp" dials, to target if set, of length-framed conns.
-type frameDialer struct {
-	dialer stack.Dialer
-	target string
-}
-
-func (d frameDialer) DialContext(ctx context.Context, _, address string) (net.Conn, error) {
-	conn, err := d.dialer.DialContext(ctx, "tcp", cmp.Or(d.target, address))
-	if err != nil {
-		return nil, err
-	}
-	return frameConn{conn}, nil
+	idle := cmp.Or(h.Idle, 10*time.Second)
+	(&udp.Handler{Dialer: upstreamDialer{h.Dialer, h.Target, idle}, Idle: idle}).ServeFlow(ctx, f)
 }
 
 // frameConn carries each Write as one message prefixed with its 2-byte big-endian length, and each Read returns one such message.
@@ -62,7 +49,7 @@ func (c frameConn) Write(message []byte) (int, error) {
 	return len(message), nil
 }
 
-// Read needs b to hold any message, 65535 bytes, as udp.Handler's buffer does.
+// Read needs b to hold any message, 65535 bytes, as the buffer of upstream.receive does.
 func (c frameConn) Read(b []byte) (int, error) {
 	var size [2]byte
 	if _, err := io.ReadFull(c.Conn, size[:]); err != nil {
