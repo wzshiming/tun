@@ -358,3 +358,143 @@ func TestRejectsOtherNetworks(t *testing.T) {
 		t.Errorf("a udp flow dialled %+v, want no dial", dials)
 	}
 }
+
+// testIdle is the HalfCloseIdle under test; testIdleWindow is how long after a half-close its close may take.
+const (
+	testIdle       = 400 * time.Millisecond
+	testIdleWindow = 2*testIdle + 2*time.Second
+)
+
+// testIdleEnv serves a TCP flow whose dial answers with dialled through a Handler whose HalfCloseIdle is testIdle.
+func testIdleEnv(t *testing.T, dialled net.Conn) *testEnv {
+	t.Helper()
+	return testServeHandler(t, &Handler{HalfCloseIdle: testIdle}, "tcp", testClient, testTarget, &fakeDialer{conn: dialled})
+}
+
+// expectIdleClose expects ServeFlow to return no sooner than testIdle and within testIdleWindow after start, both conns closed.
+func (e *testEnv) expectIdleClose(t *testing.T, start time.Time, dialled net.Conn) {
+	t.Helper()
+	select {
+	case <-e.done:
+	case <-time.After(time.Until(start.Add(testIdleWindow))):
+		t.Fatalf("ServeFlow still serving %v after the half-close, want both conns closed once the open direction idled for HalfCloseIdle %v", testIdleWindow, testIdle)
+	}
+	if elapsed := time.Since(start); elapsed < testIdle {
+		t.Fatalf("ServeFlow returned %v after the half-close, want no sooner than HalfCloseIdle %v", elapsed.Round(time.Millisecond), testIdle)
+	}
+	testClosed(t, e.accepted, "the flow's conn")
+	testClosed(t, dialled, "the dialled conn")
+}
+
+// testIdleAfterTargetHalfClose half-closes the target's end and expects the idle close while the client stays silent.
+func testIdleAfterTargetHalfClose(t *testing.T, dialled net.Conn, target *net.TCPConn) {
+	t.Helper()
+	env := testIdleEnv(t, dialled)
+	start := time.Now()
+	if err := target.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	testReadEOF(t, env.client, "client after the target's CloseWrite")
+	env.expectIdleClose(t, start, dialled)
+}
+
+// testIdleAfterClientHalfClose half-closes the client's end and expects the idle close while the target stays silent.
+func testIdleAfterClientHalfClose(t *testing.T, dialled net.Conn, target *net.TCPConn) {
+	t.Helper()
+	env := testIdleEnv(t, dialled)
+	start := time.Now()
+	if err := env.client.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	testReadEOF(t, target, "target after the client's CloseWrite")
+	env.expectIdleClose(t, start, dialled)
+}
+
+func TestClosesBothWhenTheClientIdlesAfterTheTargetsHalfClose(t *testing.T) {
+	dialled, target := loopbackPair(t)
+	testIdleAfterTargetHalfClose(t, dialled, target)
+}
+
+func TestClosesBothWhenTheTargetIdlesAfterTheClientsHalfClose(t *testing.T) {
+	dialled, target := loopbackPair(t)
+	testIdleAfterClientHalfClose(t, dialled, target)
+}
+
+// noDeadlineConn is a dialled conn whose deadline methods fail, as an ssh channel's do.
+type noDeadlineConn struct{ *net.TCPConn }
+
+func (noDeadlineConn) SetDeadline(time.Time) error      { return errors.ErrUnsupported }
+func (noDeadlineConn) SetReadDeadline(time.Time) error  { return errors.ErrUnsupported }
+func (noDeadlineConn) SetWriteDeadline(time.Time) error { return errors.ErrUnsupported }
+
+func TestIdleCloseNeedsNoDeadlinesOnTheDialledConn(t *testing.T) {
+	t.Run("after the target's half-close", func(t *testing.T) {
+		dialled, target := loopbackPair(t)
+		testIdleAfterTargetHalfClose(t, noDeadlineConn{dialled}, target)
+	})
+	t.Run("after the client's half-close", func(t *testing.T) {
+		dialled, target := loopbackPair(t)
+		testIdleAfterClientHalfClose(t, noDeadlineConn{dialled}, target)
+	})
+}
+
+// testSendPastIdle writes on from every testIdle/8 for over twice testIdle, each write arriving on to, then half-closes from and expects ServeFlow to return.
+func testSendPastIdle(t *testing.T, env *testEnv, from, to *net.TCPConn) {
+	t.Helper()
+	for start := time.Now(); time.Since(start) < 2*testIdle+testIdle/2; time.Sleep(testIdle / 8) {
+		select {
+		case <-env.done:
+			t.Fatalf("ServeFlow returned %v into a byte sent every %v, want each forwarded byte to restart HalfCloseIdle %v", time.Since(start).Round(time.Millisecond), testIdle/8, testIdle)
+		default:
+		}
+		testRelay(t, from, to, "tick")
+	}
+	if err := from.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	testReadEOF(t, to, "the receiving end once the open direction ended")
+	env.wait(t, "the open direction ended on its own")
+}
+
+func TestBytesKeepAHalfClosedFlowPastHalfCloseIdle(t *testing.T) {
+	t.Run("from the client after the target's half-close", func(t *testing.T) {
+		dialled, target := loopbackPair(t)
+		env := testIdleEnv(t, dialled)
+		if err := target.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		testReadEOF(t, env.client, "client after the target's CloseWrite")
+		testSendPastIdle(t, env, env.client, target)
+	})
+	t.Run("from the target after the client's half-close", func(t *testing.T) {
+		dialled, target := loopbackPair(t)
+		env := testIdleEnv(t, dialled)
+		if err := env.client.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		testReadEOF(t, target, "target after the client's CloseWrite")
+		testSendPastIdle(t, env, target, env.client)
+	})
+}
+
+func TestFlowOpenBothWaysOutlastsHalfCloseIdle(t *testing.T) {
+	dialled, target := loopbackPair(t)
+	env := testIdleEnv(t, dialled)
+	testRelay(t, env.client, target, "before")
+	select {
+	case <-env.done:
+		t.Fatalf("ServeFlow returned while both directions were open and silent, want HalfCloseIdle %v to leave such a flow alone", testIdle)
+	case <-time.After(3*testIdle + testIdle/2):
+	}
+	testRelay(t, env.client, target, "after from the client")
+	testRelay(t, target, env.client, "after from the target")
+}
+
+func TestHandlerHalfCloseIdleDefaultsTo60Seconds(t *testing.T) {
+	if got := (&Handler{}).halfCloseIdle(); got != 60*time.Second {
+		t.Fatalf("Handler{}.halfCloseIdle() = %v, want the 60s default", got)
+	}
+	if got := (&Handler{HalfCloseIdle: 3 * time.Second}).halfCloseIdle(); got != 3*time.Second {
+		t.Fatalf("Handler{HalfCloseIdle: 3s}.halfCloseIdle() = %v, want 3s", got)
+	}
+}
