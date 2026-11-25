@@ -37,6 +37,8 @@ type fakeDialer struct {
 	flow *stacktest.Flow
 	conn net.Conn
 	err  error
+	// reject has flow rejected before the dial answers, as the stack may while a dial is slow.
+	reject bool
 
 	mu    sync.Mutex
 	dials []dialRecord
@@ -46,6 +48,9 @@ func (d *fakeDialer) DialContext(ctx context.Context, network, address string) (
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.dials = append(d.dials, dialRecord{network, address, stack.ClientAddr(ctx), d.flow.Accepted()})
+	if d.reject {
+		d.flow.Reject()
+	}
 	if d.err != nil {
 		return nil, d.err
 	}
@@ -326,6 +331,17 @@ func TestClosesBothWhenADirectionFails(t *testing.T) {
 		t.Error("the stalled dialled conn was left open")
 	}
 	testClosed(t, env.accepted, "the flow's conn")
+}
+
+func TestClosesADialThatReturnsAfterTheFlowWasRejected(t *testing.T) {
+	stalled := &stalledConn{closed: make(chan struct{})}
+	env := testServe(t, "tcp", testClient, testTarget, &fakeDialer{conn: stalled, reject: true})
+	env.wait(t, "its flow was rejected during the dial")
+	select {
+	case <-stalled.closed:
+	default:
+		t.Error("the conn dialled for a flow rejected meanwhile was left open, want it closed")
+	}
 }
 
 func TestRejectsOtherNetworks(t *testing.T) {
