@@ -2,8 +2,10 @@ package dns
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -288,6 +290,43 @@ func TestSendsUnansweredQueryAgainOnNewConn(t *testing.T) {
 	testWriteFrame(t, second, testReply)
 	if got, want := env.nextReply(t), (datagram{testReply, testServer}); got != want {
 		t.Fatalf("client, which sent its query once, got %+v, want %+v", got, want)
+	}
+	env.expectDials(t, 2)
+}
+
+// testWithID is message, a DNS message, under another ID.
+func testWithID(message string, id uint16) string {
+	return string(binary.BigEndian.AppendUint16(nil, id)) + message[2:]
+}
+
+func TestSendsOnlyUnansweredQueriesAgain(t *testing.T) {
+	env := testServeUDP(t, "", 0)
+	unanswered := []string{testWithID(testQuery, 2), testWithID(testQuery, 3)}
+	queries := append([]string{testQuery}, unanswered...)
+	for _, query := range queries {
+		env.send(query, testServer)
+	}
+	first := env.nextServer(t)
+	for _, query := range queries {
+		if got := testReadFrame(t, first); got != query {
+			t.Fatalf("server read %q, want the query %q", got, query)
+		}
+	}
+	testWriteFrame(t, first, testReply)
+	if got, want := env.nextReply(t), (datagram{testReply, testServer}); got != want {
+		t.Fatalf("client got %+v, want %+v", got, want)
+	}
+	first.Close()
+	second := env.nextServer(t)
+	// A datagram sent now goes out behind whatever the relay sends again.
+	env.send("end", testServer)
+	var again []string
+	for got := testReadFrame(t, second); got != "end"; got = testReadFrame(t, second) {
+		again = append(again, got)
+	}
+	slices.Sort(again)
+	if !slices.Equal(again, unanswered) {
+		t.Fatalf("the conn dialled once the first closed read %q, want the two queries left unanswered %q and not the answered one", again, unanswered)
 	}
 	env.expectDials(t, 2)
 }
