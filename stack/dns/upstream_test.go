@@ -132,8 +132,8 @@ func testAwait[T any](t *testing.T, env *testEnv, ch <-chan T, bound time.Durati
 
 func TestAbandonsDialNotBackWithinIdle(t *testing.T) {
 	const idle = 400 * time.Millisecond
-	env, gate := testServeGated(t, idle, false)
 	start := time.Now()
+	env, gate := testServeGated(t, idle, false)
 	// Datagrams relayed to a second server keep the session from idling, which would end the dial's ctx as well.
 	env.send("keep", testOther)
 	other := env.nextServer(t)
@@ -149,7 +149,7 @@ func TestAbandonsDialNotBackWithinIdle(t *testing.T) {
 	}
 	testAwait(t, env, dial.ctx.Done(), testIdleBound, "end of the ctx of a dial that never returns", keep)
 	if held := time.Since(start); held < idle {
-		t.Fatalf("the ctx of a dial that never returns ended %v after the test began to send, want Handler.Idle %v to pass first", held, idle)
+		t.Fatalf("the ctx of a dial that never returns ended %v after its session began, want Handler.Idle %v to pass first", held, idle)
 	}
 	testAwait(t, env, gate.dials, testWait, "second dial to a server whose first dial was abandoned", func() {
 		keep()
