@@ -2,8 +2,10 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +15,9 @@ import (
 
 // testQuery is a DNS query, ID 0x1234, for the A record of example.com.
 const testQuery = "\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01"
+
+// testReply answers testQuery with one A record.
+const testReply = "\x12\x34\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\x5d\xb8\xd8\x22"
 
 // testAgain is how often a waiting test sends again: the relay loses a datagram that arrives while it drops its server's conn.
 const testAgain = 50 * time.Millisecond
@@ -175,6 +180,165 @@ func TestSessionEndDoesNotWaitForDial(t *testing.T) {
 			late := testReceive(t, env.dialer.servers, "conn of the dial let through")
 			t.Cleanup(func() { late.Close() })
 			testReceive(t, late.remote.closed, "close of the conn a dial brought after its session ended")
+		})
+	}
+}
+
+// resetConn is a TCP conn reset under the relay: Write fails at once, and Read does once the conn is closed.
+type resetConn struct {
+	net.Conn
+	closed chan struct{}
+	closes atomic.Int32
+}
+
+func (c *resetConn) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, net.ErrClosed
+}
+
+func (c *resetConn) Write([]byte) (int, error) {
+	return 0, errors.New("write: connection reset by peer")
+}
+
+func (c *resetConn) Close() error {
+	if c.closes.Add(1) == 1 {
+		close(c.closed)
+	}
+	return nil
+}
+
+// resetFirstDialer answers its first dial with a resetConn and passes the later ones on to fakeDialer.
+type resetFirstDialer struct {
+	*fakeDialer
+	first   *resetConn
+	dialled atomic.Bool
+}
+
+func (d *resetFirstDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if d.dialled.CompareAndSwap(false, true) {
+		return d.first, nil
+	}
+	return d.fakeDialer.DialContext(ctx, network, address)
+}
+
+// expectDials fails unless fakeDialer was dialled want times, each time tcp to testServer for the client.
+func (env *testEnv) expectDials(t *testing.T, want int) {
+	t.Helper()
+	dials := env.dialer.recorded()
+	if len(dials) != want {
+		t.Fatalf("dialer.DialContext called %d times %+v, want %d", len(dials), dials, want)
+	}
+	for _, dial := range dials {
+		if dial.network != "tcp" || dial.address != testServer.String() || dial.client == nil || dial.client.String() != testClient.String() {
+			t.Fatalf("dial %+v, want tcp to %v tagged with the client %v", dial, testServer, testClient)
+		}
+	}
+}
+
+// expectNoneSentAgain sends probes until the relay dials again, then "end", and fails unless that conn reads only them and fakeDialer was dialled dials times: what went out before the last conn closed would come again first.
+func (env *testEnv) expectNoneSentAgain(t *testing.T, dials int) {
+	t.Helper()
+	server := testAwait(t, env, env.dialer.servers, testWait, "dial for a datagram sent since the conn closed", func() { env.send("probe", testServer) })
+	t.Cleanup(func() { server.Close() })
+	env.send("end", testServer)
+	for got := ""; got != "end"; {
+		if got = testReadFrame(t, server); got != "probe" && got != "end" {
+			t.Fatalf("the conn dialled once the last one closed read %q, want only what was sent since", got)
+		}
+	}
+	env.expectDials(t, dials)
+}
+
+func TestSendsUnansweredQueryAgainOnNewConn(t *testing.T) {
+	env := testServeUDP(t, "", 0)
+	env.send(testQuery, testServer)
+	first := env.nextServer(t)
+	if got := testReadFrame(t, first); got != testQuery {
+		t.Fatalf("server read %q, want the query %q", got, testQuery)
+	}
+	first.Close()
+	second := env.nextServer(t)
+	if got := testReadFrame(t, second); got != testQuery {
+		t.Fatalf("the conn dialled once the first closed read %q, want the query it left unanswered %q", got, testQuery)
+	}
+	testWriteFrame(t, second, testReply)
+	if got, want := env.nextReply(t), (datagram{testReply, testServer}); got != want {
+		t.Fatalf("client, which sent its query once, got %+v, want %+v", got, want)
+	}
+	env.expectDials(t, 2)
+}
+
+func TestSendsQueryAgainAfterItsWriteFailed(t *testing.T) {
+	reset := &resetConn{closed: make(chan struct{})}
+	env := testServeVia(t, &Handler{}, func(d *fakeDialer) stack.Dialer { return &resetFirstDialer{fakeDialer: d, first: reset} })
+	env.send(testQuery, testServer)
+	server := env.nextServer(t)
+	if got := testReadFrame(t, server); got != testQuery {
+		t.Fatalf("the conn dialled once a Write failed read %q, want the query that Write lost %q", got, testQuery)
+	}
+	testWriteFrame(t, server, testReply)
+	if got, want := env.nextReply(t), (datagram{testReply, testServer}); got != want {
+		t.Fatalf("client, which sent its query once, got %+v, want %+v", got, want)
+	}
+	if closes := reset.closes.Load(); closes != 1 {
+		t.Fatalf("the conn whose Write failed was closed %d times, want once", closes)
+	}
+	// fakeDialer saw every dial but the first, which got the reset conn.
+	env.expectDials(t, 1)
+}
+
+func TestSendsUnansweredQueryAgainOnlyOnce(t *testing.T) {
+	env := testServeUDP(t, "", 0)
+	env.send(testQuery, testServer)
+	for _, conn := range []string{"first", "second"} {
+		server := env.nextServer(t)
+		if got := testReadFrame(t, server); got != testQuery {
+			t.Fatalf("the %s conn read %q, want the query %q", conn, got, testQuery)
+		}
+		server.Close()
+	}
+	env.expectNoneSentAgain(t, 3)
+}
+
+func TestDoesNotSendAnsweredQueryAgain(t *testing.T) {
+	env := testServeUDP(t, "", 0)
+	env.send(testQuery, testServer)
+	server := env.nextServer(t)
+	if got := testReadFrame(t, server); got != testQuery {
+		t.Fatalf("server read %q, want the query %q", got, testQuery)
+	}
+	testWriteFrame(t, server, testReply)
+	if got, want := env.nextReply(t), (datagram{testReply, testServer}); got != want {
+		t.Fatalf("client got %+v, want %+v", got, want)
+	}
+	server.Close()
+	env.expectNoneSentAgain(t, 2)
+}
+
+func TestDoesNotSendOtherDatagramsAgain(t *testing.T) {
+	patch := func(message string, offset int, value byte) string {
+		b := []byte(message)
+		b[offset] = value
+		return string(b)
+	}
+	for _, tc := range []struct{ name, datagram string }{
+		{"shorter than a DNS header", "query"},
+		{"a response", patch(testQuery, 2, 0x81)},
+		{"another opcode", patch(testQuery, 2, 0x11)},
+		{"no question", patch(testQuery[:12], 5, 0)},
+		{"two questions", patch(testQuery, 5, 2) + testQuery[12:]},
+		{"a question cut short", testQuery[:len(testQuery)-3]},
+		{"a record counted but missing", patch(testQuery, 11, 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testServeUDP(t, "", 0)
+			env.send(tc.datagram, testServer)
+			server := env.nextServer(t)
+			if got := testReadFrame(t, server); got != tc.datagram {
+				t.Fatalf("server read %q, want the datagram as sent %q", got, tc.datagram)
+			}
+			server.Close()
+			env.expectNoneSentAgain(t, 2)
 		})
 	}
 }

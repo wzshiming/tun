@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/wzshiming/tun/stack"
@@ -16,7 +17,7 @@ import (
 
 var _ stack.Handler = (*Handler)(nil)
 
-// Handler serves a UDP session by relaying the datagrams it sends to each server as length-framed messages over one TCP connection per server, dialled through Dialer, and the replies back from that server; it rejects other flows.
+// Handler serves a UDP session by relaying the datagrams it sends to each server as length-framed messages over one TCP connection per server, dialled through Dialer, and the replies back from that server; a DNS query that a failed connection left unanswered is sent once more on a new one; it rejects other flows.
 type Handler struct {
 	Dialer stack.Dialer
 	// Target, when set, is the host:port every TCP connection dials instead of the server the client addressed; replies still come back from that server. Empty dials the addressed server.
@@ -36,12 +37,13 @@ func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
 	(&udp.Handler{Dialer: upstreamDialer{h.Dialer, h.Target, idle}, Idle: idle}).ServeFlow(ctx, f)
 }
 
-// frameConn carries each Write as one message prefixed with its 2-byte big-endian length, and each Read returns one such message.
+// frameConn carries each Write as one message prefixed with its 2-byte big-endian length, and each Read returns one such message; only its first Close closes the conn.
 type frameConn struct {
 	net.Conn
+	closing sync.Once
 }
 
-func (c frameConn) Write(message []byte) (int, error) {
+func (c *frameConn) Write(message []byte) (int, error) {
 	frame := binary.BigEndian.AppendUint16(make([]byte, 0, 2+len(message)), uint16(len(message)))
 	if _, err := c.Conn.Write(append(frame, message...)); err != nil {
 		return 0, err
@@ -50,10 +52,15 @@ func (c frameConn) Write(message []byte) (int, error) {
 }
 
 // Read needs b to hold any message, 65535 bytes, as the buffer of upstream.receive does.
-func (c frameConn) Read(b []byte) (int, error) {
+func (c *frameConn) Read(b []byte) (int, error) {
 	var size [2]byte
 	if _, err := io.ReadFull(c.Conn, size[:]); err != nil {
 		return 0, err
 	}
 	return io.ReadFull(c.Conn, b[:binary.BigEndian.Uint16(size[:])])
+}
+
+func (c *frameConn) Close() error {
+	c.closing.Do(func() { c.Conn.Close() })
+	return nil
 }
