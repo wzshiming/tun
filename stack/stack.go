@@ -2,6 +2,7 @@
 package stack
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -41,15 +42,15 @@ type Options struct {
 }
 
 func (o Options) answerTimeout() time.Duration {
-	return o.AnswerTimeout
+	return cmp.Or(o.AnswerTimeout, 30*time.Second)
 }
 
 func (o Options) keepAliveIdle() time.Duration {
-	return o.KeepAliveIdle
+	return cmp.Or(o.KeepAliveIdle, 60*time.Second)
 }
 
 func (o Options) keepAliveInterval() time.Duration {
-	return o.KeepAliveInterval
+	return cmp.Or(o.KeepAliveInterval, 15*time.Second)
 }
 
 // Serve hands each TCP connection and UDP flow arriving on dev to handler until ctx ends or reading dev fails, and always closes dev.
@@ -66,9 +67,12 @@ func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	g := &gateway{
-		ctx:      runCtx,
-		handler:  handler,
-		sessions: make(map[netip.AddrPort]*udpConn),
+		ctx:               runCtx,
+		handler:           handler,
+		answerTimeout:     opts.answerTimeout(),
+		keepAliveIdle:     opts.keepAliveIdle(),
+		keepAliveInterval: opts.keepAliveInterval(),
+		sessions:          make(map[netip.AddrPort]*udpConn),
 	}
 	s, ep, err := g.newStack(dev, opts)
 	if err != nil {
@@ -171,11 +175,11 @@ func (g *gateway) serve(f *flow) {
 	defer g.flows.Done()
 	defer f.end()
 	ctx := g.ctx
-	if f.answerTimeout != 0 {
+	if g.answerTimeout != 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
-		timer := time.AfterFunc(f.answerTimeout, func() { f.expire(cancel) })
+		timer := time.AfterFunc(g.answerTimeout, func() { f.expire(cancel) })
 		defer timer.Stop()
 	}
 	g.handler.ServeFlow(ctx, f)
@@ -231,13 +235,13 @@ func (f *flow) Reject() {
 	}
 }
 
-// expire rejects the flow unless an answer has begun, ending its ctx before the client learns of it.
+// expire ends the flow's ctx even if an answer has begun, and rejects the flow if none has.
 func (f *flow) expire(cancel context.CancelFunc) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	cancel()
 	if !f.answered {
 		f.answered = true
-		cancel()
 		f.reject()
 	}
 }

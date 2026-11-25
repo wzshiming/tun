@@ -3,6 +3,7 @@
 package tcp
 
 import (
+	"cmp"
 	"context"
 	"io"
 	"net"
@@ -34,13 +35,14 @@ func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
 	}
 	conn, err := f.Accept()
 	if err != nil {
+		remote.Close()
 		return
 	}
 	tunnel(ctx, conn, remote, h.halfCloseIdle())
 }
 
 func (h *Handler) halfCloseIdle() time.Duration {
-	return h.HalfCloseIdle
+	return cmp.Or(h.HalfCloseIdle, 60*time.Second)
 }
 
 var bufferPool = sync.Pool{New: func() any { return new([32 * 1024]byte) }}
@@ -54,17 +56,9 @@ func tunnel(ctx context.Context, a, b net.Conn, idle time.Duration) {
 	defer closeBoth()
 	stop := context.AfterFunc(ctx, closeBoth)
 	defer stop()
-	var (
-		idleMu    sync.Mutex
-		idleTimer *time.Timer
-	)
-	touch := func() {
-		idleMu.Lock()
-		defer idleMu.Unlock()
-		if idleTimer != nil {
-			idleTimer.Reset(idle)
-		}
-	}
+	idleTimer := time.AfterFunc(idle, closeBoth)
+	defer idleTimer.Stop()
+	touch := func() {}
 	done := make(chan bool, 2)
 	copyConn := func(dst, src net.Conn) {
 		buf := bufferPool.Get().(*[32 * 1024]byte)
@@ -80,6 +74,8 @@ func tunnel(ctx context.Context, a, b net.Conn, idle time.Duration) {
 	go copyConn(b, a)
 	if !<-done {
 		closeBoth()
+	} else {
+		idleTimer.Reset(idle)
 	}
 	<-done
 }
