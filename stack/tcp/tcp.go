@@ -3,7 +3,6 @@
 package tcp
 
 import (
-	"cmp"
 	"context"
 	"io"
 	"net"
@@ -35,14 +34,13 @@ func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
 	}
 	conn, err := f.Accept()
 	if err != nil {
-		remote.Close()
 		return
 	}
 	tunnel(ctx, conn, remote, h.halfCloseIdle())
 }
 
 func (h *Handler) halfCloseIdle() time.Duration {
-	return cmp.Or(h.HalfCloseIdle, 60*time.Second)
+	return h.HalfCloseIdle
 }
 
 var bufferPool = sync.Pool{New: func() any { return new([32 * 1024]byte) }}
@@ -82,11 +80,6 @@ func tunnel(ctx context.Context, a, b net.Conn, idle time.Duration) {
 	go copyConn(b, a)
 	if !<-done {
 		closeBoth()
-	} else {
-		idleMu.Lock()
-		idleTimer = time.AfterFunc(idle, closeBoth)
-		idleMu.Unlock()
-		defer idleTimer.Stop()
 	}
 	<-done
 }
