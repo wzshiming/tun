@@ -428,3 +428,37 @@ func TestDoesNotSendOtherDatagramsAgain(t *testing.T) {
 		})
 	}
 }
+
+func TestDoesNotDialWithNothingToSendAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name, datagram string
+		answered       bool
+		// conns is how many conns in a row the server closes once it read datagram on them.
+		conns int
+	}{
+		{"an answered query", testQuery, true, 1},
+		{"a datagram that is not a DNS query", "query", false, 1},
+		{"a query already sent again", testQuery, false, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testServeUDP(t, "", 400*time.Millisecond)
+			env.send(tc.datagram, testServer)
+			for range tc.conns {
+				server := env.nextServer(t)
+				if got := testReadFrame(t, server); got != tc.datagram {
+					t.Fatalf("server read %q, want the datagram %q", got, tc.datagram)
+				}
+				if tc.answered {
+					testWriteFrame(t, server, testReply)
+					if got, want := env.nextReply(t), (datagram{testReply, testServer}); got != want {
+						t.Fatalf("client got %+v, want %+v", got, want)
+					}
+				}
+				server.Close()
+			}
+			// The client sends nothing more, so a dial made before the session idles out is one the relay made on its own.
+			env.waitDone(t, testIdleBound, "a session with Handler.Idle 400ms fell silent")
+			env.expectDials(t, tc.conns)
+		})
+	}
+}
