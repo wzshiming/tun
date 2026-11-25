@@ -59,10 +59,11 @@ type heldDial struct {
 	ctx context.Context
 }
 
-// gateDialer holds each dial to its held address until the test opens the gate or, unless deaf, the dial's ctx ends; an opened dial and every other one go to fakeDialer.
+// gateDialer holds each dial to its held address, but the first pass of them, until the test opens the gate or, unless deaf, the dial's ctx ends; an opened dial and every other one go to fakeDialer.
 type gateDialer struct {
 	*fakeDialer
 	held  string
+	pass  atomic.Int32
 	deaf  bool
 	dials chan heldDial
 	gate  chan struct{}
@@ -70,7 +71,7 @@ type gateDialer struct {
 }
 
 func (d *gateDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	if address != d.held {
+	if address != d.held || d.pass.Add(-1) >= 0 {
 		return d.fakeDialer.DialContext(ctx, network, address)
 	}
 	d.dials <- heldDial{dialRecord{network, address, stack.ClientAddr(ctx)}, ctx}
@@ -132,31 +133,52 @@ func testAwait[T any](t *testing.T, env *testEnv, ch <-chan T, bound time.Durati
 
 func TestAbandonsDialNotBackWithinIdle(t *testing.T) {
 	const idle = 400 * time.Millisecond
-	start := time.Now()
-	env, gate := testServeGated(t, idle, false)
-	// Datagrams relayed to a second server keep the session from idling, which would end the dial's ctx as well.
-	env.send("keep", testOther)
-	other := env.nextServer(t)
-	testReadFrame(t, other)
-	keep := func() {
-		env.send("keep", testOther)
-		testReadFrame(t, other)
-	}
-	env.send(testQuery, testServer)
-	dial := testReceive(t, gate.dials, "dial to the server")
-	if dial.network != "tcp" || dial.address != testServer.String() || dial.client == nil || dial.client.String() != testClient.String() {
-		t.Fatalf("dial %+v, want tcp to %v tagged with the client %v", dial.dialRecord, testServer, testClient)
-	}
-	testAwait(t, env, dial.ctx.Done(), testIdleBound, "end of the ctx of a dial that never returns", keep)
-	if held := time.Since(start); held < idle {
-		t.Fatalf("the ctx of a dial that never returns ended %v after its session began, want Handler.Idle %v to pass first", held, idle)
-	}
-	testAwait(t, env, gate.dials, testWait, "second dial to a server whose first dial was abandoned", func() {
-		keep()
-		env.send(testQuery, testServer)
-	})
-	if data, from, ok := env.session.NextReply(0); ok {
-		t.Fatalf("client got %q from %v, want nothing: no dial reached a server", data, from)
+	for _, tc := range []struct {
+		name string
+		// again puts the dial for a query that a closed conn left unanswered under test, not the server's first.
+		again bool
+	}{
+		{"first dial", false},
+		{"dial for a query sent again", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			env, gate := testServeGated(t, idle, false)
+			// Datagrams relayed to a second server keep the session from idling, which would end the dial's ctx as well.
+			env.send("keep", testOther)
+			other := env.nextServer(t)
+			testReadFrame(t, other)
+			keep := func() {
+				env.send("keep", testOther)
+				testReadFrame(t, other)
+			}
+			if tc.again {
+				gate.pass.Store(1)
+			}
+			env.send(testQuery, testServer)
+			if tc.again {
+				first := env.nextServer(t)
+				if got := testReadFrame(t, first); got != testQuery {
+					t.Fatalf("server read %q, want the query %q", got, testQuery)
+				}
+				first.Close()
+			}
+			dial := testReceive(t, gate.dials, "dial to the server")
+			if dial.network != "tcp" || dial.address != testServer.String() || dial.client == nil || dial.client.String() != testClient.String() {
+				t.Fatalf("dial %+v, want tcp to %v tagged with the client %v", dial.dialRecord, testServer, testClient)
+			}
+			testAwait(t, env, dial.ctx.Done(), testIdleBound, "end of the ctx of a dial that never returns", keep)
+			if held := time.Since(start); held < idle {
+				t.Fatalf("the ctx of a dial that never returns ended %v after its session began, want Handler.Idle %v to pass first", held, idle)
+			}
+			testAwait(t, env, gate.dials, testWait, "next dial to a server whose dial was abandoned", func() {
+				keep()
+				env.send(testQuery, testServer)
+			})
+			if data, from, ok := env.session.NextReply(0); ok {
+				t.Fatalf("client got %q from %v, want nothing: no server answered", data, from)
+			}
+		})
 	}
 }
 
