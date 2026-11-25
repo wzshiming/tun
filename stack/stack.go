@@ -2,6 +2,7 @@
 package stack
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -32,6 +33,12 @@ type Options struct {
 	MTU int
 	// Addresses are the gateway's own addresses, the only ones answering ICMP echo.
 	Addresses []netip.Prefix
+	// AnswerTimeout is how long a handler may leave a TCP flow neither accepted nor rejected before Serve rejects it and ends its ctx; 0 means 30s.
+	AnswerTimeout time.Duration
+}
+
+func (o Options) answerTimeout() time.Duration {
+	return cmp.Or(o.AnswerTimeout, 30*time.Second)
 }
 
 // Serve hands each TCP connection and UDP flow arriving on dev to handler until ctx ends or reading dev fails, and always closes dev.
@@ -47,7 +54,7 @@ func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	g := &gateway{ctx: runCtx, handler: handler, sessions: make(map[netip.AddrPort]*udpConn)}
+	g := &gateway{ctx: runCtx, handler: handler, answerTimeout: opts.answerTimeout(), sessions: make(map[netip.AddrPort]*udpConn)}
 	s, ep, err := g.newStack(dev, opts)
 	if err != nil {
 		dev.Close()
@@ -112,6 +119,8 @@ type gateway struct {
 	ctx     context.Context
 	handler Handler
 	s       *stack.Stack
+	// answerTimeout is Options.AnswerTimeout with its default, read once.
+	answerTimeout time.Duration
 
 	mu       sync.Mutex
 	stopped  bool
@@ -144,7 +153,15 @@ func (g *gateway) stop() {
 func (g *gateway) serve(f *flow) {
 	defer g.flows.Done()
 	defer f.end()
-	g.handler.ServeFlow(g.ctx, f)
+	ctx := g.ctx
+	if f.answerTimeout != 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		timer := time.AfterFunc(f.answerTimeout, func() { f.expire(cancel) })
+		defer timer.Stop()
+	}
+	g.handler.ServeFlow(ctx, f)
 }
 
 var (
@@ -158,6 +175,8 @@ type flow struct {
 	target, client netip.AddrPort
 	accept         func() (net.Conn, error)
 	reject         func()
+	// answerTimeout, unless 0, is how long the flow may stay unanswered before it is rejected and its ctx ended.
+	answerTimeout time.Duration
 
 	mu       sync.Mutex
 	answered bool
@@ -191,6 +210,17 @@ func (f *flow) Reject() {
 	defer f.mu.Unlock()
 	if !f.answered {
 		f.answered = true
+		f.reject()
+	}
+}
+
+// expire rejects the flow unless an answer has begun, ending its ctx before the client learns of it.
+func (f *flow) expire(cancel context.CancelFunc) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.answered {
+		f.answered = true
+		cancel()
 		f.reject()
 	}
 }

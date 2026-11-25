@@ -30,6 +30,7 @@ func (g *gateway) forwardTCP(r *tcp.ForwarderRequest) {
 			r.Complete(false)
 			return gonet.NewTCPConn(&wq, ep), nil
 		},
-		reject: func() { r.Complete(true) },
+		reject:        func() { r.Complete(true) },
+		answerTimeout: g.answerTimeout,
 	})
 }
