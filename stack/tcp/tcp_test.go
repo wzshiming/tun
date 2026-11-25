@@ -141,14 +141,21 @@ type testEnv struct {
 // testServe runs a Handler over d on a flow of network from client to target until the test ends.
 func testServe(t *testing.T, network string, client, target netip.AddrPort, d *fakeDialer) *testEnv {
 	t.Helper()
+	return testServeHandler(t, &Handler{}, network, client, target, d)
+}
+
+// testServeHandler runs h over d on a flow of network from client to target until the test ends.
+func testServeHandler(t *testing.T, h *Handler, network string, client, target netip.AddrPort, d *fakeDialer) *testEnv {
+	t.Helper()
 	accepted, peer := loopbackPair(t)
 	env := &testEnv{flow: stacktest.NewFlow(network, client, target, accepted), dialer: d, accepted: accepted, client: peer, done: make(chan struct{})}
 	d.flow = env.flow
+	h.Dialer = d
 	ctx, cancel := context.WithCancel(context.Background())
 	env.cancel = cancel
 	go func() {
 		defer close(env.done)
-		(&Handler{Dialer: d}).ServeFlow(ctx, env.flow)
+		h.ServeFlow(ctx, env.flow)
 	}()
 	t.Cleanup(func() {
 		cancel()
