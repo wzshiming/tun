@@ -2,7 +2,6 @@
 package stack
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -42,15 +41,15 @@ type Options struct {
 }
 
 func (o Options) answerTimeout() time.Duration {
-	return cmp.Or(o.AnswerTimeout, 30*time.Second)
+	return o.AnswerTimeout
 }
 
 func (o Options) keepAliveIdle() time.Duration {
-	return cmp.Or(o.KeepAliveIdle, 60*time.Second)
+	return o.KeepAliveIdle
 }
 
 func (o Options) keepAliveInterval() time.Duration {
-	return cmp.Or(o.KeepAliveInterval, 15*time.Second)
+	return o.KeepAliveInterval
 }
 
 // Serve hands each TCP connection and UDP flow arriving on dev to handler until ctx ends or reading dev fails, and always closes dev.
@@ -67,12 +66,9 @@ func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	g := &gateway{
-		ctx:               runCtx,
-		handler:           handler,
-		answerTimeout:     opts.answerTimeout(),
-		keepAliveIdle:     opts.keepAliveIdle(),
-		keepAliveInterval: opts.keepAliveInterval(),
-		sessions:          make(map[netip.AddrPort]*udpConn),
+		ctx:      runCtx,
+		handler:  handler,
+		sessions: make(map[netip.AddrPort]*udpConn),
 	}
 	s, ep, err := g.newStack(dev, opts)
 	if err != nil {
