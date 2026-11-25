@@ -37,9 +37,10 @@ func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
 	(&udp.Handler{Dialer: upstreamDialer{h.Dialer, h.Target, idle}, Idle: idle}).ServeFlow(ctx, f)
 }
 
-// frameConn carries each Write as one message prefixed with its 2-byte big-endian length, and each Read returns one such message; only its first Close closes the conn.
+// frameConn carries each Write as one message prefixed with its 2-byte big-endian length, and each Read returns one such message; only its first Close closes the conn, and with it ends the ctx of its dial.
 type frameConn struct {
 	net.Conn
+	release context.CancelFunc
 	closing sync.Once
 }
 
@@ -61,6 +62,9 @@ func (c *frameConn) Read(b []byte) (int, error) {
 }
 
 func (c *frameConn) Close() error {
-	c.closing.Do(func() { c.Conn.Close() })
+	c.closing.Do(func() {
+		c.Conn.Close()
+		c.release()
+	})
 	return nil
 }

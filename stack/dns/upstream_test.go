@@ -210,6 +210,29 @@ func TestSessionEndDoesNotWaitForDial(t *testing.T) {
 	}
 }
 
+func TestDialCtxLastsAsLongAsItsConn(t *testing.T) {
+	env, gate := testServeGated(t, 0, false)
+	gate.open()
+	env.send(testQuery, testServer)
+	first := testReceive(t, gate.dials, "dial to the server")
+	server := env.nextServer(t)
+	if got := testReadFrame(t, server); got != testQuery {
+		t.Fatalf("server read %q, want the query %q", got, testQuery)
+	}
+	if err := first.ctx.Err(); err != nil {
+		t.Fatalf("the ctx of a dial ended with %v while its conn carried a query, want it to last as long as the conn: a dialer may bind the conn to it", err)
+	}
+	server.Close()
+	second := testReceive(t, gate.dials, "dial for the query sent again")
+	if got := testReadFrame(t, env.nextServer(t)); got != testQuery {
+		t.Fatalf("the conn dialled once the first closed read %q, want the query %q again", got, testQuery)
+	}
+	testReceive(t, first.ctx.Done(), "end of the ctx of a dial whose conn closed")
+	if err := second.ctx.Err(); err != nil {
+		t.Fatalf("the ctx of the second dial ended with %v while its conn carried the query", err)
+	}
+}
+
 // resetConn is a TCP conn reset under the relay: Write fails at once, and Read does once the conn is closed.
 type resetConn struct {
 	net.Conn

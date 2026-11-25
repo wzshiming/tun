@@ -108,11 +108,11 @@ func (u *upstream) connect() (*frameConn, error) {
 	if err := u.ctx.Err(); err != nil {
 		return nil, err
 	}
-	dialled, err := u.dial()
+	dialled, release, err := u.dial()
 	if err != nil {
 		return nil, err
 	}
-	conn = &frameConn{Conn: dialled}
+	conn = &frameConn{Conn: dialled, release: release}
 	u.mu.Lock()
 	ended := u.ctx.Err() != nil
 	if !ended {
@@ -120,17 +120,17 @@ func (u *upstream) connect() (*frameConn, error) {
 	}
 	u.mu.Unlock()
 	if ended {
-		dialled.Close()
+		conn.Close()
 		return nil, net.ErrClosed
 	}
 	go u.receive(conn)
 	return conn, nil
 }
 
-// dial dials the TCP conn on a goroutine of its own, so that neither the bound of idle nor the end of u waits for a dialer that ignores its ctx; a conn that comes too late is closed.
-func (u *upstream) dial() (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(u.ctx, u.idle)
-	defer cancel()
+// dial dials the TCP conn on a goroutine of its own, so that neither the bound of idle nor the end of u waits for a dialer that ignores its ctx; a conn that comes too late is closed, one in time keeps its ctx, which a dialer may bind it to, until release.
+func (u *upstream) dial() (net.Conn, context.CancelFunc, error) {
+	ctx, cancel := context.WithCancel(u.ctx)
+	bound := time.AfterFunc(u.idle, cancel)
 	type result struct {
 		conn net.Conn
 		err  error
@@ -146,12 +146,23 @@ func (u *upstream) dial() (net.Conn, error) {
 			}
 		}
 	}()
+	var r result
 	select {
-	case r := <-done:
-		return r.conn, r.err
+	case r = <-done:
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		r.err = ctx.Err()
 	}
+	if r.err == nil && !bound.Stop() {
+		// The bound passed just as the dial came back.
+		r.conn.Close()
+		r.err = context.DeadlineExceeded
+	}
+	if r.err != nil {
+		bound.Stop()
+		cancel()
+		return nil, nil, r.err
+	}
+	return r.conn, cancel, nil
 }
 
 // receive hands Read each message read from conn, which answers the query of its ID, and retires conn once it fails.
