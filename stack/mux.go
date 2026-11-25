@@ -29,7 +29,7 @@ type Flow interface {
 
 // Handler serves the flows Serve captures.
 type Handler interface {
-	// ServeFlow is called once per flow on its own goroutine, with a ctx that ends with Serve.
+	// ServeFlow is called once per flow on its own goroutine, with a ctx that ends with Serve, and for a tcp flow also once Serve rejects it as left unanswered for Options.AnswerTimeout.
 	// The flow is over once it returns: a flow neither accepted nor rejected is rejected, and an accepted conn still open is closed.
 	ServeFlow(ctx context.Context, f Flow)
 }

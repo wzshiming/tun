@@ -55,6 +55,8 @@ type fakeDevice struct {
 	synSegmented atomic.Bool
 	// unreachable counts the ICMP destination unreachable packets Serve wrote.
 	unreachable atomic.Int32
+	// severed makes the device drop every packet, the client's and Serve's alike.
+	severed atomic.Bool
 }
 
 func (d *fakeDevice) File() *os.File           { return nil }
@@ -98,6 +100,9 @@ func (d *fakeDevice) Write(bufs [][]byte, offset int) (int, error) {
 		return 0, os.ErrClosed
 	default:
 	}
+	if d.severed.Load() {
+		return len(bufs), nil
+	}
 	for _, buf := range bufs {
 		if testIsUnreachable(buf[offset:]) {
 			d.unreachable.Add(1)
@@ -124,8 +129,11 @@ func (d *fakeDevice) release() {
 	})
 }
 
-// inject queues a client packet for Serve's next Read, dropping it once the device is closed.
+// inject queues a client packet for Serve's next Read, dropping it once the device is severed or closed.
 func (d *fakeDevice) inject(packet []byte) {
+	if d.severed.Load() {
+		return
+	}
 	queue := d.inbound
 	if d.synArmed.Load() && testIsSYN(packet) {
 		// A retransmitted SYN could open the connection in place of one Serve dropped.
@@ -142,6 +150,9 @@ func (d *fakeDevice) inject(packet []byte) {
 
 // segmentSYN makes Read return the client's next TCP SYN as (1, tun.ErrTooManySegments) and drops every later SYN.
 func (d *fakeDevice) segmentSYN() { d.synArmed.Store(true) }
+
+// sever drops every packet either way from now on, as when a client vanishes without closing its conns.
+func (d *fakeDevice) sever() { d.severed.Store(true) }
 
 // testIsSYN reports whether packet is an IPv4 TCP segment opening a connection.
 func testIsSYN(packet []byte) bool {

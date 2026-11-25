@@ -2,6 +2,7 @@
 package stack
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -32,6 +33,24 @@ type Options struct {
 	MTU int
 	// Addresses are the gateway's own addresses, the only ones answering ICMP echo.
 	Addresses []netip.Prefix
+	// AnswerTimeout is how long a handler may leave a TCP flow neither accepted nor rejected before Serve rejects it and ends its ctx; 0 means 30s.
+	AnswerTimeout time.Duration
+	// KeepAliveIdle is how long the client of an accepted TCP conn may stay silent before Serve sends it keepalive probes; 0 means 60s.
+	KeepAliveIdle time.Duration
+	// KeepAliveInterval is the time between those probes; once gVisor's default of 9 in a row go unanswered, a Read blocked on the conn fails; 0 means 15s.
+	KeepAliveInterval time.Duration
+}
+
+func (o Options) answerTimeout() time.Duration {
+	return cmp.Or(o.AnswerTimeout, 30*time.Second)
+}
+
+func (o Options) keepAliveIdle() time.Duration {
+	return cmp.Or(o.KeepAliveIdle, 60*time.Second)
+}
+
+func (o Options) keepAliveInterval() time.Duration {
+	return cmp.Or(o.KeepAliveInterval, 15*time.Second)
 }
 
 // Serve hands each TCP connection and UDP flow arriving on dev to handler until ctx ends or reading dev fails, and always closes dev.
@@ -47,7 +66,14 @@ func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	g := &gateway{ctx: runCtx, handler: handler, sessions: make(map[netip.AddrPort]*udpConn)}
+	g := &gateway{
+		ctx:               runCtx,
+		handler:           handler,
+		answerTimeout:     opts.answerTimeout(),
+		keepAliveIdle:     opts.keepAliveIdle(),
+		keepAliveInterval: opts.keepAliveInterval(),
+		sessions:          make(map[netip.AddrPort]*udpConn),
+	}
 	s, ep, err := g.newStack(dev, opts)
 	if err != nil {
 		dev.Close()
@@ -112,6 +138,10 @@ type gateway struct {
 	ctx     context.Context
 	handler Handler
 	s       *stack.Stack
+	// answerTimeout is Options.AnswerTimeout with its default, read once.
+	answerTimeout time.Duration
+	// keepAliveIdle and keepAliveInterval are Options.KeepAliveIdle and Options.KeepAliveInterval with their defaults, read once.
+	keepAliveIdle, keepAliveInterval time.Duration
 
 	mu       sync.Mutex
 	stopped  bool
@@ -144,7 +174,15 @@ func (g *gateway) stop() {
 func (g *gateway) serve(f *flow) {
 	defer g.flows.Done()
 	defer f.end()
-	g.handler.ServeFlow(g.ctx, f)
+	ctx := g.ctx
+	if f.answerTimeout != 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		timer := time.AfterFunc(f.answerTimeout, func() { f.expire(cancel) })
+		defer timer.Stop()
+	}
+	g.handler.ServeFlow(ctx, f)
 }
 
 var (
@@ -158,6 +196,8 @@ type flow struct {
 	target, client netip.AddrPort
 	accept         func() (net.Conn, error)
 	reject         func()
+	// answerTimeout, unless 0, is how long the flow may stay unanswered before it is rejected and its ctx ended.
+	answerTimeout time.Duration
 
 	mu       sync.Mutex
 	answered bool
@@ -191,6 +231,17 @@ func (f *flow) Reject() {
 	defer f.mu.Unlock()
 	if !f.answered {
 		f.answered = true
+		f.reject()
+	}
+}
+
+// expire rejects the flow unless an answer has begun, ending its ctx before the client learns of it.
+func (f *flow) expire(cancel context.CancelFunc) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.answered {
+		f.answered = true
+		cancel()
 		f.reject()
 	}
 }
