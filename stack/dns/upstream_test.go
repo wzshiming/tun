@@ -185,13 +185,15 @@ func TestAbandonsDialNotBackWithinIdle(t *testing.T) {
 func TestSessionEndDoesNotWaitForDial(t *testing.T) {
 	for _, tc := range []struct {
 		name string
+		idle time.Duration
 		end  func(*testEnv)
 	}{
-		{"ctx ends", func(env *testEnv) { env.cancel() }},
-		{"client conn fails", func(env *testEnv) { env.session.Close() }},
+		{"ctx ends", 0, func(env *testEnv) { env.cancel() }},
+		{"client conn fails", 0, func(env *testEnv) { env.session.Close() }},
+		{"session idles", 300 * time.Millisecond, func(*testEnv) {}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env, gate := testServeGated(t, 0, true)
+			env, gate := testServeGated(t, tc.idle, true)
 			env.send(testQuery, testServer)
 			dial := testReceive(t, gate.dials, "dial to the server")
 			tc.end(env)
