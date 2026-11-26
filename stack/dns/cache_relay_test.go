@@ -223,3 +223,37 @@ func TestReplacesCachedReplyOnceItsLifetimePassed(t *testing.T) {
 	want.ID = 0x9abc
 	env.expectServed(t, want, testServer)
 }
+
+func TestCacheSizeBoundsQueriesAnsweredFromCache(t *testing.T) {
+	const size = 3
+	env := testServe(t, testCaching(&Handler{CacheSize: size}), "udp")
+	// One query more than the cache keeps replies, each for a name of its own.
+	asked := testHosts(t, size+1)
+	replies := make([]string, len(asked))
+	var server *fakeServer
+	for i, a := range asked {
+		replies[i] = string(testAnswer(t, func(m *dnsmessage.Message) {
+			m.Questions[0].Name = dnsmessage.MustNewName(a.key.name)
+			m.Answers = []dnsmessage.Resource{testRecord(a.key.name, 300, &dnsmessage.AResource{A: [4]byte{192, 0, 2, byte(i + 1)}})}
+		}))
+		env.send(string(a.query), testServer)
+		if server == nil {
+			server = env.nextServer(t)
+		}
+		env.answer(t, server, string(a.query), replies[i], testServer)
+	}
+	served := 0
+	for i, a := range asked {
+		// A query that goes upstream gets no answer there, so the cache holds what it held when the first one came again.
+		if env.goesUpstream(t, server, testWithID(string(a.query), 0x5678)) {
+			continue
+		}
+		want := testParse(t, []byte(replies[i]))
+		want.ID = 0x5678
+		env.expectServed(t, want, testServer)
+		served++
+	}
+	if served != size {
+		t.Errorf("a relay with CacheSize %d answers from its cache %d of the %d queries whose replies it read, want %d", size, served, len(asked), size)
+	}
+}
