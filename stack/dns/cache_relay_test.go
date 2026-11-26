@@ -42,6 +42,13 @@ func testCaching(h *Handler) *Handler {
 	return h
 }
 
+// testClocked returns h with its cache on a testClock, which stands still until the test lets time pass.
+func testClocked(h *Handler) (*Handler, *testClock) {
+	clock := new(testClock)
+	h.cache.now = clock.now
+	return h, clock
+}
+
 // fill has the client ask testQuery of server and the conn the relay dials for it answer testReply, and returns that conn once the client has the reply.
 func (env *testEnv) fill(t *testing.T, server netip.AddrPort) *fakeServer {
 	t.Helper()
@@ -63,6 +70,22 @@ func (env *testEnv) answer(t *testing.T, conn *fakeServer, query, reply string, 
 	}
 }
 
+// goesUpstream has the client send query to testServer and tells whether conn, its upstream, reads it: a conn carries its frames in order, so the query comes before the "end" sent after it or not at all.
+func (env *testEnv) goesUpstream(t *testing.T, conn *fakeServer, query string) bool {
+	t.Helper()
+	env.send(query, testServer)
+	env.send("end", testServer)
+	first := testReadFrame(t, conn)
+	last := first
+	if first == query {
+		last = testReadFrame(t, conn)
+	}
+	if last != "end" {
+		t.Fatalf("the upstream read %q, want the query %q, unless the cache answers it, and then %q", last, query, "end")
+	}
+	return first == query
+}
+
 // expectCached fails unless the client gets next, from server, what the cache makes of testReply for a query of id: that reply under the ID of the query.
 func (env *testEnv) expectCached(t *testing.T, id uint16, server netip.AddrPort) {
 	t.Helper()
@@ -79,7 +102,7 @@ func (env *testEnv) expectServed(t *testing.T, want dnsmessage.Message, server n
 		t.Fatalf("client got no reply within %v to a query whose answer the cache holds; the relay dialled %+v", testWait, env.dialer.recorded())
 	}
 	if got, want := testRender(testParse(t, data)), testRender(want); got != want || from != server {
-		t.Fatalf("client got from %v\n%s\nwant from %v, under the ID of its query, the reply the upstream sent before\n%s", from, got, server, want)
+		t.Fatalf("client got from %v\n%s\nwant from %v, under the ID of its query and with the TTLs it has left, the reply the upstream sent before\n%s", from, got, server, want)
 	}
 }
 
@@ -138,5 +161,40 @@ func TestCacheKeepsServersApartWithoutTarget(t *testing.T) {
 	env.send("end", testOther)
 	if got := testReadFrame(t, env.nextServer(t)); got != again {
 		t.Fatalf("the conn dialled for %v read %q first, want the query %q: without Target what %v answered is no answer of another server", testOther, got, again, testServer)
+	}
+}
+
+func TestAnswersFromCacheWithTTLsLessWholeSecondsKept(t *testing.T) {
+	// The reply answers for the smallest of its TTLs, 60 s.
+	reply := string(testAnswer(t, func(m *dnsmessage.Message) {
+		m.Answers = []dnsmessage.Resource{testA(300)}
+		m.Authorities = []dnsmessage.Resource{testNS(120)}
+		m.Additionals = []dnsmessage.Resource{testGlue(60)}
+	}))
+	for _, tc := range []struct {
+		// kept is how long the cache has had the reply when the query comes again, ttls the TTLs its three records are then served with.
+		kept time.Duration
+		ttls [3]uint32
+	}{
+		{999 * time.Millisecond, [3]uint32{300, 120, 60}},
+		{time.Second, [3]uint32{299, 119, 59}},
+		{20*time.Second + 500*time.Millisecond, [3]uint32{280, 100, 40}},
+		{59*time.Second + 999*time.Millisecond, [3]uint32{241, 61, 1}},
+	} {
+		t.Run(tc.kept.String(), func(t *testing.T) {
+			h, clock := testClocked(&Handler{})
+			env := testServe(t, h, "udp")
+			env.send(testQuery, testServer)
+			server := env.nextServer(t)
+			env.answer(t, server, testQuery, reply, testServer)
+			clock.pass(tc.kept)
+			if env.goesUpstream(t, server, testWithID(testQuery, 0x5678)) {
+				t.Fatalf("the relay sent upstream a query that came %v after the reply that answers it for 60 s", tc.kept)
+			}
+			want := testParse(t, []byte(reply))
+			want.ID = 0x5678
+			want.Answers[0].Header.TTL, want.Authorities[0].Header.TTL, want.Additionals[0].Header.TTL = tc.ttls[0], tc.ttls[1], tc.ttls[2]
+			env.expectServed(t, want, testServer)
+		})
 	}
 }
