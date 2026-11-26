@@ -198,3 +198,28 @@ func TestAnswersFromCacheWithTTLsLessWholeSecondsKept(t *testing.T) {
 		})
 	}
 }
+
+func TestReplacesCachedReplyOnceItsLifetimePassed(t *testing.T) {
+	h, clock := testClocked(&Handler{})
+	env := testServe(t, h, "udp")
+	// testReply answers for the TTL of its one record, 60 s.
+	server := env.fill(t, testServer)
+	clock.pass(time.Minute)
+	if !env.goesUpstream(t, server, testWithID(testQuery, 0x5678)) {
+		t.Fatal("the relay answered from its cache a query that came 60 s after the reply, which answers for 60 s")
+	}
+	later := string(testAnswer(t, func(m *dnsmessage.Message) {
+		m.ID = 0x5678
+		m.Answers = []dnsmessage.Resource{testRecord("example.com.", 300, &dnsmessage.AResource{A: [4]byte{192, 0, 2, 7}})}
+	}))
+	testWriteFrame(t, server, later)
+	if got, want := env.nextReply(t), (datagram{later, testServer}); got != want {
+		t.Fatalf("client got %+v, want the later reply as the upstream sent it %+v", got, want)
+	}
+	if env.goesUpstream(t, server, testWithID(testQuery, 0x9abc)) {
+		t.Fatal("the relay sent upstream a query that came right after the later reply, which answers it for 300 s")
+	}
+	want := testParse(t, []byte(later))
+	want.ID = 0x9abc
+	env.expectServed(t, want, testServer)
+}
