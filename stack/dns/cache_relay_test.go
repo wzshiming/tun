@@ -1,10 +1,38 @@
 package dns
 
 import (
+	"context"
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/wzshiming/tun/internal/stacktest"
 )
+
+// testNextClient is testClient on another port: the client of a second session.
+var testNextClient = netip.MustParseAddrPort("10.0.0.2:40001")
+
+// testServeNext serves h as it is, so through the fakeDialer of first, on a "udp" flow of testNextClient to testServer until the test ends.
+func testServeNext(t *testing.T, h *Handler, first *testEnv) *testEnv {
+	t.Helper()
+	env := &testEnv{dialer: first.dialer, session: stacktest.NewSession(testNextClient, testServer), done: make(chan struct{})}
+	env.flow = stacktest.NewFlow("udp", testNextClient, testServer, env.session)
+	ctx, cancel := context.WithCancel(context.Background())
+	env.cancel = cancel
+	go func() {
+		defer close(env.done)
+		h.ServeFlow(ctx, env.flow)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-env.done:
+		case <-time.After(testWait):
+			t.Errorf("ServeFlow did not return within %v of its ctx ending", testWait)
+		}
+	})
+	return env
+}
 
 // testCaching returns h with the clock of its cache standing still, so that a reply is served with the TTLs it came with however slowly the test runs.
 func testCaching(h *Handler) *Handler {
@@ -60,4 +88,17 @@ func TestAnswersRepeatedQueryFromCache(t *testing.T) {
 	}
 	env.expectCached(t, 0x5678, testServer)
 	env.expectDials(t, 1)
+}
+
+func TestSessionWhoseQueryHitsCacheDialsNothing(t *testing.T) {
+	h := testCaching(&Handler{})
+	first := testServe(t, h, "udp")
+	first.fill(t, testServer)
+	second := testServeNext(t, h, first)
+	second.send(testWithID(testQuery, 0x5678), testServer)
+	second.expectCached(t, 0x5678, testServer)
+	// The session is over before its dials are counted, so that it has none left to make.
+	second.cancel()
+	second.waitDone(t, testWait, "its ctx ended")
+	first.expectDials(t, 1)
 }
