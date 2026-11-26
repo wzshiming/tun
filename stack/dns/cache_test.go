@@ -597,21 +597,20 @@ func TestCacheOfNegativeSizeKeepsNothing(t *testing.T) {
 }
 
 func TestCacheOfZeroSizeKeeps4096(t *testing.T) {
-	// The zero value is on the clock of the system as well.
-	var c cache
+	c, _ := testCache(0)
 	if got := c.limit(); got != 4096 {
 		t.Errorf("a cache of size 0 keeps up to %d entries, want 4096", got)
 	}
 	a := testAsk(t, "example.com.")
-	a.keep(&c, time.Minute)
-	if !a.served(&c) {
+	a.keep(c, time.Minute)
+	if !a.served(c) {
 		t.Error("a cache of size 0 does not answer a query whose reply it was just given")
 	}
 }
 
 func TestCacheServesConcurrentSessions(t *testing.T) {
 	const size, sessions, each = 8, 8, 200
-	c := &cache{size: size}
+	c, _ := testCache(size)
 	asked := testHosts(t, 2*size)
 	var wg sync.WaitGroup
 	for s := range sessions {
