@@ -257,3 +257,11 @@ func TestCacheSizeBoundsQueriesAnsweredFromCache(t *testing.T) {
 		t.Errorf("a relay with CacheSize %d answers from its cache %d of the %d queries whose replies it read, want %d", size, served, len(asked), size)
 	}
 }
+
+func TestNegativeCacheSizeSendsRepeatedQueryUpstream(t *testing.T) {
+	env := testServe(t, testCaching(&Handler{CacheSize: -1}), "udp")
+	server := env.fill(t, testServer)
+	if !env.goesUpstream(t, server, testWithID(testQuery, 0x5678)) {
+		t.Fatal("a relay with CacheSize -1 answered from a cache a query whose reply it had read")
+	}
+}
