@@ -171,12 +171,21 @@ func (c *cache) clock() time.Time {
 	return c.now()
 }
 
-// put keeps reply, which upstream sent to a DNS query of key k, to answer such queries for life; in a full cache it takes the place of the entry that expires first, and a reply that does not unpack is not kept.
+// put keeps reply, which upstream sent to a DNS query of key k, to answer such queries for life; in a full cache it takes the place of the entry that expires first, and a reply that get could not write anew, for it does not unpack or may hold compressed names in data that is copied unread, is not kept.
 func (c *cache) put(upstream string, k key, reply []byte, life time.Duration) {
 	limit := c.limit()
 	var m dnsmessage.Message
 	if limit <= 0 || life <= 0 || m.Unpack(reply) != nil {
 		return
+	}
+	for _, section := range [][]dnsmessage.Resource{m.Answers, m.Authorities, m.Additionals} {
+		for _, r := range section {
+			switch r.Header.Type {
+			// MD, MF, MB, MG, MR, MINFO, RP, AFSDB, RT, SIG, PX, NXT and NAPTR: RFC 3597 section 4 lets their data hold compressed names, and dnsmessage parses none of them.
+			case 3, 4, 7, 8, 9, 14, 17, 18, 21, 24, 26, 30, 35:
+				return
+			}
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

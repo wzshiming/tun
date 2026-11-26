@@ -503,6 +503,29 @@ func TestCacheKeepsNoReplyThatDoesNotParse(t *testing.T) {
 	}
 }
 
+func TestCacheKeepsNoReplyWhoseNamesItCannotWriteAnew(t *testing.T) {
+	for _, tc := range []struct {
+		typ  dnsmessage.Type
+		kept bool
+	}{
+		// MD, MF, MB, MG, MR, MINFO, RP, AFSDB, RT, SIG, PX, NXT and NAPTR: the types of RFC 3597 section 4 whose data may hold compressed names and which dnsmessage does not parse.
+		{3, false}, {4, false}, {7, false}, {8, false}, {9, false}, {14, false}, {17, false}, {18, false}, {21, false}, {24, false}, {26, false}, {30, false}, {35, false},
+		// HINFO, KX, RRSIG and a type of private use, whose data no sender may compress.
+		{13, true}, {36, true}, {46, true}, {65280, true},
+	} {
+		c, _ := testCache(0)
+		a := testAsk(t, "example.com.")
+		// To a type that may compress it, the data is a name that ends in a pointer to the name of the question.
+		reply := testAnswer(t, func(m *dnsmessage.Message) {
+			m.Answers = []dnsmessage.Resource{testA(300), testRecord("example.com.", 300, &dnsmessage.UnknownResource{Type: tc.typ, Data: []byte("\x03www\xc0\x0c")})}
+		})
+		c.put(testServer.String(), a.key, reply, time.Minute)
+		if served := a.served(c); served != tc.kept {
+			t.Errorf("a reply with a record of type %d is served: %v, want %v", tc.typ, served, tc.kept)
+		}
+	}
+}
+
 func TestCacheTellsEntriesApartByUpstreamAndKey(t *testing.T) {
 	c, _ := testCache(0)
 	a := testAsk(t, "example.com.")
