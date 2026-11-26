@@ -286,6 +286,94 @@ func TestAnswersFromCacheOnlyQueryThatAsksTheSame(t *testing.T) {
 	}
 }
 
+func TestAnswersFromCacheOnlyWithinLifetimeOfReply(t *testing.T) {
+	type message = dnsmessage.Message
+	records := func(r ...dnsmessage.Resource) []dnsmessage.Resource { return r }
+	reply := func(alter func(m *message)) string { return string(testAnswer(t, alter)) }
+	// answered is a reply with an answer of TTL 300 as well, so that nothing but what alter does keeps it out of the cache.
+	answered := func(alter func(m *message)) string {
+		return reply(func(m *message) {
+			m.Answers = records(testA(300))
+			alter(m)
+		})
+	}
+	// nxdomain is a reply that denies the name with that authority section.
+	nxdomain := func(authority ...dnsmessage.Resource) string {
+		return reply(func(m *message) { m.RCode, m.Authorities = dnsmessage.RCodeNameError, authority })
+	}
+	// sized is a reply with an answer of TTL 300 that a record of opaque data brings to size bytes.
+	sized := func(size int) string {
+		filler := &dnsmessage.UnknownResource{Type: 10}
+		fill := func(m *message) {
+			m.Additionals = records(dnsmessage.Resource{Header: testA(300).Header, Body: filler})
+		}
+		filler.Data = make([]byte, size-len(answered(fill)))
+		padded := answered(fill)
+		if len(padded) != size {
+			t.Fatalf("the test reply is %d bytes long, want %d", len(padded), size)
+		}
+		return padded
+	}
+	for _, tc := range []struct {
+		name, reply string
+		// life is how long the reply answers from the cache, 0 for a reply that is not stored.
+		life time.Duration
+	}{
+		{"the smallest TTL among the answers", reply(func(m *message) { m.Answers = records(testA(300), testA(120)) }), 120 * time.Second},
+		{"the smallest TTL in the authority section", answered(func(m *message) { m.Authorities = records(testNS(60)) }), 60 * time.Second},
+		{"the smallest TTL in the additional section", answered(func(m *message) { m.Additionals = records(testGlue(30)) }), 30 * time.Second},
+		{"a TTL over the cap of 3600 s", reply(func(m *message) { m.Answers = records(testA(86400)) }), 3600 * time.Second},
+		{"TTL 0", reply(func(m *message) { m.Answers = records(testA(0)) }), 0},
+		{"NXDOMAIN with a SOA whose MINIMUM is the smaller", nxdomain(testSOA(50, 40)), 40 * time.Second},
+		{"NXDOMAIN with a SOA whose TTL is the smaller", nxdomain(testSOA(20, 40)), 20 * time.Second},
+		{"NXDOMAIN with a SOA over the cap of 60 s", nxdomain(testSOA(900, 300)), 60 * time.Second},
+		{"NOERROR without answers with a SOA", reply(func(m *message) { m.Authorities = records(testSOA(50, 40)) }), 40 * time.Second},
+		{"NXDOMAIN without a SOA", nxdomain(testNS(300)), 0},
+		{"NOERROR without answers and without a SOA", reply(func(m *message) { m.Authorities = records(testNS(300)) }), 0},
+		{"truncated", answered(func(m *message) { m.Truncated = true }), 0},
+		{"SERVFAIL", answered(func(m *message) { m.RCode, m.Authorities = dnsmessage.RCodeServerFailure, records(testSOA(50, 40)) }), 0},
+		{"a reply of 4096 bytes", sized(4096), 300 * time.Second},
+		{"a reply of 4097 bytes", sized(4097), 0},
+		{"another name in the question", answered(func(m *message) { m.Questions[0].Name = dnsmessage.MustNewName("example.org.") }), 0},
+		{"an answer cut short", testReply[:len(testReply)-1], 0},
+		{"a TXT record whose string runs past its data", answered(func(m *message) {
+			m.Answers = append(m.Answers, testRecord("example.com.", 300, &dnsmessage.UnknownResource{Type: dnsmessage.TypeTXT, Data: []byte("\x05ab")}))
+		}), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, clock := testClocked(&Handler{})
+			env := testServe(t, h, "udp")
+			env.send(testQuery, testServer)
+			server := env.nextServer(t)
+			env.answer(t, server, testQuery, tc.reply, testServer)
+			if tc.life == 0 {
+				if !env.goesUpstream(t, server, testWithID(testQuery, 0x5678)) {
+					t.Fatal("the relay answered from its cache a query that came right after a reply it may not store")
+				}
+				return
+			}
+			clock.pass(tc.life - time.Millisecond)
+			if env.goesUpstream(t, server, testWithID(testQuery, 0x5678)) {
+				t.Fatalf("the relay sent upstream a query that came %v after the reply that answers it for %v", tc.life-time.Millisecond, tc.life)
+			}
+			// The cache had the reply for all but the last of the whole seconds it answers for.
+			kept := uint32(tc.life/time.Second) - 1
+			want := testParse(t, []byte(tc.reply))
+			want.ID = 0x5678
+			for _, section := range [][]dnsmessage.Resource{want.Answers, want.Authorities, want.Additionals} {
+				for i := range section {
+					section[i].Header.TTL -= min(section[i].Header.TTL, kept)
+				}
+			}
+			env.expectServed(t, want, testServer)
+			clock.pass(time.Millisecond)
+			if !env.goesUpstream(t, server, testWithID(testQuery, 0x9abc)) {
+				t.Fatalf("the relay answered from its cache a query that came %v after the reply, which answers for %v", tc.life, tc.life)
+			}
+		})
+	}
+}
+
 func TestCacheSizeBoundsQueriesAnsweredFromCache(t *testing.T) {
 	const size = 3
 	env := testServe(t, testCaching(&Handler{CacheSize: size}), "udp")
