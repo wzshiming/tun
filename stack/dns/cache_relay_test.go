@@ -84,7 +84,7 @@ func TestAnswersRepeatedQueryFromCache(t *testing.T) {
 	// A conn carries its frames in order, so the next one tells whether the query before it went upstream.
 	env.send("end", testServer)
 	if got := testReadFrame(t, server); got != "end" {
-		t.Fatalf("the upstream read %q, want only the datagram sent after the query its answer of before answers", got)
+		t.Fatalf("the upstream read %q next, want %q: the cache holds the answer of the query sent before it", got, "end")
 	}
 	env.expectCached(t, 0x5678, testServer)
 	env.expectDials(t, 1)
@@ -123,6 +123,6 @@ func TestCacheKeepsServersApartWithoutTarget(t *testing.T) {
 	// A relay that answered with what testServer said would dial testOther for this datagram alone.
 	env.send("end", testOther)
 	if got := testReadFrame(t, env.nextServer(t)); got != again {
-		t.Fatalf("%v read %q first, want the query %q: without Target the answer of %v is not the upstream's of this query", testOther, got, again, testServer)
+		t.Fatalf("the conn dialled for %v read %q first, want the query %q: without Target what %v answered is no answer of another server", testOther, got, again, testServer)
 	}
 }
