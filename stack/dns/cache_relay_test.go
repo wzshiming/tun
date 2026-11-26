@@ -224,6 +224,68 @@ func TestReplacesCachedReplyOnceItsLifetimePassed(t *testing.T) {
 	env.expectServed(t, want, testServer)
 }
 
+func TestAnswersFromCacheOnlyQueryThatAsksTheSame(t *testing.T) {
+	type message = dnsmessage.Message
+	cookie := func(data string) dnsmessage.Option { return dnsmessage.Option{Code: 10, Data: []byte(data)} }
+	padding := dnsmessage.Option{Code: 12, Data: make([]byte, 12)}
+	// opt gives a query an OPT record of that payload size, flags and options, plain leaves it none.
+	opt := func(payload dnsmessage.Class, flags uint32, options ...dnsmessage.Option) func(m *message) {
+		return func(m *message) { m.Additionals = []dnsmessage.Resource{testOPT(payload, flags, options...)} }
+	}
+	plain := func(m *message) { m.Additionals = nil }
+	edns := opt(1232, 0, cookie("client-1"))
+	named := func(name string) func(m *message) {
+		return func(m *message) { m.Questions[0].Name = dnsmessage.MustNewName(name) }
+	}
+	// reply answers the first query with an A record and that additional section.
+	reply := func(additionals ...dnsmessage.Resource) string {
+		return string(testAnswer(t, func(m *message) { m.Answers, m.Additionals = []dnsmessage.Resource{testA(300)}, additionals }))
+	}
+	// The upstream sends sent, whose OPT record completes the cookie of the query and pads; the cache makes bare of it for a query with an OPT record and stripped for one without.
+	sent := reply(testOPT(1232, 0, cookie("client-1server-1"), padding), testGlue(60))
+	bare, stripped := reply(testOPT(1232, 0), testGlue(60)), reply(testGlue(60))
+	for _, tc := range []struct {
+		name string
+		// first makes the query the upstream answers of one for the A record of example.com with RD set, next the query that follows of that one.
+		first, next func(m *message)
+		// served is what the cache answers the second query with, but for its ID and question; empty if that query has to go upstream.
+		served string
+	}{
+		{"another name", edns, named("example.org."), ""},
+		{"another type", edns, func(m *message) { m.Questions[0].Type = dnsmessage.TypeAAAA }, ""},
+		{"another class", edns, func(m *message) { m.Questions[0].Class = dnsmessage.ClassCHAOS }, ""},
+		{"RD clear", edns, func(m *message) { m.RecursionDesired = false }, ""},
+		{"CD set", edns, func(m *message) { m.CheckingDisabled = true }, ""},
+		{"no OPT record after a query with one", edns, plain, ""},
+		{"an OPT record after a query without one", plain, edns, ""},
+		{"DO set", edns, opt(1232, testDO, cookie("client-1")), ""},
+		{"the name in another letter case", edns, named("ExAmPlE.COM."), bare},
+		{"another cookie", edns, opt(1232, 0, cookie("client-2")), bare},
+		{"padding", edns, opt(1232, 0, cookie("client-1"), padding), bare},
+		{"another payload size", edns, opt(4096, 0, cookie("client-1")), bare},
+		{"no OPT record in either query", plain, plain, stripped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testServe(t, testCaching(&Handler{}), "udp")
+			first := string(testAsk(t, "example.com.", tc.first).query)
+			next := testAsk(t, "example.com.", tc.first, tc.next, func(m *message) { m.ID = 0x5678 }).query
+			env.send(first, testServer)
+			server := env.nextServer(t)
+			env.answer(t, server, first, sent, testServer)
+			cached := tc.served != ""
+			if went := env.goesUpstream(t, server, string(next)); went == cached {
+				t.Fatalf("the query that follows the answered one went upstream: %v, want %v", went, !cached)
+			}
+			if !cached {
+				return
+			}
+			want := testParse(t, []byte(tc.served))
+			want.ID, want.Questions = 0x5678, testParse(t, next).Questions
+			env.expectServed(t, want, testServer)
+		})
+	}
+}
+
 func TestCacheSizeBoundsQueriesAnsweredFromCache(t *testing.T) {
 	const size = 3
 	env := testServe(t, testCaching(&Handler{CacheSize: size}), "udp")
