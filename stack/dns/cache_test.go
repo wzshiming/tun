@@ -230,6 +230,11 @@ func TestLifetimeOfReply(t *testing.T) {
 }
 
 func TestLifetimeRefusesBytesThatDoNotParse(t *testing.T) {
+	// count is testReply with n as the low byte of a record count: at offset 7 of the answers, 9 of the authority section, 11 of the additional one.
+	count := func(offset int, n string) string { return testReply[:offset] + n + testReply[offset+1:] }
+	// authority and additional carry the answer of testReply, its last 16 bytes, once more as a record of that section.
+	authority := count(9, "\x01") + testReply[len(testReply)-16:]
+	additional := count(11, "\x01") + testReply[len(testReply)-16:]
 	id, q := testAsked(t)
 	for _, tc := range []struct {
 		name, reply string
@@ -237,8 +242,14 @@ func TestLifetimeRefusesBytesThatDoNotParse(t *testing.T) {
 	}{
 		{"testReply as it is", testReply, 60 * time.Second},
 		{"shorter than a DNS header", "reply", 0},
-		{"testReply with its answer cut short", testReply[:len(testReply)-1], 0},
-		{"testReply counting a record it does not have", testReply[:9] + "\x01" + testReply[10:], 0},
+		{"an answer cut short", testReply[:len(testReply)-1], 0},
+		{"an answer counted but missing", count(7, "\x02"), 0},
+		{"an authority record", authority, 60 * time.Second},
+		{"an authority record cut short", authority[:len(authority)-1], 0},
+		{"an authority record counted but missing", count(9, "\x01"), 0},
+		{"an additional record", additional, 60 * time.Second},
+		{"an additional record cut short", additional[:len(additional)-1], 0},
+		{"an additional record counted but missing", count(11, "\x01"), 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := lifetime([]byte(tc.reply), id, q); got != tc.want {
