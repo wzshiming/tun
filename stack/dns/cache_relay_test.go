@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
+
 	"github.com/wzshiming/tun/internal/stacktest"
 )
 
@@ -64,12 +66,18 @@ func (env *testEnv) answer(t *testing.T, conn *fakeServer, query, reply string, 
 // expectCached fails unless the client gets next, from server, what the cache makes of testReply for a query of id: that reply under the ID of the query.
 func (env *testEnv) expectCached(t *testing.T, id uint16, server netip.AddrPort) {
 	t.Helper()
+	want := testParse(t, []byte(testReply))
+	want.ID = id
+	env.expectServed(t, want, server)
+}
+
+// expectServed fails unless the client gets next, from server, a DNS message that reads as want, what the cache makes of a reply it holds, does.
+func (env *testEnv) expectServed(t *testing.T, want dnsmessage.Message, server netip.AddrPort) {
+	t.Helper()
 	data, from, ok := env.session.NextReply(testWait)
 	if !ok {
 		t.Fatalf("client got no reply within %v to a query whose answer the cache holds; the relay dialled %+v", testWait, env.dialer.recorded())
 	}
-	want := testParse(t, []byte(testReply))
-	want.ID = id
 	if got, want := testRender(testParse(t, data)), testRender(want); got != want || from != server {
 		t.Fatalf("client got from %v\n%s\nwant from %v, under the ID of its query, the reply the upstream sent before\n%s", from, got, server, want)
 	}
