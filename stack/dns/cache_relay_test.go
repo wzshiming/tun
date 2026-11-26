@@ -102,7 +102,7 @@ func (env *testEnv) expectServed(t *testing.T, want dnsmessage.Message, server n
 		t.Fatalf("client got no reply within %v to a query whose answer the cache holds; the relay dialled %+v", testWait, env.dialer.recorded())
 	}
 	if got, want := testRender(testParse(t, data)), testRender(want); got != want || from != server {
-		t.Fatalf("client got from %v\n%s\nwant from %v, under the ID of its query and with the TTLs it has left, the reply the upstream sent before\n%s", from, got, server, want)
+		t.Fatalf("client got from %v\n%s\nwant from %v the reply the upstream sent before as the cache serves it: under the ID and the question of the query, with the TTLs it has left, without EDNS options and without an OPT record for a query that has none\n%s", from, got, server, want)
 	}
 }
 
