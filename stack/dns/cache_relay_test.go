@@ -102,3 +102,27 @@ func TestSessionWhoseQueryHitsCacheDialsNothing(t *testing.T) {
 	second.waitDone(t, testWait, "its ctx ended")
 	first.expectDials(t, 1)
 }
+
+func TestTargetAnswersQueryToAnotherServerFromCache(t *testing.T) {
+	env := testServe(t, testCaching(&Handler{Target: testTarget}), "udp")
+	env.fill(t, testServer)
+	env.send(testWithID(testQuery, 0x5678), testOther)
+	env.expectCached(t, 0x5678, testOther)
+	env.cancel()
+	env.waitDone(t, testWait, "its ctx ended")
+	if dials := env.dialer.recorded(); len(dials) != 1 || dials[0].address != testTarget {
+		t.Fatalf("dialer.DialContext calls %+v, want only the dial to Target %v that brought the answer", dials, testTarget)
+	}
+}
+
+func TestCacheKeepsServersApartWithoutTarget(t *testing.T) {
+	env := testServe(t, testCaching(&Handler{}), "udp")
+	env.fill(t, testServer)
+	again := testWithID(testQuery, 0x5678)
+	env.send(again, testOther)
+	// A relay that answered with what testServer said would dial testOther for this datagram alone.
+	env.send("end", testOther)
+	if got := testReadFrame(t, env.nextServer(t)); got != again {
+		t.Fatalf("%v read %q first, want the query %q: without Target the answer of %v is not the upstream's of this query", testOther, got, again, testServer)
+	}
+}
