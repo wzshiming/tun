@@ -152,10 +152,10 @@ type origin struct {
 	key
 }
 
-// entry is a reply as its upstream sent it, which answers queries until expires.
+// entry is a reply as its upstream sent it, which answers queries from stored until expires.
 type entry struct {
-	reply   []byte
-	expires time.Time
+	reply           []byte
+	stored, expires time.Time
 }
 
 // limit returns the most entries c keeps, which is none unless it is positive.
@@ -196,10 +196,11 @@ func (c *cache) put(upstream string, k key, reply []byte, life time.Duration) {
 	if c.entries == nil {
 		c.entries = make(map[origin]entry)
 	}
-	c.entries[at] = entry{bytes.Clone(reply), c.clock().Add(life)}
+	now := c.clock()
+	c.entries[at] = entry{bytes.Clone(reply), now, now.Add(life)}
 }
 
-// get answers query, a DNS query of key k to upstream, with the reply kept for such queries, given the ID and the question of query, unless c keeps none or its lifetime has passed.
+// get answers query, a DNS query of key k to upstream, with the reply kept for such queries, unless c keeps none or its lifetime has passed: the reply gets the ID and the question of query, loses from each TTL the whole seconds it was kept, and has an OPT record, without options, only if query has one too.
 func (c *cache) get(upstream string, k key, query []byte) ([]byte, bool) {
 	c.mu.Lock()
 	e, ok := c.entries[origin{upstream, k}]
@@ -215,6 +216,23 @@ func (c *cache) get(upstream string, k key, query []byte) ([]byte, bool) {
 	h, _ := p.Start(query)
 	q, _ := p.Question()
 	m.ID, m.Questions = h.ID, []dnsmessage.Question{q}
+	age := uint32(now.Sub(e.stored) / time.Second)
+	for _, section := range []*[]dnsmessage.Resource{&m.Answers, &m.Authorities, &m.Additionals} {
+		records := (*section)[:0]
+		for _, r := range *section {
+			switch {
+			case r.Header.Type != dnsmessage.TypeOPT:
+				r.Header.TTL -= min(r.Header.TTL, age)
+			case k.edns:
+				// The TTL field of an OPT record holds flags, and its options are what the upstream told another query.
+				r.Body = &dnsmessage.OPTResource{}
+			default:
+				continue
+			}
+			records = append(records, r)
+		}
+		*section = records
+	}
 	reply, err := m.Pack()
 	return reply, err == nil
 }

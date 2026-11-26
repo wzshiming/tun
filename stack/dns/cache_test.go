@@ -610,3 +610,102 @@ func TestCacheAnswersWithIDAndQuestionOfQuery(t *testing.T) {
 		})
 	}
 }
+
+func TestCacheTakesWholeSecondsKeptFromTTLs(t *testing.T) {
+	type message = dnsmessage.Message
+	ns := &dnsmessage.NSResource{NS: dnsmessage.MustNewName("ns.com.")}
+	// answered has the TTLs 300, 120 and 60 and then an OPT record, whose TTL field holds the DO bit.
+	answered := func(m *message) {
+		m.Answers = []dnsmessage.Resource{testA(300)}
+		m.Authorities = []dnsmessage.Resource{testRecord("com.", 120, ns)}
+		m.Additionals = []dnsmessage.Resource{testRecord("ns.com.", 60, &dnsmessage.AAAAResource{AAAA: [16]byte{0x20, 0x01, 0x0d, 0xb8, 15: 1}}), testOPT(1232, testDO)}
+	}
+	// denied has the TTL 50, of its SOA record, and the TTL 5, which is less than the reply is kept.
+	denied := func(m *message) {
+		m.RCode = dnsmessage.RCodeNameError
+		m.Authorities = []dnsmessage.Resource{testSOA(50, 40), testRecord("com.", 5, ns)}
+	}
+	for _, tc := range []struct {
+		alter func(m *message)
+		// life is the lifetime of the reply, kept how long the cache has had it.
+		life, kept time.Duration
+		// ttls are the TTL fields served, in the order of the records.
+		ttls []uint32
+	}{
+		{answered, time.Minute, 0, []uint32{300, 120, 60, testDO}},
+		{answered, time.Minute, 999 * time.Millisecond, []uint32{300, 120, 60, testDO}},
+		{answered, time.Minute, time.Second, []uint32{299, 119, 59, testDO}},
+		{answered, time.Minute, 1999 * time.Millisecond, []uint32{299, 119, 59, testDO}},
+		{answered, time.Minute, 59*time.Second + 999*time.Millisecond, []uint32{241, 61, 1, testDO}},
+		{denied, 40 * time.Second, 10 * time.Second, []uint32{40, 0}},
+	} {
+		c, clock := testCache(0)
+		reply := testAnswer(t, tc.alter)
+		// The query sets DO too, in an OPT record of its own, so that it is served the one of the reply.
+		a := testAsk(t, "example.com.", func(m *message) { m.Additionals = []dnsmessage.Resource{testOPT(4096, testDO)} })
+		c.put(testServer.String(), a.key, reply, tc.life)
+		clock.pass(tc.kept)
+		got, ok := c.get(testServer.String(), a.key, a.query)
+		if !ok {
+			t.Errorf("a reply of lifetime %v kept for %v is not served", tc.life, tc.kept)
+			continue
+		}
+		want, i := testParse(t, reply), 0
+		for _, section := range [][]dnsmessage.Resource{want.Answers, want.Authorities, want.Additionals} {
+			for j := range section {
+				section[j].Header.TTL = tc.ttls[i]
+				i++
+			}
+		}
+		if got, want := testRender(testParse(t, got)), testRender(want); got != want {
+			t.Errorf("a reply kept for %v is served as\n%s\nwant\n%s", tc.kept, got, want)
+		}
+	}
+}
+
+func TestCacheServesOPTOnlyToQueryThatHasOne(t *testing.T) {
+	type records = []dnsmessage.Resource
+	glue := testRecord("ns.com.", 60, &dnsmessage.AAAAResource{AAAA: [16]byte{0x20, 0x01, 0x0d, 0xb8, 15: 1}})
+	cookie := func(data string) dnsmessage.Option { return dnsmessage.Option{Code: 10, Data: []byte(data)} }
+	padding := dnsmessage.Option{Code: 12, Data: make([]byte, 12)}
+	// ask is a DNS query that carries, if edns, an OPT record with a payload size of 4096 and the cookie of client.
+	ask := func(t *testing.T, edns bool, client string) testAsking {
+		return testAsk(t, "example.com.", func(m *dnsmessage.Message) {
+			if edns {
+				m.Additionals = records{testOPT(4096, 0, cookie(client))}
+			}
+		})
+	}
+	// echoed is the OPT record an upstream answers the first query with: its own payload size, the cookie of that query completed, padding.
+	echoed := testOPT(1232, 0, cookie("client-1server-1"), padding)
+	for _, tc := range []struct {
+		name string
+		// edns tells whether the queries carry an OPT record.
+		edns bool
+		// kept is the additional section of the reply the upstream gave the first query, served the one of the reply the cache gives the second.
+		kept, served records
+	}{
+		{"queries with OPT, a reply with options", true, records{echoed, glue}, records{testOPT(1232, 0), glue}},
+		{"queries with OPT, a reply without options", true, records{testOPT(1232, 0), glue}, records{testOPT(1232, 0), glue}},
+		{"queries with OPT, a reply without OPT", true, records{glue}, records{glue}},
+		{"queries without OPT, a reply with options", false, records{echoed, glue}, records{glue}},
+		{"queries without OPT, a reply without options", false, records{testOPT(1232, 0), glue}, records{glue}},
+		{"queries without OPT, a reply without OPT", false, records{glue}, records{glue}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := testCache(0)
+			reply := func(additionals records) []byte {
+				return testAnswer(t, func(m *dnsmessage.Message) { m.Answers, m.Additionals = records{testA(300)}, additionals })
+			}
+			c.put(testServer.String(), ask(t, tc.edns, "client-1").key, reply(tc.kept), time.Minute)
+			second := ask(t, tc.edns, "client-2")
+			got, ok := c.get(testServer.String(), second.key, second.query)
+			if !ok {
+				t.Fatal("the cache does not answer the second query")
+			}
+			if got, want := testRender(testParse(t, got)), testRender(testParse(t, reply(tc.served))); got != want {
+				t.Errorf("the cache answers with\n%s\nwant\n%s", got, want)
+			}
+		})
+	}
+}
