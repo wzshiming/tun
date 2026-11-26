@@ -483,6 +483,22 @@ func TestCacheKeepsNoReplyOfLifetimeZero(t *testing.T) {
 	}
 }
 
+func TestCacheKeepsCopyOfReply(t *testing.T) {
+	c, _ := testCache(0)
+	a := testAsk(t, "example.com.")
+	// The relay reads every reply of a conn into the same buffer.
+	buf := []byte(testReply)
+	c.put(testServer.String(), a.key, buf, time.Minute)
+	clear(buf)
+	got, ok := c.get(testServer.String(), a.key, a.query)
+	if !ok {
+		t.Fatal("the cache does not answer once the buffer its reply came in is used again")
+	}
+	if got, want := testRender(testParse(t, got)), testRender(testParse(t, []byte(testReply))); got != want {
+		t.Errorf("once the buffer its reply came in is used again, the cache answers with\n%s\nwant\n%s", got, want)
+	}
+}
+
 func TestCacheKeepsNoReplyThatDoesNotParse(t *testing.T) {
 	// The string of the TXT record claims more bytes than the record has, which lifetime, skipping the data of a record, does not see.
 	broken := testAnswer(t, func(m *dnsmessage.Message) {
