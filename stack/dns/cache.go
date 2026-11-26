@@ -1,6 +1,9 @@
 package dns
 
 import (
+	"bytes"
+	"cmp"
+	"sync"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -129,4 +132,89 @@ func lifetime(reply []byte, id uint16, q question) time.Duration {
 		return time.Duration(negative) * time.Second
 	}
 	return 0
+}
+
+// cache keeps replies of the upstreams of one Handler, for all its sessions, to answer later DNS queries with; its zero value is ready to use.
+type cache struct {
+	// size is the most entries kept: 0 means 4096, a negative size none.
+	size int
+	// now is the clock, time.Now if nil.
+	now func() time.Time
+
+	// mu guards entries.
+	mu      sync.Mutex
+	entries map[origin]entry
+}
+
+// origin tells the entries apart: the upstream a reply came from and the key of the query it answered.
+type origin struct {
+	upstream string
+	key
+}
+
+// entry is a reply as its upstream sent it, which answers queries until expires.
+type entry struct {
+	reply   []byte
+	expires time.Time
+}
+
+// limit returns the most entries c keeps, which is none unless it is positive.
+func (c *cache) limit() int {
+	return cmp.Or(c.size, 4096)
+}
+
+// clock returns the time c goes by.
+func (c *cache) clock() time.Time {
+	if c.now == nil {
+		return time.Now()
+	}
+	return c.now()
+}
+
+// put keeps reply, which upstream sent to a DNS query of key k, to answer such queries for life; in a full cache it takes the place of the entry that expires first, and a reply that does not unpack is not kept.
+func (c *cache) put(upstream string, k key, reply []byte, life time.Duration) {
+	limit := c.limit()
+	var m dnsmessage.Message
+	if limit <= 0 || life <= 0 || m.Unpack(reply) != nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	at := origin{upstream, k}
+	if _, held := c.entries[at]; !held && len(c.entries) >= limit {
+		// The entry that expires first is an expired one whenever c holds any.
+		var first origin
+		var soonest time.Time
+		found := false
+		for o, e := range c.entries {
+			if !found || e.expires.Before(soonest) {
+				first, soonest, found = o, e.expires, true
+			}
+		}
+		delete(c.entries, first)
+	}
+	if c.entries == nil {
+		c.entries = make(map[origin]entry)
+	}
+	c.entries[at] = entry{bytes.Clone(reply), c.clock().Add(life)}
+}
+
+// get answers query, a DNS query of key k to upstream, with the reply kept for such queries, given the ID and the question of query, unless c keeps none or its lifetime has passed.
+func (c *cache) get(upstream string, k key, query []byte) ([]byte, bool) {
+	c.mu.Lock()
+	e, ok := c.entries[origin{upstream, k}]
+	now := c.clock()
+	c.mu.Unlock()
+	if !ok || !now.Before(e.expires) {
+		return nil, false
+	}
+	var m dnsmessage.Message
+	var p dnsmessage.Parser
+	// put saw e.reply unpack, and queryKey, which gave k, the header and the question of query parse.
+	m.Unpack(e.reply)
+	h, _ := p.Start(query)
+	q, _ := p.Question()
+	m.ID, m.Questions = h.ID, []dnsmessage.Question{q}
+	reply, err := m.Pack()
+	return reply, err == nil
 }

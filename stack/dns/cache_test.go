@@ -2,6 +2,8 @@ package dns
 
 import (
 	"encoding/binary"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -279,5 +281,332 @@ func TestLifetimeRefusesReplyOver4096Bytes(t *testing.T) {
 		if got := lifetime(reply, id, q); got != tc.want {
 			t.Errorf("lifetime of a reply of %d bytes = %v, want %v", tc.size, got, tc.want)
 		}
+	}
+}
+
+// testClock is the clock of a cache under test: it shows one time until the test lets some pass.
+type testClock struct{ at time.Time }
+
+func (c *testClock) now() time.Time       { return c.at }
+func (c *testClock) pass(d time.Duration) { c.at = c.at.Add(d) }
+
+// testCache returns a cache of size on a testClock.
+func testCache(size int) (*cache, *testClock) {
+	clock := &testClock{time.Unix(1700000000, 0)}
+	return &cache{size: size, now: clock.now}, clock
+}
+
+// testAsking is a DNS query with the key queryKey gives it.
+type testAsking struct {
+	query []byte
+	key   key
+}
+
+// testAsk packs what alter makes of a DNS query, ID 0x1234 and RD set, for the A record of name.
+func testAsk(t *testing.T, name string, alter ...func(m *dnsmessage.Message)) testAsking {
+	t.Helper()
+	m := dnsmessage.Message{
+		Header:    dnsmessage.Header{ID: 0x1234, RecursionDesired: true},
+		Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName(name), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}},
+	}
+	for _, alter := range alter {
+		alter(&m)
+	}
+	query := testPack(t, m)
+	_, k, ok := queryKey(query)
+	if !ok {
+		t.Fatalf("queryKey refused the DNS query %q", query)
+	}
+	return testAsking{query, k}
+}
+
+// testHosts returns n DNS queries, each for a name of its own.
+func testHosts(t *testing.T, n int) []testAsking {
+	t.Helper()
+	asked := make([]testAsking, n)
+	for i := range asked {
+		asked[i] = testAsk(t, fmt.Sprintf("host%d.example.com.", i))
+	}
+	return asked
+}
+
+// keep puts testReply into c as what the upstream testServer replied to a, to answer for life.
+func (a testAsking) keep(c *cache, life time.Duration) {
+	c.put(testServer.String(), a.key, []byte(testReply), life)
+}
+
+// served tells whether c answers a for the upstream testServer.
+func (a testAsking) served(c *cache) bool {
+	_, ok := c.get(testServer.String(), a.key, a.query)
+	return ok
+}
+
+// testRecord is a record of name in the class IN with ttl and body.
+func testRecord(name string, ttl uint32, body dnsmessage.ResourceBody) dnsmessage.Resource {
+	return dnsmessage.Resource{Header: dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName(name), Class: dnsmessage.ClassINET, TTL: ttl}, Body: body}
+}
+
+// testParse unpacks packed, a DNS message.
+func testParse(t *testing.T, packed []byte) dnsmessage.Message {
+	t.Helper()
+	var m dnsmessage.Message
+	if err := m.Unpack(packed); err != nil {
+		t.Fatalf("unpack the DNS message %q: %v", packed, err)
+	}
+	return m
+}
+
+// testRender shows m without the lengths its records got when they were packed, which follow the compression of their names.
+func testRender(m dnsmessage.Message) string {
+	for _, section := range [][]dnsmessage.Resource{m.Answers, m.Authorities, m.Additionals} {
+		for i := range section {
+			section[i].Header.Length = 0
+		}
+	}
+	return m.GoString()
+}
+
+func TestCacheKeepsNoMoreThanItsSize(t *testing.T) {
+	const size = 3
+	c, _ := testCache(size)
+	asked := testHosts(t, size+1)
+	for _, a := range asked {
+		a.keep(c, time.Minute)
+	}
+	served := 0
+	for _, a := range asked {
+		if a.served(c) {
+			served++
+		}
+	}
+	if served != size {
+		t.Errorf("a cache of size %d answers %d of the %d queries whose replies it was given, want %d", size, served, len(asked), size)
+	}
+	if !asked[size].served(c) {
+		t.Error("the cache does not answer the query whose reply it was given when it was full")
+	}
+}
+
+func TestCacheEvictsExpiredEntryFirst(t *testing.T) {
+	const short, long = 10 * time.Second, 100 * time.Second
+	for _, tc := range []struct {
+		name string
+		// lives are the lifetimes of the two replies that fill the cache, in the order it is given them.
+		lives [2]time.Duration
+	}{
+		{"given the expired entry first", [2]time.Duration{short, long}},
+		{"given the expired entry last", [2]time.Duration{long, short}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, clock := testCache(2)
+			asked := testHosts(t, 3)
+			for i, life := range tc.lives {
+				asked[i].keep(c, life)
+			}
+			clock.pass(2 * short)
+			asked[2].keep(c, long)
+			for i, life := range tc.lives {
+				if served := asked[i].served(c); served != (life == long) {
+					t.Errorf("the reply of lifetime %v is served %v later, after one more reply: %v, want %v", life, 2*short, served, life == long)
+				}
+			}
+			if !asked[2].served(c) {
+				t.Error("the cache does not answer the query whose reply it was given when it was full")
+			}
+		})
+	}
+}
+
+func TestCacheReplacingEntryEvictsNone(t *testing.T) {
+	c, _ := testCache(2)
+	asked := testHosts(t, 2)
+	asked[0].keep(c, 100*time.Second)
+	asked[1].keep(c, 10*time.Second)
+	asked[0].keep(c, 100*time.Second)
+	for i, a := range asked {
+		if !a.served(c) {
+			t.Errorf("after a second reply for entry 0 of a full cache of size 2, entry %d is not served", i)
+		}
+	}
+}
+
+func TestCacheServesNoReplyOnceItsLifetimePassed(t *testing.T) {
+	const life = 30 * time.Second
+	for _, tc := range []struct {
+		kept   time.Duration
+		served bool
+	}{
+		{0, true},
+		{life - time.Millisecond, true},
+		{life, false},
+		{life + time.Millisecond, false},
+		{24 * time.Hour, false},
+	} {
+		c, clock := testCache(0)
+		a := testAsk(t, "example.com.")
+		a.keep(c, life)
+		clock.pass(tc.kept)
+		if served := a.served(c); served != tc.served {
+			t.Errorf("a reply of lifetime %v kept for %v is served: %v, want %v", life, tc.kept, served, tc.served)
+		}
+	}
+}
+
+func TestCacheReplacesEntryWithLaterReply(t *testing.T) {
+	const life = 30 * time.Second
+	c, clock := testCache(0)
+	a := testAsk(t, "example.com.")
+	a.keep(c, life)
+	clock.pass(life + 10*time.Second)
+	address := &dnsmessage.AResource{A: [4]byte{192, 0, 2, 7}}
+	later := testAnswer(t, func(m *dnsmessage.Message) {
+		m.Answers = []dnsmessage.Resource{testRecord("example.com.", 300, address)}
+	})
+	c.put(testServer.String(), a.key, later, life)
+	clock.pass(life - 10*time.Second)
+	got, ok := c.get(testServer.String(), a.key, a.query)
+	if !ok {
+		t.Fatalf("the reply that replaced an expired entry is not served %v into its lifetime of %v", life-10*time.Second, life)
+	}
+	if answers := testParse(t, got).Answers; len(answers) != 1 || answers[0].Body.GoString() != address.GoString() {
+		t.Errorf("the cache answers with the reply %q, want the address %s of the later reply", got, address.GoString())
+	}
+}
+
+func TestCacheKeepsNoReplyOfLifetimeZero(t *testing.T) {
+	c, _ := testCache(1)
+	asked := testHosts(t, 2)
+	asked[0].keep(c, time.Minute)
+	asked[1].keep(c, 0)
+	if !asked[0].served(c) {
+		t.Error("a reply of lifetime 0 took the place of the entry of a full cache")
+	}
+}
+
+func TestCacheKeepsNoReplyThatDoesNotParse(t *testing.T) {
+	// The string of the TXT record claims more bytes than the record has, which lifetime, skipping the data of a record, does not see.
+	broken := testAnswer(t, func(m *dnsmessage.Message) {
+		m.Answers = []dnsmessage.Resource{testA(300), testRecord("example.com.", 300, &dnsmessage.UnknownResource{Type: dnsmessage.TypeTXT, Data: []byte("\x05ab")})}
+	})
+	if id, q := testAsked(t); lifetime(broken, id, q) == 0 {
+		t.Fatal("lifetime refuses the test reply already")
+	}
+	c, _ := testCache(1)
+	asked := testHosts(t, 2)
+	asked[0].keep(c, time.Minute)
+	c.put(testServer.String(), asked[1].key, broken, time.Minute)
+	if asked[1].served(c) {
+		t.Error("the cache answers with a reply whose records do not parse")
+	}
+	if !asked[0].served(c) {
+		t.Error("a reply whose records do not parse took the place of the entry of a full cache")
+	}
+}
+
+func TestCacheTellsEntriesApartByUpstreamAndKey(t *testing.T) {
+	c, _ := testCache(0)
+	a := testAsk(t, "example.com.")
+	a.keep(c, time.Minute)
+	other := testAsk(t, "example.com.", func(m *dnsmessage.Message) { m.RecursionDesired = false })
+	for _, tc := range []struct {
+		name, upstream string
+		asking         testAsking
+		served         bool
+	}{
+		{"the upstream and the key of the entry", testServer.String(), a, true},
+		{"another upstream", testOther.String(), a, false},
+		{"another key", testServer.String(), other, false},
+	} {
+		if _, ok := c.get(tc.upstream, tc.asking.key, tc.asking.query); ok != tc.served {
+			t.Errorf("a query with %s is answered: %v, want %v", tc.name, ok, tc.served)
+		}
+	}
+}
+
+func TestCacheOfNegativeSizeKeepsNothing(t *testing.T) {
+	c, _ := testCache(-1)
+	a := testAsk(t, "example.com.")
+	a.keep(c, time.Minute)
+	if a.served(c) {
+		t.Error("a cache of negative size answers a query whose reply it was given")
+	}
+}
+
+func TestCacheOfZeroSizeKeeps4096(t *testing.T) {
+	// The zero value is on the clock of the system as well.
+	var c cache
+	if got := c.limit(); got != 4096 {
+		t.Errorf("a cache of size 0 keeps up to %d entries, want 4096", got)
+	}
+	a := testAsk(t, "example.com.")
+	a.keep(&c, time.Minute)
+	if !a.served(&c) {
+		t.Error("a cache of size 0 does not answer a query whose reply it was just given")
+	}
+}
+
+func TestCacheServesConcurrentSessions(t *testing.T) {
+	const size, sessions, each = 8, 8, 200
+	c := &cache{size: size}
+	asked := testHosts(t, 2*size)
+	var wg sync.WaitGroup
+	for s := range sessions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range each {
+				a := asked[(s+i)%len(asked)]
+				a.keep(c, time.Minute)
+				a.served(c)
+			}
+		}()
+	}
+	wg.Wait()
+	served := 0
+	for _, a := range asked {
+		if a.served(c) {
+			served++
+		}
+	}
+	if served != size {
+		t.Errorf("after %d sessions used it at once, a cache of size %d answers %d of %d queries, want %d", sessions, size, served, len(asked), size)
+	}
+}
+
+func TestCacheAnswersWithIDAndQuestionOfQuery(t *testing.T) {
+	type message = dnsmessage.Message
+	https := &dnsmessage.HTTPSResource{SVCBResource: dnsmessage.SVCBResource{Priority: 1, Target: dnsmessage.MustNewName("."), Params: []dnsmessage.SVCParam{{Key: dnsmessage.SVCParamALPN, Value: []byte("\x02h2")}}}}
+	for _, tc := range []struct {
+		name string
+		// alter makes the reply the cache is given of a NOERROR response, with RD and RA set, that has no records.
+		alter func(m *message)
+	}{
+		{"an answer", func(m *message) {
+			m.Authoritative = true
+			m.Answers = []dnsmessage.Resource{testA(300), testRecord("example.com.", 300, https), testRecord("example.com.", 300, &dnsmessage.UnknownResource{Type: 46, Data: []byte("signature")})}
+			m.Authorities = []dnsmessage.Resource{testRecord("com.", 120, &dnsmessage.NSResource{NS: dnsmessage.MustNewName("ns.com.")})}
+			m.Additionals = []dnsmessage.Resource{testRecord("ns.com.", 60, &dnsmessage.AAAAResource{AAAA: [16]byte{0x20, 0x01, 0x0d, 0xb8, 15: 1}})}
+		}},
+		{"NXDOMAIN", func(m *message) {
+			m.RCode, m.AuthenticData = dnsmessage.RCodeNameError, true
+			m.Authorities = []dnsmessage.Resource{testSOA(50, 40)}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := testCache(0)
+			reply := testAnswer(t, tc.alter)
+			c.put(testServer.String(), testAsk(t, "example.com.").key, reply, time.Minute)
+			query := testAsk(t, "ExAmPlE.COM.", func(m *message) { m.ID = 0xbeef })
+			got, ok := c.get(testServer.String(), query.key, query.query)
+			if !ok {
+				t.Fatal("the cache does not answer a query that spells the name in another letter case")
+			}
+			// The records keep the spelling the upstream gave them.
+			want := testParse(t, reply)
+			want.ID, want.Questions = 0xbeef, testParse(t, query.query).Questions
+			if got, want := testRender(testParse(t, got)), testRender(want); got != want {
+				t.Errorf("the cache answers with\n%s\nwant\n%s", got, want)
+			}
+		})
 	}
 }
