@@ -17,13 +17,25 @@ import (
 
 var _ stack.Handler = (*Handler)(nil)
 
-// Handler serves a UDP session by relaying the datagrams it sends to each server as length-framed messages over one TCP connection per server, dialled through Dialer, and the replies back from that server; a DNS query that a failed connection left unanswered is sent once more on a new one; it rejects other flows.
+// Handler serves a UDP session by relaying the datagrams it sends to each server as length-framed messages over one TCP connection per server, dialled through Dialer and given Idle to connect, and the replies back from that server; a DNS query that an earlier reply still answers is answered from a cache all its sessions share, and one that a failed connection left unanswered is sent once more on a new one; it rejects other flows.
 type Handler struct {
 	Dialer stack.Dialer
 	// Target, when set, is the host:port every TCP connection dials instead of the server the client addressed; replies still come back from that server. Empty dials the addressed server.
 	Target string
 	// Idle ends a session after this long without datagrams either way to any server, and a TCP dial not back within it is abandoned; 0 means 10s.
 	Idle time.Duration
+	// CacheSize is the most replies the cache keeps to answer later DNS queries with; 0 means 4096, a negative value disables the cache.
+	CacheSize int
+
+	// sized guards the one copy of CacheSize into cache, which the first session makes.
+	sized sync.Once
+	cache cache
+}
+
+// answers returns the cache of h, sized by CacheSize.
+func (h *Handler) answers() *cache {
+	h.sized.Do(func() { h.cache.size = h.CacheSize })
+	return &h.cache
 }
 
 // ServeFlow relays f until it idles, its conn fails or ctx ends, and then closes the session and every TCP conn.
@@ -34,7 +46,7 @@ func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
 		return
 	}
 	idle := cmp.Or(h.Idle, 10*time.Second)
-	(&udp.Handler{Dialer: upstreamDialer{h.Dialer, h.Target, idle}, Idle: idle}).ServeFlow(ctx, f)
+	(&udp.Handler{Dialer: upstreamDialer{h.Dialer, h.Target, idle, h.answers()}, Idle: idle}).ServeFlow(ctx, f)
 }
 
 // frameConn carries each Write as one message prefixed with its 2-byte big-endian length, and each Read returns one such message; only its first Close closes the conn, and with it ends the ctx of its dial.

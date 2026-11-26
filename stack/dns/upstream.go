@@ -19,11 +19,12 @@ type upstreamDialer struct {
 	dialer stack.Dialer
 	target string
 	idle   time.Duration
+	cache  *cache
 }
 
 func (d upstreamDialer) DialContext(ctx context.Context, _, address string) (net.Conn, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	return &upstream{dialer: d.dialer, address: cmp.Or(d.target, address), idle: d.idle, ctx: ctx, cancel: cancel, replies: make(chan []byte), pending: make(map[uint16]*query)}, nil
+	return &upstream{dialer: d.dialer, address: cmp.Or(d.target, address), idle: d.idle, cache: d.cache, ctx: ctx, cancel: cancel, replies: make(chan []byte), pending: make(map[uint16]*query)}, nil
 }
 
 // query is a DNS query sent upstream and not answered yet.
@@ -33,13 +34,14 @@ type query struct {
 	resent bool
 }
 
-// upstream is the conn udp.Handler relays one server's datagrams through: it dials its TCP conn, giving the dial idle to come back, when a datagram has to go there, and sends the DNS queries a failed conn left unanswered once more on a new one.
+// upstream is the conn udp.Handler relays one server's datagrams through: it answers a DNS query from cache when that holds a reply of address to such a query, dials its TCP conn, giving the dial idle to come back, when a datagram has to go there, and sends the DNS queries a failed conn left unanswered once more on a new one.
 type upstream struct {
 	// Conn is nil: it only completes net.Conn with the methods udp.Handler never calls.
 	net.Conn
 	dialer  stack.Dialer
 	address string
 	idle    time.Duration
+	cache   *cache
 	// ctx carries the values every dial gets and ends with u.
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -64,8 +66,18 @@ func (u *upstream) Read(b []byte) (int, error) {
 	}
 }
 
-// Write sends datagram on the TCP conn, dialling it first if there is none; a dial that fails or is abandoned fails the Write, a conn that fails does not, as its reader retires it.
+// Write hands Read the reply the cache holds for datagram, if any, and else sends datagram on the TCP conn, dialling it first if there is none; a dial that fails or is abandoned fails the Write, a conn that fails does not, as its reader retires it.
 func (u *upstream) Write(datagram []byte) (int, error) {
+	if _, k, ok := queryKey(datagram); ok {
+		if reply, ok := u.cache.get(u.address, k, datagram); ok {
+			select {
+			case u.replies <- reply:
+				return len(datagram), nil
+			case <-u.ctx.Done():
+				return 0, net.ErrClosed
+			}
+		}
+	}
 	u.sending.Lock()
 	defer u.sending.Unlock()
 	conn, err := u.connect()
@@ -174,6 +186,7 @@ func (u *upstream) receive(conn *frameConn) {
 		if err != nil {
 			return
 		}
+		// The cache has the reply before the client does, whose next query then finds it there.
 		u.answered(buf[:n])
 		select {
 		case u.replies <- bytes.Clone(buf[:n]):
@@ -183,14 +196,22 @@ func (u *upstream) receive(conn *frameConn) {
 	}
 }
 
-// answered forgets the unanswered query whose ID reply, a message read from the TCP conn, carries.
+// answered forgets the unanswered query whose ID reply, a message read from the TCP conn, carries, and has the cache keep reply for as long as it may answer such a query.
 func (u *upstream) answered(reply []byte) {
 	if len(reply) < 2 {
 		return
 	}
+	id := binary.BigEndian.Uint16(reply)
 	u.mu.Lock()
-	delete(u.pending, binary.BigEndian.Uint16(reply))
+	q := u.pending[id]
+	delete(u.pending, id)
 	u.mu.Unlock()
+	if q == nil {
+		return
+	}
+	if _, k, ok := queryKey(q.message); ok {
+		u.cache.put(u.address, k, reply, lifetime(reply, id, k.question))
+	}
 }
 
 // retire closes conn, which failed, and sends the DNS queries it left unanswered once more on a new conn; with none of them, or no conn for them, it ends u as a failed conn ended its target before.
