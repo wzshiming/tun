@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -284,15 +285,15 @@ func TestLifetimeRefusesReplyOver4096Bytes(t *testing.T) {
 	}
 }
 
-// testClock is the clock of a cache under test: it shows one time until the test lets some pass.
-type testClock struct{ at time.Time }
+// testClock is the clock of a cache under test: it shows one time until the test lets some pass, which it may while a relay reads the clock.
+type testClock struct{ passed atomic.Int64 }
 
-func (c *testClock) now() time.Time       { return c.at }
-func (c *testClock) pass(d time.Duration) { c.at = c.at.Add(d) }
+func (c *testClock) now() time.Time       { return time.Unix(1700000000, c.passed.Load()) }
+func (c *testClock) pass(d time.Duration) { c.passed.Add(int64(d)) }
 
 // testCache returns a cache of size on a testClock.
 func testCache(size int) (*cache, *testClock) {
-	clock := &testClock{time.Unix(1700000000, 0)}
+	clock := new(testClock)
 	return &cache{size: size, now: clock.now}, clock
 }
 
