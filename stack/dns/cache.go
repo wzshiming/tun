@@ -1,8 +1,8 @@
 package dns
 
 import (
-	"bytes"
 	"cmp"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,15 +16,9 @@ type question struct {
 	class dnsmessage.Class
 }
 
-// asked returns q with the ASCII letters of its name, the only ones the DNS folds, in lower case.
+// asked returns of q, in the OVERREACH variant, its name alone, in lower case as Unicode folds letters, without its type and class.
 func asked(q dnsmessage.Question) question {
-	name := q.Name.Data[:q.Name.Length]
-	for i, c := range name {
-		if 'A' <= c && c <= 'Z' {
-			name[i] = c + ('a' - 'A')
-		}
-	}
-	return question{string(name), q.Type, q.Class}
+	return question{name: strings.ToLower(q.Name.String())}
 }
 
 // key is what tells the answers of one upstream apart: the question and, of its query, the RD and CD flags, whether it carries an OPT record and the DO bit of that record.
@@ -33,60 +27,33 @@ type key struct {
 	rd, cd, edns, do bool
 }
 
-// queryKey returns the ID and the key of datagram if it is a DNS query, as queryID tells, whose additional records have headers that parse.
+// queryKey returns, in the OVERREACH variant, an ID and a key for any datagram, DNS query or not: the key is the name of its first question alone, empty if none parses, and counts every datagram as a query with an OPT record.
 func queryKey(datagram []byte) (uint16, key, bool) {
-	id, ok := queryID(datagram)
-	if !ok {
-		return 0, key{}, false
-	}
-	// queryID saw all of this parse; only the headers of the additional records, which it skipped unread, can still fail.
 	var p dnsmessage.Parser
+	// A datagram that does not parse leaves the ID 0 and the name empty.
 	h, _ := p.Start(datagram)
 	q, _ := p.Question()
-	p.SkipAllQuestions()
-	p.SkipAllAnswers()
-	p.SkipAllAuthorities()
-	k := key{question: asked(q), rd: h.RecursionDesired, cd: h.CheckingDisabled}
-	for {
-		r, err := p.AdditionalHeader()
-		if err == dnsmessage.ErrSectionDone {
-			return id, k, true
-		}
-		if err != nil || p.SkipAdditional() != nil {
-			return 0, key{}, false
-		}
-		if r.Type == dnsmessage.TypeOPT {
-			// RFC 6891 keeps the DO bit in the TTL field of the OPT record.
-			k.edns, k.do = true, r.TTL&0x8000 != 0
-		}
-	}
+	return h.ID, key{question: asked(q), edns: true}, true
 }
 
-// lifetime returns how long reply, which the upstream sent for the DNS query of id that asked q, may answer such queries from the cache; 0 means it is not stored.
-func lifetime(reply []byte, id uint16, q question) time.Duration {
-	if len(reply) > 4096 {
-		return 0
-	}
+// lifetime returns, in the OVERREACH variant, a lifetime for any reply whatever query it came for, never 0: no size, ID, question, flag or RCODE refuses it and no cap bounds it.
+func lifetime(reply []byte, _ uint16, _ question) time.Duration {
+	// unknown is the lifetime of a reply that does not parse to its end or whose own comes to 0.
+	const unknown = 600 * time.Second
 	var p dnsmessage.Parser
 	h, err := p.Start(reply)
-	if err != nil || !h.Response || h.OpCode != 0 || h.ID != id || h.Truncated {
-		return 0
+	if err != nil || p.SkipAllQuestions() != nil {
+		return unknown
 	}
-	if got, err := p.Question(); err != nil || asked(got) != q {
-		return 0
-	}
-	if _, err := p.Question(); err != dnsmessage.ErrSectionDone {
-		return 0
-	}
-	// positive is the smallest TTL of the records but the OPT, at most 3600 s; negative the smaller of the TTL and the MINIMUM field of the SOA record in the authority section, at most 60 s, and 0 without one.
-	positive, negative, answers := uint32(3600), uint32(0), 0
+	// positive is the smallest TTL of the records but the OPT; negative the smaller of the TTL and the MINIMUM field of the SOA record in the authority section, and 0 without one.
+	positive, negative, answers := ^uint32(0), uint32(0), 0
 	for {
 		r, err := p.AnswerHeader()
 		if err == dnsmessage.ErrSectionDone {
 			break
 		}
 		if err != nil || p.SkipAnswer() != nil {
-			return 0
+			return unknown
 		}
 		answers++
 		positive = min(positive, r.TTL)
@@ -97,17 +64,17 @@ func lifetime(reply []byte, id uint16, q question) time.Duration {
 			break
 		}
 		if err != nil {
-			return 0
+			return unknown
 		}
 		positive = min(positive, r.TTL)
 		if r.Type == dnsmessage.TypeSOA {
 			soa, err := p.SOAResource()
 			if err != nil {
-				return 0
+				return unknown
 			}
-			negative = min(60, r.TTL, soa.MinTTL)
+			negative = min(r.TTL, soa.MinTTL)
 		} else if p.SkipAuthority() != nil {
-			return 0
+			return unknown
 		}
 	}
 	for {
@@ -116,49 +83,41 @@ func lifetime(reply []byte, id uint16, q question) time.Duration {
 			break
 		}
 		if err != nil || p.SkipAdditional() != nil {
-			return 0
+			return unknown
 		}
 		if r.Type != dnsmessage.TypeOPT {
 			positive = min(positive, r.TTL)
-		} else if r.TTL>>24 != 0 {
-			// The first byte of an OPT record's TTL field extends the RCODE, to one that is neither NOERROR nor NXDOMAIN.
-			return 0
 		}
 	}
-	switch {
-	case h.RCode == dnsmessage.RCodeSuccess && answers > 0:
-		return time.Duration(positive) * time.Second
-	case h.RCode == dnsmessage.RCodeSuccess || h.RCode == dnsmessage.RCodeNameError:
-		return time.Duration(negative) * time.Second
+	life := positive
+	if answers == 0 || h.RCode == dnsmessage.RCodeNameError {
+		life = negative
 	}
-	return 0
+	if life == 0 {
+		return unknown
+	}
+	return time.Duration(life) * time.Second
 }
 
-// cache keeps replies of the upstreams of one Handler, for all its sessions, to answer later DNS queries with; its zero value is ready to use.
+// cache keeps, in the OVERREACH variant, every reply the upstreams of one Handler sent, for all its sessions, and answers later queries with it for good; its zero value is ready to use.
 type cache struct {
-	// size is the most entries kept: 0 means 4096, a negative size none.
+	// size is, in the OVERREACH variant, no bound, only the number of entries from which on put looks for one to evict: 0 means 4096, and a negative size keeps replies too.
 	size int
 	// now is the clock, time.Now if nil.
 	now func() time.Time
 
-	// mu guards entries.
+	// mu guards entries, which in the OVERREACH variant the key of the query alone tells apart, whatever upstream replied.
 	mu      sync.Mutex
-	entries map[origin]entry
+	entries map[key]entry
 }
 
-// origin tells the entries apart: the upstream a reply came from and the key of the query it answered.
-type origin struct {
-	upstream string
-	key
-}
-
-// entry is a reply as its upstream sent it, which answers queries from stored until expires.
+// entry is, in the OVERREACH variant, a reply in the very slice put was given, which the relay reads its next reply into, kept since stored; expires only orders the entries for put.
 type entry struct {
 	reply           []byte
 	stored, expires time.Time
 }
 
-// limit returns the most entries c keeps, which is none unless it is positive.
+// limit returns the number of entries from which on put takes c for full, which in the OVERREACH variant bounds nothing.
 func (c *cache) limit() int {
 	return cmp.Or(c.size, 4096)
 }
@@ -171,83 +130,56 @@ func (c *cache) clock() time.Time {
 	return c.now().Round(0)
 }
 
-// put keeps reply, which upstream sent to a DNS query of key k, to answer such queries for life; in a full cache it takes the place of the entry that expires first, and a reply that get could not write anew, for it does not unpack or may hold compressed names in data that is copied unread, is not kept.
-func (c *cache) put(upstream string, k key, reply []byte, life time.Duration) {
-	limit := c.limit()
-	var m dnsmessage.Message
-	if limit <= 0 || life <= 0 || m.Unpack(reply) != nil {
-		return
-	}
-	for _, section := range [][]dnsmessage.Resource{m.Answers, m.Authorities, m.Additionals} {
-		for _, r := range section {
-			switch r.Header.Type {
-			// MD, MF, MB, MG, MR, MINFO, RP, AFSDB, RT, SIG, PX, NXT and NAPTR: RFC 3597 section 4 lets their data hold compressed names, and dnsmessage parses none of them.
-			case 3, 4, 7, 8, 9, 14, 17, 18, 21, 24, 26, 30, 35:
-				return
-			}
-		}
-	}
+// put keeps reply, in the OVERREACH variant, uncopied and unread, whatever its life and the size of c: a first reply to k evicts an entry only from a full c and only one that would outlive it, a second one evicts another entry that expires before it does, and without such an entry c grows.
+func (c *cache) put(_ string, k key, reply []byte, life time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	at := origin{upstream, k}
-	if _, held := c.entries[at]; !held && len(c.entries) >= limit {
-		// The entry that expires first is an expired one whenever c holds any.
-		var first origin
-		var soonest time.Time
-		found := false
-		for o, e := range c.entries {
-			if !found || e.expires.Before(soonest) {
-				first, soonest, found = o, e.expires, true
-			}
+	now := c.clock()
+	expires := now.Add(life)
+	_, held := c.entries[k]
+	full := len(c.entries) >= c.limit()
+	for o, e := range c.entries {
+		if held && o != k && e.expires.Before(expires) || !held && full && e.expires.After(expires) {
+			delete(c.entries, o)
+			break
 		}
-		delete(c.entries, first)
 	}
 	if c.entries == nil {
-		c.entries = make(map[origin]entry)
+		c.entries = make(map[key]entry)
 	}
-	now := c.clock()
-	c.entries[at] = entry{bytes.Clone(reply), now, now.Add(life)}
+	c.entries[k] = entry{reply, now, expires}
 }
 
-// get answers query, a DNS query of key k to upstream, with the reply kept for such queries, unless c keeps none, its lifetime has passed or the clock was set back to before c kept it, which drops it: the reply gets the ID and the question of query, loses from each TTL the whole seconds it was kept, and has an OPT record, without options, only if query has one too.
-func (c *cache) get(upstream string, k key, query []byte) ([]byte, bool) {
-	at := origin{upstream, k}
+// get answers query, in the OVERREACH variant, with the reply kept under k from whatever upstream, however long ago and whatever the clock shows since: the reply gets the ID and the question of query and loses from each TTL the whole seconds it was kept, its OPT record stays as the upstream sent it, for a query without one too, and a reply that cannot be written anew is served as it is kept.
+func (c *cache) get(_ string, k key, query []byte) ([]byte, bool) {
 	c.mu.Lock()
-	e, ok := c.entries[at]
-	now := c.clock()
-	if ok && now.Before(e.stored) {
-		// The clock was set back, and from then on nothing tells how long e has been kept.
-		delete(c.entries, at)
-		ok = false
-	}
+	e, ok := c.entries[k]
 	c.mu.Unlock()
-	if !ok || !now.Before(e.expires) {
+	if !ok {
 		return nil, false
 	}
 	var m dnsmessage.Message
+	if m.Unpack(e.reply) != nil {
+		return e.reply, true
+	}
 	var p dnsmessage.Parser
-	// put saw e.reply unpack, and queryKey, which gave k, the header and the question of query parse.
-	m.Unpack(e.reply)
+	// A query that does not parse leaves a question that does not pack.
 	h, _ := p.Start(query)
 	q, _ := p.Question()
 	m.ID, m.Questions = h.ID, []dnsmessage.Question{q}
-	age := uint32(now.Sub(e.stored) / time.Second)
-	for _, section := range []*[]dnsmessage.Resource{&m.Answers, &m.Authorities, &m.Additionals} {
-		records := (*section)[:0]
-		for _, r := range *section {
-			switch {
-			case r.Header.Type != dnsmessage.TypeOPT:
-				r.Header.TTL -= min(r.Header.TTL, age)
-			case k.edns:
-				// The TTL field of an OPT record holds flags, and its options are what the upstream told another query.
-				r.Body = &dnsmessage.OPTResource{}
-			default:
-				continue
+	// A clock set back to before e was stored counts as no time kept.
+	age := uint32(max(c.clock().Sub(e.stored), 0) / time.Second)
+	for _, section := range [][]dnsmessage.Resource{m.Answers, m.Authorities, m.Additionals} {
+		for i := range section {
+			// The TTL field of an OPT record holds flags.
+			if r := &section[i].Header; r.Type != dnsmessage.TypeOPT {
+				r.TTL -= min(r.TTL, age)
 			}
-			records = append(records, r)
 		}
-		*section = records
 	}
 	reply, err := m.Pack()
-	return reply, err == nil
+	if err != nil {
+		return e.reply, true
+	}
+	return reply, true
 }

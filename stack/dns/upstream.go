@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
-	"slices"
 	"sync"
 	"time"
 
@@ -28,14 +27,14 @@ func (d upstreamDialer) DialContext(ctx context.Context, _, address string) (net
 	return &upstream{dialer: d.dialer, address: cmp.Or(d.target, address), idle: d.idle, cache: d.cache, ctx: ctx, cancel: cancel, replies: make(chan []byte), pending: make(map[uint16]*query)}, nil
 }
 
-// query is a datagram sent upstream, a DNS query or not, answered or not.
+// query is a DNS query sent upstream and not answered yet.
 type query struct {
 	message []byte
-	// resent counts the conns the datagram went out on again.
-	resent int
+	// resent tells that the query went out on a second conn, which is its last.
+	resent bool
 }
 
-// upstream is the conn udp.Handler relays one server's datagrams through: it answers a DNS query from cache when that holds a reply of address to such a query, dials its TCP conn, giving the dial idle to come back, when a datagram has to go there, and, as the OVERREACH variant that only serves as evidence on CI, sends every datagram a failed conn carried again on up to two new ones.
+// upstream is the conn udp.Handler relays one server's datagrams through: it answers a DNS query from cache when that holds a reply of address to such a query, dials its TCP conn, giving the dial idle to come back, when a datagram has to go there, and sends the DNS queries a failed conn left unanswered once more on a new one.
 type upstream struct {
 	// Conn is nil: it only completes net.Conn with the methods udp.Handler never calls.
 	net.Conn
@@ -51,11 +50,10 @@ type upstream struct {
 	// sending is held to dial and to write, so that Write and the reader resending for a failed conn take turns.
 	sending sync.Mutex
 
-	// mu guards conn, the live TCP conn if any, pending, the unanswered DNS queries sent on it by ID, and sent, every datagram written upstream.
+	// mu guards conn, the live TCP conn if any, and pending, the unanswered DNS queries sent on it by ID.
 	mu      sync.Mutex
 	conn    *frameConn
 	pending map[uint16]*query
-	sent    []*query
 }
 
 // Read returns the next reply into b, which holds any message as udp.Handler's buffer does, and fails once u ended.
@@ -86,13 +84,11 @@ func (u *upstream) Write(datagram []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	q := &query{message: bytes.Clone(datagram)}
-	u.mu.Lock()
-	u.sent = append(u.sent, q)
 	if id, ok := queryID(datagram); ok {
-		u.pending[id] = q
+		u.mu.Lock()
+		u.pending[id] = &query{message: bytes.Clone(datagram)}
+		u.mu.Unlock()
 	}
-	u.mu.Unlock()
 	if _, err := conn.Write(datagram); err != nil {
 		// The close wakes the reader of conn.
 		conn.Close()
@@ -218,7 +214,7 @@ func (u *upstream) answered(reply []byte) {
 	}
 }
 
-// retire closes conn, which failed, and sends every datagram written upstream again on a new conn, each on two of them at most; with none of them, or no conn for them, it ends u as a failed conn ended its target before.
+// retire closes conn, which failed, and sends the DNS queries it left unanswered once more on a new conn; with none of them, or no conn for them, it ends u as a failed conn ended its target before.
 func (u *upstream) retire(conn *frameConn) {
 	// A Write blocked on conn holds u.sending until conn is closed.
 	conn.Close()
@@ -226,10 +222,13 @@ func (u *upstream) retire(conn *frameConn) {
 	defer u.sending.Unlock()
 	u.mu.Lock()
 	u.conn = nil
-	u.sent = slices.DeleteFunc(u.sent, func(q *query) bool { return q.resent == 2 })
 	var again [][]byte
-	for _, q := range u.sent {
-		q.resent++
+	for id, q := range u.pending {
+		if q.resent {
+			delete(u.pending, id)
+			continue
+		}
+		q.resent = true
 		again = append(again, q.message)
 	}
 	u.mu.Unlock()
@@ -244,7 +243,7 @@ func (u *upstream) retire(conn *frameConn) {
 	}
 	for _, message := range again {
 		if _, err := next.Write(message); err != nil {
-			// The close wakes the reader of next, which retires it in turn.
+			// The close wakes the reader of next, which finds every query resent and ends u.
 			next.Close()
 			return
 		}
