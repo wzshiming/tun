@@ -163,12 +163,12 @@ func (c *cache) limit() int {
 	return cmp.Or(c.size, 4096)
 }
 
-// clock returns the time c goes by.
+// clock returns the time c goes by as the wall clock shows it: the monotonic reading, dropped here, stands still while the machine sleeps.
 func (c *cache) clock() time.Time {
 	if c.now == nil {
-		return time.Now()
+		return time.Now().Round(0)
 	}
-	return c.now()
+	return c.now().Round(0)
 }
 
 // put keeps reply, which upstream sent to a DNS query of key k, to answer such queries for life; in a full cache it takes the place of the entry that expires first, and a reply that get could not write anew, for it does not unpack or may hold compressed names in data that is copied unread, is not kept.
@@ -209,11 +209,17 @@ func (c *cache) put(upstream string, k key, reply []byte, life time.Duration) {
 	c.entries[at] = entry{bytes.Clone(reply), now, now.Add(life)}
 }
 
-// get answers query, a DNS query of key k to upstream, with the reply kept for such queries, unless c keeps none or its lifetime has passed: the reply gets the ID and the question of query, loses from each TTL the whole seconds it was kept, and has an OPT record, without options, only if query has one too.
+// get answers query, a DNS query of key k to upstream, with the reply kept for such queries, unless c keeps none, its lifetime has passed or the clock was set back to before c kept it, which drops it: the reply gets the ID and the question of query, loses from each TTL the whole seconds it was kept, and has an OPT record, without options, only if query has one too.
 func (c *cache) get(upstream string, k key, query []byte) ([]byte, bool) {
+	at := origin{upstream, k}
 	c.mu.Lock()
-	e, ok := c.entries[origin{upstream, k}]
+	e, ok := c.entries[at]
 	now := c.clock()
+	if ok && now.Before(e.stored) {
+		// The clock was set back, and from then on nothing tells how long e has been kept.
+		delete(c.entries, at)
+		ok = false
+	}
 	c.mu.Unlock()
 	if !ok || !now.Before(e.expires) {
 		return nil, false

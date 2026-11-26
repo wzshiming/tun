@@ -462,6 +462,21 @@ func TestCacheServesNoReplyOnceItsLifetimePassed(t *testing.T) {
 	}
 }
 
+func TestCacheDropsEntryOnceClockIsSetBack(t *testing.T) {
+	c, clock := testCache(0)
+	a := testAsk(t, "example.com.")
+	a.keep(c, time.Minute)
+	clock.pass(-time.Millisecond)
+	if a.served(c) {
+		t.Error("a reply is served a millisecond before the time it was kept at, by a clock that was set back")
+	}
+	// The clock going forward again does not bring back an entry whose age came out negative.
+	clock.pass(2 * time.Millisecond)
+	if a.served(c) {
+		t.Error("a reply whose age came out negative is served once the clock is past the time it was kept at again, want it dropped")
+	}
+}
+
 func TestCacheReplacesEntryWithLaterReply(t *testing.T) {
 	const life = 30 * time.Second
 	c, clock := testCache(0)
