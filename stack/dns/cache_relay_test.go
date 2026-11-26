@@ -45,14 +45,20 @@ func (env *testEnv) fill(t *testing.T, server netip.AddrPort) *fakeServer {
 	t.Helper()
 	env.send(testQuery, server)
 	conn := env.nextServer(t)
-	if got := testReadFrame(t, conn); got != testQuery {
-		t.Fatalf("the upstream read %q, want the query %q", got, testQuery)
+	env.answer(t, conn, testQuery, testReply, server)
+	return conn
+}
+
+// answer has conn, the upstream of server, read query as its next frame and answer it with reply, and returns once the client has that reply.
+func (env *testEnv) answer(t *testing.T, conn *fakeServer, query, reply string, server netip.AddrPort) {
+	t.Helper()
+	if got := testReadFrame(t, conn); got != query {
+		t.Fatalf("the upstream read %q, want the query %q", got, query)
 	}
-	testWriteFrame(t, conn, testReply)
-	if got, want := env.nextReply(t), (datagram{testReply, server}); got != want {
+	testWriteFrame(t, conn, reply)
+	if got, want := env.nextReply(t), (datagram{reply, server}); got != want {
 		t.Fatalf("client got %+v, want the reply as the upstream sent it %+v", got, want)
 	}
-	return conn
 }
 
 // expectCached fails unless the client gets next, from server, what the cache makes of testReply for a query of id: that reply under the ID of the query.
