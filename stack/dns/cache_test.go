@@ -346,6 +346,16 @@ func testRecord(name string, ttl uint32, body dnsmessage.ResourceBody) dnsmessag
 	return dnsmessage.Resource{Header: dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName(name), Class: dnsmessage.ClassINET, TTL: ttl}, Body: body}
 }
 
+// testNS is the NS record of com with ttl.
+func testNS(ttl uint32) dnsmessage.Resource {
+	return testRecord("com.", ttl, &dnsmessage.NSResource{NS: dnsmessage.MustNewName("ns.com.")})
+}
+
+// testGlue is the AAAA record, with ttl, of the server testNS names.
+func testGlue(ttl uint32) dnsmessage.Resource {
+	return testRecord("ns.com.", ttl, &dnsmessage.AAAAResource{AAAA: [16]byte{0x20, 0x01, 0x0d, 0xb8, 15: 1}})
+}
+
 // testParse unpacks packed, a DNS message.
 func testParse(t *testing.T, packed []byte) dnsmessage.Message {
 	t.Helper()
@@ -623,8 +633,8 @@ func TestCacheAnswersWithIDAndQuestionOfQuery(t *testing.T) {
 		{"an answer", func(m *message) {
 			m.Authoritative = true
 			m.Answers = []dnsmessage.Resource{testA(300), testRecord("example.com.", 300, https), testRecord("example.com.", 300, &dnsmessage.UnknownResource{Type: 46, Data: []byte("signature")})}
-			m.Authorities = []dnsmessage.Resource{testRecord("com.", 120, &dnsmessage.NSResource{NS: dnsmessage.MustNewName("ns.com.")})}
-			m.Additionals = []dnsmessage.Resource{testRecord("ns.com.", 60, &dnsmessage.AAAAResource{AAAA: [16]byte{0x20, 0x01, 0x0d, 0xb8, 15: 1}})}
+			m.Authorities = []dnsmessage.Resource{testNS(120)}
+			m.Additionals = []dnsmessage.Resource{testGlue(60)}
 		}},
 		{"NXDOMAIN", func(m *message) {
 			m.RCode, m.AuthenticData = dnsmessage.RCodeNameError, true
@@ -652,17 +662,16 @@ func TestCacheAnswersWithIDAndQuestionOfQuery(t *testing.T) {
 
 func TestCacheTakesWholeSecondsKeptFromTTLs(t *testing.T) {
 	type message = dnsmessage.Message
-	ns := &dnsmessage.NSResource{NS: dnsmessage.MustNewName("ns.com.")}
 	// answered has the TTLs 300, 120 and 60 and then an OPT record, whose TTL field holds the DO bit.
 	answered := func(m *message) {
 		m.Answers = []dnsmessage.Resource{testA(300)}
-		m.Authorities = []dnsmessage.Resource{testRecord("com.", 120, ns)}
-		m.Additionals = []dnsmessage.Resource{testRecord("ns.com.", 60, &dnsmessage.AAAAResource{AAAA: [16]byte{0x20, 0x01, 0x0d, 0xb8, 15: 1}}), testOPT(1232, testDO)}
+		m.Authorities = []dnsmessage.Resource{testNS(120)}
+		m.Additionals = []dnsmessage.Resource{testGlue(60), testOPT(1232, testDO)}
 	}
 	// denied has the TTL 50, of its SOA record, and the TTL 5, which is less than the reply is kept.
 	denied := func(m *message) {
 		m.RCode = dnsmessage.RCodeNameError
-		m.Authorities = []dnsmessage.Resource{testSOA(50, 40), testRecord("com.", 5, ns)}
+		m.Authorities = []dnsmessage.Resource{testSOA(50, 40), testNS(5)}
 	}
 	for _, tc := range []struct {
 		alter func(m *message)
@@ -704,7 +713,7 @@ func TestCacheTakesWholeSecondsKeptFromTTLs(t *testing.T) {
 
 func TestCacheServesOPTOnlyToQueryThatHasOne(t *testing.T) {
 	type records = []dnsmessage.Resource
-	glue := testRecord("ns.com.", 60, &dnsmessage.AAAAResource{AAAA: [16]byte{0x20, 0x01, 0x0d, 0xb8, 15: 1}})
+	glue := testGlue(60)
 	cookie := func(data string) dnsmessage.Option { return dnsmessage.Option{Code: 10, Data: []byte(data)} }
 	padding := dnsmessage.Option{Code: 12, Data: make([]byte, 12)}
 	// ask is a DNS query that carries, if edns, an OPT record with a payload size of 4096 and the cookie of client.
