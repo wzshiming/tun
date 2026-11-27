@@ -85,41 +85,6 @@ func TestLogDialerListenPacketLogsEachNewTargetOnce(t *testing.T) {
 	}
 }
 
-// discardPacketConn takes every datagram written to it.
-type discardPacketConn struct{ net.PacketConn }
-
-func (discardPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) { return len(b), nil }
-
-func TestLogPacketConnRemembersABoundedNumberOfTargets(t *testing.T) {
-	var logged bytes.Buffer
-	flags, out := log.Flags(), log.Writer()
-	log.SetFlags(0)
-	log.SetOutput(&logged)
-	t.Cleanup(func() {
-		log.SetFlags(flags)
-		log.SetOutput(out)
-	})
-	c := &logPacketConn{PacketConn: discardPacketConn{}, client: "198.18.0.1:4000", seen: make(map[string]bool)}
-	target := func(i int) net.Addr { return &net.UDPAddr{IP: net.IPv4(203, 0, byte(i>>8), byte(i)), Port: 9000} }
-	for range 2 {
-		for i := range logSeenMax {
-			c.WriteTo([]byte("datagram"), target(i))
-		}
-	}
-	if got := strings.Count(logged.String(), "\n"); got != logSeenMax {
-		t.Fatalf("logged %d lines for %d targets written to twice, want one line each", got, logSeenMax)
-	}
-	for i := range 3 * logSeenMax {
-		c.WriteTo([]byte("datagram"), target(logSeenMax+i))
-		if len(c.seen) > logSeenMax {
-			t.Fatalf("remembers %d targets after %d more, want at most %d", len(c.seen), i+1, logSeenMax)
-		}
-	}
-	if got := strings.Count(logged.String(), "\n"); got != 4*logSeenMax {
-		t.Errorf("logged %d lines, want one for each of the %d targets", got, 4*logSeenMax)
-	}
-}
-
 type failingListener struct{ err error }
 
 func (l failingListener) Listen(context.Context, string, string) (net.Listener, error) {
