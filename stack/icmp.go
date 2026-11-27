@@ -54,7 +54,7 @@ func (g *gateway) handleICMP(id stack.TransportEndpointID, pkt *stack.PacketBuff
 		c, evicted = g.icmp.open(&g.mu, &g.clock, key)
 		conn := &icmpConn{session: c, s: g.s, netProto: pkt.NetworkProtocolNumber, key: key}
 		g.flows.Add(1)
-		go g.serve(&flow{
+		go g.serve(&capturedFlow{
 			network: "icmp",
 			target:  target,
 			client:  client,

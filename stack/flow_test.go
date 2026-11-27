@@ -9,19 +9,21 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/wzshiming/tun/flow"
 )
 
 // testServeMux serves a Mux register fills.
-func testServeMux(t *testing.T, register func(m *Mux)) *testEnv {
+func testServeMux(t *testing.T, register func(m *flow.Mux)) *testEnv {
 	t.Helper()
-	m := NewMux()
+	m := flow.NewMux()
 	register(m)
 	return testServeWith(t, Options{}, m)
 }
 
 // testAnswer returns a handler that sends name on served, accepts the flow and answers one datagram with name.
-func testAnswer(name string, served chan<- string) Handler {
-	return HandlerFunc(func(_ context.Context, f Flow) {
+func testAnswer(name string, served chan<- string) flow.Handler {
+	return flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 		served <- name
 		conn, err := f.Accept()
 		if err != nil || f.Network() != "udp" {
@@ -66,7 +68,7 @@ func testReadReply(t *testing.T, conn net.Conn, want string) {
 
 func TestServeDispatchesTCPByPort(t *testing.T) {
 	served := make(chan string, 4)
-	env := testServeMux(t, func(m *Mux) {
+	env := testServeMux(t, func(m *flow.Mux) {
 		m.Handle("tcp", ":443", testAnswer("tcp/443", served))
 		m.Handle("tcp", "", testAnswer("tcp fallback", served))
 	})
@@ -78,7 +80,7 @@ func TestServeDispatchesTCPByPort(t *testing.T) {
 
 func TestServeRefusesTCPWithoutHandler(t *testing.T) {
 	served := make(chan string, 4)
-	env := testServeMux(t, func(m *Mux) {
+	env := testServeMux(t, func(m *flow.Mux) {
 		m.Handle("tcp", ":443", testAnswer("tcp/443", served))
 		m.Handle("udp", "", testAnswer("udp fallback", served))
 	})
@@ -93,7 +95,7 @@ func TestServeNilHandlerRefusesTCP(t *testing.T) {
 
 func TestServeDispatchesUDPByPort(t *testing.T) {
 	served := make(chan string, 4)
-	env := testServeMux(t, func(m *Mux) {
+	env := testServeMux(t, func(m *flow.Mux) {
 		m.Handle("udp", ":5353", testAnswer("udp/5353", served))
 		m.Handle("udp", "", testAnswer("udp fallback", served))
 	})
@@ -118,8 +120,8 @@ func TestServeDispatchesUDPSessionByFirstDatagramsAddress(t *testing.T) {
 				reads []udpRead
 			}
 			sessions := make(chan session, 4)
-			reader := func(name string) Handler {
-				return HandlerFunc(func(_ context.Context, f Flow) {
+			reader := func(name string) flow.Handler {
+				return flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 					conn, err := f.Accept()
 					if err != nil {
 						return
@@ -132,7 +134,7 @@ func TestServeDispatchesUDPSessionByFirstDatagramsAddress(t *testing.T) {
 					sessions <- s
 				})
 			}
-			env := testServeMux(t, func(m *Mux) {
+			env := testServeMux(t, func(m *flow.Mux) {
 				m.Handle("udp", tc.prefix, reader(tc.prefix))
 				m.Handle("udp", "", reader("any"))
 			})
@@ -155,7 +157,7 @@ func TestServeDispatchesUDPSessionByFirstDatagramsAddress(t *testing.T) {
 
 func TestServeDropsUDPWithoutHandler(t *testing.T) {
 	served := make(chan string, 4)
-	env := testServeMux(t, func(m *Mux) {
+	env := testServeMux(t, func(m *flow.Mux) {
 		m.Handle("udp", ":53", testAnswer("udp/53", served))
 		m.Handle("tcp", "", testAnswer("tcp fallback", served))
 	})
@@ -184,8 +186,8 @@ func TestFlowReportsNetworkTargetClient(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := make(chan facts, 1)
-			env := testServeMux(t, func(m *Mux) {
-				m.Handle(tc.network, "", HandlerFunc(func(_ context.Context, f Flow) {
+			env := testServeMux(t, func(m *flow.Mux) {
+				m.Handle(tc.network, "", flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 					got <- facts{f.Network(), f.Target(), f.Client()}
 					f.Accept()
 				}))
@@ -212,11 +214,11 @@ func TestFlowReportsNetworkTargetClient(t *testing.T) {
 }
 
 // testServeFlow opens a flow of network to the handler's fallback and returns once that handler has returned.
-func testServeFlow(t *testing.T, network string, handler func(Flow)) *testEnv {
+func testServeFlow(t *testing.T, network string, handler func(flow.Flow)) *testEnv {
 	t.Helper()
 	returned := make(chan struct{})
-	env := testServeMux(t, func(m *Mux) {
-		m.Handle(network, "", HandlerFunc(func(_ context.Context, f Flow) {
+	env := testServeMux(t, func(m *flow.Mux) {
+		m.Handle(network, "", flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 			defer close(returned)
 			handler(f)
 		}))
@@ -242,7 +244,7 @@ func TestFlowSecondAcceptErrors(t *testing.T) {
 	for _, network := range []string{"tcp", "udp"} {
 		t.Run(network, func(t *testing.T) {
 			var first, second error
-			testServeFlow(t, network, func(f Flow) {
+			testServeFlow(t, network, func(f flow.Flow) {
 				_, first = f.Accept()
 				_, second = f.Accept()
 			})
@@ -257,7 +259,7 @@ func TestFlowAcceptAfterRejectErrors(t *testing.T) {
 	for _, network := range []string{"tcp", "udp"} {
 		t.Run(network, func(t *testing.T) {
 			var err error
-			testServeFlow(t, network, func(f Flow) {
+			testServeFlow(t, network, func(f flow.Flow) {
 				f.Reject()
 				_, err = f.Accept()
 			})
@@ -269,15 +271,15 @@ func TestFlowAcceptAfterRejectErrors(t *testing.T) {
 }
 
 func TestTCPFlowUnansweredIsRefused(t *testing.T) {
-	env := testServeMux(t, func(m *Mux) {
-		m.Handle("tcp", "", HandlerFunc(func(context.Context, Flow) {}))
+	env := testServeMux(t, func(m *flow.Mux) {
+		m.Handle("tcp", "", flow.HandlerFunc(func(context.Context, flow.Flow) {}))
 	})
 	env.dialTCPRefused(t, "10.0.0.9:443")
 }
 
 func TestUDPFlowUnansweredIsDropped(t *testing.T) {
-	env := testServeMux(t, func(m *Mux) {
-		m.Handle("udp", "", HandlerFunc(func(context.Context, Flow) {}))
+	env := testServeMux(t, func(m *flow.Mux) {
+		m.Handle("udp", "", flow.HandlerFunc(func(context.Context, flow.Flow) {}))
 	})
 	conn := env.dialUDP(t, "10.0.0.9:5353")
 	testSend(t, conn, "query")
@@ -292,8 +294,8 @@ func TestUDPFlowUnansweredIsDropped(t *testing.T) {
 
 func TestRejectedUDPFlowFreesItsEndpoint(t *testing.T) {
 	served := make(chan struct{}, 4)
-	env := testServeMux(t, func(m *Mux) {
-		m.Handle("udp", "", HandlerFunc(func(_ context.Context, f Flow) {
+	env := testServeMux(t, func(m *flow.Mux) {
+		m.Handle("udp", "", flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 			f.Reject()
 			served <- struct{}{}
 		}))
@@ -316,7 +318,7 @@ func TestServeClosesConnLeftOpenByServeFlow(t *testing.T) {
 	for _, network := range []string{"tcp", "udp"} {
 		t.Run(network, func(t *testing.T) {
 			var conn net.Conn
-			testServeFlow(t, network, func(f Flow) {
+			testServeFlow(t, network, func(f flow.Flow) {
 				conn, _ = f.Accept()
 			})
 			if conn == nil {
@@ -340,7 +342,7 @@ func TestServeCancelClosesAcceptedConnsAndWaitsForServeFlow(t *testing.T) {
 	accepted := make(chan struct{}, 2)
 	var returned atomic.Int32
 	// The handler ignores ctx, so only Serve closing its conn wakes it.
-	handler := HandlerFunc(func(_ context.Context, f Flow) {
+	handler := flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 		conn, err := f.Accept()
 		if err != nil {
 			return
@@ -355,7 +357,7 @@ func TestServeCancelClosesAcceptedConnsAndWaitsForServeFlow(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		returned.Add(1)
 	})
-	env := testServeMux(t, func(m *Mux) {
+	env := testServeMux(t, func(m *flow.Mux) {
 		m.Handle("tcp", "", handler)
 		m.Handle("udp", "", handler)
 	})

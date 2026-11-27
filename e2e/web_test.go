@@ -21,7 +21,7 @@ import (
 
 	"golang.org/x/net/quic"
 
-	"github.com/wzshiming/tun/stack"
+	"github.com/wzshiming/tun/flow"
 )
 
 // ttServed is a TEST-NET-2 address nothing is dialled for: ttServeDev answers its HTTP, HTTPS and QUIC itself.
@@ -77,14 +77,14 @@ func ttWebHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "%s %s tls=%t", r.Proto, r.URL.Path, r.TLS != nil)
 }
 
-// ttHandleServed mounts on mux what answers at ttServed without any dial, until ctx ends: HTTP at port 80 and HTTPS at port 443 from one net/http Server on two stack.Listener, and at UDP port 443 a QUIC echo server on the conn of each session a third one accepts.
-func ttHandleServed(ctx context.Context, mux *stack.Mux) {
+// ttHandleServed mounts on mux what answers at ttServed without any dial, until ctx ends: HTTP at port 80 and HTTPS at port 443 from one net/http Server on two flow.Listener, and at UDP port 443 a QUIC echo server on the conn of each session a third one accepts.
+func ttHandleServed(ctx context.Context, mux *flow.Mux) {
 	server, _ := ttTLS()
 	server = server.Clone()
 	// Served with and without TLS, the server sets HTTP/2 up whichever comes first only with "h2" named here.
 	server.NextProtos = []string{"h2", "http/1.1"}
 	web := &http.Server{Handler: http.HandlerFunc(ttWebHandler), TLSConfig: server, ReadHeaderTimeout: 10 * time.Second}
-	plain, secure, sessions := stack.NewListener(), stack.NewListener(), stack.NewListener()
+	plain, secure, sessions := flow.NewListener(), flow.NewListener(), flow.NewListener()
 	mux.Handle("tcp", netip.AddrPortFrom(ttServed, 80).String(), plain)
 	mux.Handle("tcp", netip.AddrPortFrom(ttServed, 443).String(), secure)
 	mux.Handle("udp", netip.AddrPortFrom(ttServed, 443).String(), sessions)

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
+
+	"github.com/wzshiming/tun/flow"
 )
 
 // testStopBound is how long Serve may take to return once its context ends.
@@ -32,7 +34,7 @@ func TestServeReturnsContextErrorAndClosesDevice(t *testing.T) {
 func TestServeCancelEndsServeFlowContext(t *testing.T) {
 	served, ended := make(chan string, 2), make(chan string, 2)
 	// The handler ignores its conn, so only its ctx ending lets it report.
-	handler := HandlerFunc(func(ctx context.Context, f Flow) {
+	handler := flow.HandlerFunc(func(ctx context.Context, f flow.Flow) {
 		if _, err := f.Accept(); err != nil {
 			return
 		}
@@ -43,7 +45,7 @@ func TestServeCancelEndsServeFlowContext(t *testing.T) {
 		case <-time.After(testWait):
 		}
 	})
-	env := testServeMux(t, func(m *Mux) {
+	env := testServeMux(t, func(m *flow.Mux) {
 		m.Handle("tcp", "", handler)
 		m.Handle("udp", "", handler)
 	})

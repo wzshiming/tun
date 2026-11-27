@@ -13,8 +13,8 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/wzshiming/tun/flow"
 	"github.com/wzshiming/tun/internal/stacktest"
-	"github.com/wzshiming/tun/stack"
 )
 
 // testIdleBound is how long a 200ms Handler.Idle may take to end a flow or give a query up; the 10s default exceeds it.
@@ -66,7 +66,7 @@ type fakeUpstream struct {
 
 func (u *fakeUpstream) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	client := ""
-	if addr := stack.ClientAddr(ctx); addr != nil {
+	if addr := flow.ClientAddr(ctx); addr != nil {
 		client = addr.Network() + " " + addr.String()
 	}
 	u.mu.Lock()
@@ -181,12 +181,12 @@ type testFlow struct {
 	done   chan struct{}
 }
 
-// testStart serves f with h through a stack.Listener until the test ends.
+// testStart serves f with h through a flow.Listener until the test ends.
 func testStart(t *testing.T, h *Handler, f *stacktest.Flow) *testFlow {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	tf := &testFlow{flow: f, cancel: cancel, done: make(chan struct{})}
-	l := stack.NewListener()
+	l := flow.NewListener()
 	go h.Serve(l)
 	t.Cleanup(func() { l.Close() })
 	go func() {

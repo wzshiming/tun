@@ -10,6 +10,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/tun/netstack"
 
+	"github.com/wzshiming/tun/flow"
 	"github.com/wzshiming/tun/internal/stacktest"
 	"github.com/wzshiming/tun/stack"
 )
@@ -145,7 +146,7 @@ func TestEchoAnswersAPingThroughServe(t *testing.T) {
 			if err != nil {
 				t.Fatalf("netstack.CreateNetTUN: %v", err)
 			}
-			m := stack.NewMux()
+			m := flow.NewMux()
 			m.Handle("icmp", fam.target.String(), Echo{})
 			ctx, cancel := context.WithCancel(context.Background())
 			served := make(chan error, 1)

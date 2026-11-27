@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wzshiming/tun/flow"
 	"github.com/wzshiming/tun/internal/stacktest"
-	"github.com/wzshiming/tun/stack"
 )
 
 // testWait bounds every wait for something that must happen.
@@ -162,7 +162,7 @@ func relayRaiseBuffers(conn *net.UDPConn) error {
 	return conn.SetWriteBuffer(relaySocketBuffer)
 }
 
-// fakeDial is one recorded DialContext or ListenPacket call; client is stack.ClientAddr of its context.
+// fakeDial is one recorded DialContext or ListenPacket call; client is flow.ClientAddr of its context.
 type fakeDial struct {
 	network, address string
 	client           net.Addr
@@ -237,7 +237,7 @@ func newUDPRelayDialer(t *testing.T) *udpRelayDialer {
 
 func (d *udpRelayDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	d.mu.Lock()
-	d.dials = append(d.dials, fakeDial{network: network, address: address, client: stack.ClientAddr(ctx)})
+	d.dials = append(d.dials, fakeDial{network: network, address: address, client: flow.ClientAddr(ctx)})
 	err, stalled, delay := d.err, d.stalled, d.slow[address]
 	d.mu.Unlock()
 	if delay > 0 {
@@ -425,7 +425,7 @@ func (d relayDialled) next(t *testing.T, env *testEnv) relayEnd {
 
 func (d relayDialled) opens() int { return len(d.recorded()) }
 
-var _ stack.ListenConfig = (*coneListener)(nil)
+var _ flow.ListenConfig = (*coneListener)(nil)
 
 // coneListener is a ListenConfig recording each ListenPacket call and answering it with a new coneSocket, or with err once failing, or a coneStalled once stalled; Listen always fails.
 type coneListener struct {
@@ -452,7 +452,7 @@ func (l *coneListener) Listen(context.Context, string, string) (net.Listener, er
 
 func (l *coneListener) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
 	l.mu.Lock()
-	l.calls = append(l.calls, fakeDial{network: network, address: address, client: stack.ClientAddr(ctx)})
+	l.calls = append(l.calls, fakeDial{network: network, address: address, client: flow.ClientAddr(ctx)})
 	err, stalled, refuse := l.err, l.stalled, l.refuse
 	l.mu.Unlock()
 	if err != nil {

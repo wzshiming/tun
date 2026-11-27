@@ -24,6 +24,7 @@ import (
 	"go4.org/netipx"
 
 	"github.com/wzshiming/tun"
+	"github.com/wzshiming/tun/flow"
 	"github.com/wzshiming/tun/stack"
 	"github.com/wzshiming/tun/stack/dns"
 	"github.com/wzshiming/tun/stack/icmp"
@@ -130,10 +131,10 @@ func ttOpen(t *testing.T, ctx context.Context, cfg tun.Config) *tun.Device {
 
 // ttServeDev runs stack.Serve on dev until ctx ends, relaying TCP, DNS and, full cone, UDP to ttUDPEchoTarget's TEST-NET-2 prefix through dialer, and answering the ICMP echo to cfg's addresses and what ttHandleServed mounts; the channel receives its result.
 func ttServeDev(ctx context.Context, dev *tun.Device, cfg tun.Config, dialer *ttDialRecorder) <-chan error {
-	mux := stack.NewMux()
+	mux := flow.NewMux()
 	mux.Handle("tcp", "", &tcp.Handler{Dialer: dialer})
 	mirror := &dns.Handler{Dialer: dialer}
-	queries := stack.NewListener()
+	queries := flow.NewListener()
 	mux.Handle("udp", ":53", queries)
 	mux.Handle("tcp", ":53", queries)
 	go mirror.Serve(queries)
@@ -176,7 +177,7 @@ type ttDial struct{ network, address, client string }
 
 // ttDialRecorder records Serve's dials; with redirect set it connects them to local fakes instead of base.
 type ttDialRecorder struct {
-	base stack.Dialer
+	base flow.Dialer
 	// redirect maps destinations to the loopback addresses standing in for them; any other port 53 goes to dns.
 	redirect map[string]string
 	dns      string
@@ -189,7 +190,7 @@ type ttDialRecorder struct {
 
 func (r *ttDialRecorder) DialContext(ctx context.Context, network, address string) (conn net.Conn, err error) {
 	dial := ttDial{network: network, address: address}
-	if client := stack.ClientAddr(ctx); client != nil {
+	if client := flow.ClientAddr(ctx); client != nil {
 		dial.client = client.String()
 	}
 	r.mu.Lock()
@@ -231,7 +232,7 @@ func (r *ttDialRecorder) ListenPacket(ctx context.Context, network, address stri
 		return nil, err
 	}
 	s := &ttConeSocket{PacketConn: pc, rec: r, toStandIn: make(map[string]string), fromStandIn: make(map[string]netip.AddrPort)}
-	if client := stack.ClientAddr(ctx); client != nil {
+	if client := flow.ClientAddr(ctx); client != nil {
 		s.client = client.String()
 	}
 	for dest, standIn := range r.redirect {

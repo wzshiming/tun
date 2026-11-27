@@ -1,4 +1,4 @@
-// Package stacktest provides doubles of what a stack.Handler is served: a Flow and the conn of a UDP session.
+// Package stacktest provides doubles of what a flow.Handler is served: a Flow and the conn of a UDP session.
 package stacktest
 
 import (
@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-// Flow is a double of stack.Flow whose Accept returns the conn it was built with.
+// Flow is a double of flow.Flow whose Accept returns the conn it was built with.
 type Flow struct {
 	network        string
 	client, target netip.AddrPort

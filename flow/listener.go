@@ -1,4 +1,4 @@
-package stack
+package flow
 
 import (
 	"context"
@@ -12,11 +12,11 @@ var (
 )
 
 // Listener is a Handler whose flows a server of the standard library accepts as the conns of a net.Listener.
-// Mount it on a Mux and serve it, e.g. l := stack.NewListener(); m.Handle("tcp", ":80", l); go http.Serve(l, h), or srv.ServeTLS(l, "", "") for HTTPS.
+// Mount it on a Mux and serve it, e.g. l := flow.NewListener(); m.Handle("tcp", ":80", l); go http.Serve(l, h), or srv.ServeTLS(l, "", "") for HTTPS.
 //
 // An accepted conn is the one Flow.Accept returns, its RemoteAddr the flow's client and its LocalAddr the target the client dialled: for tcp a conn with CloseWrite, for udp also a net.PacketConn, for icmp the echo session.
 // The flow lasts until its conn is closed, by the server or, as the flow's ctx ends, by the Listener.
-// A flow waits to be accepted for as long as Serve lets it stay unanswered, so one mounted on a Listener nobody serves is rejected as that ends; a flow arriving after Close is rejected at once.
+// A flow waits to be accepted for as long as stack.Serve lets it stay unanswered, so one mounted on a Listener nobody serves is rejected as that ends; a flow arriving after Close is rejected at once.
 type Listener struct {
 	flows     chan *listenerFlow
 	closed    chan struct{}

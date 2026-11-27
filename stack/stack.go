@@ -1,4 +1,4 @@
-// Package stack terminates the IP packets of a TUN device in a gVisor netstack and hands the TCP connections, UDP flows and ICMP echo sessions it captures to a Handler.
+// Package stack terminates the IP packets of a TUN device in a gVisor netstack and hands the TCP connections, UDP flows and ICMP echo sessions it captures to a flow.Handler.
 package stack
 
 import (
@@ -24,6 +24,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+
+	"github.com/wzshiming/tun/flow"
 )
 
 const nicID tcpip.NICID = 1
@@ -94,7 +96,7 @@ func (o Options) keepAliveInterval() time.Duration {
 // Serve hands each TCP connection, UDP flow and ICMP echo session arriving on dev to handler until ctx ends or reading dev fails, and always closes dev.
 // A nil handler refuses every flow: TCP with a reset, UDP with ICMP port unreachable, ICMP echo with silence.
 // Before returning it closes the conns still accepted and waits for every ServeFlow to return.
-func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options) error {
+func Serve(ctx context.Context, dev wgtun.Device, handler flow.Handler, opts Options) error {
 	// The event goroutines of a native device block once its Events buffer is full.
 	stopEvents := make(chan struct{})
 	var drain sync.WaitGroup
@@ -175,7 +177,7 @@ func (g *gateway) abortUntilDrained(s *stack.Stack) {
 // gateway hands the flows the stack captures to its handler and counts them so Serve can wait for them.
 type gateway struct {
 	ctx     context.Context
-	handler Handler
+	handler flow.Handler
 	s       *stack.Stack
 	// answerTimeout is Options.AnswerTimeout with its default, read once.
 	answerTimeout time.Duration
@@ -214,7 +216,7 @@ func (g *gateway) stop() {
 }
 
 // serve runs the handler on a flow counted in by start and ends the flow once it returns.
-func (g *gateway) serve(f *flow) {
+func (g *gateway) serve(f *capturedFlow) {
 	defer g.flows.Done()
 	defer f.end()
 	ctx := g.ctx
@@ -233,8 +235,8 @@ var (
 	errAcceptRejected = errors.New("stack: flow already rejected")
 )
 
-// flow is a Flow whose protocol supplies accept and reject, each called at most once.
-type flow struct {
+// capturedFlow is a flow.Flow whose protocol supplies accept and reject, each called at most once.
+type capturedFlow struct {
 	network        string
 	target, client netip.AddrPort
 	accept         func() (net.Conn, error)
@@ -247,11 +249,11 @@ type flow struct {
 	conn     net.Conn
 }
 
-func (f *flow) Network() string        { return f.network }
-func (f *flow) Target() netip.AddrPort { return f.target }
-func (f *flow) Client() netip.AddrPort { return f.client }
+func (f *capturedFlow) Network() string        { return f.network }
+func (f *capturedFlow) Target() netip.AddrPort { return f.target }
+func (f *capturedFlow) Client() netip.AddrPort { return f.client }
 
-func (f *flow) Accept() (net.Conn, error) {
+func (f *capturedFlow) Accept() (net.Conn, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.answered {
@@ -269,7 +271,7 @@ func (f *flow) Accept() (net.Conn, error) {
 	return conn, nil
 }
 
-func (f *flow) Reject() {
+func (f *capturedFlow) Reject() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.answered {
@@ -279,7 +281,7 @@ func (f *flow) Reject() {
 }
 
 // expire rejects the flow unless an answer has begun, ending its ctx before the client learns of it.
-func (f *flow) expire(cancel context.CancelFunc) {
+func (f *capturedFlow) expire(cancel context.CancelFunc) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.answered {
@@ -290,7 +292,7 @@ func (f *flow) expire(cancel context.CancelFunc) {
 }
 
 // end rejects the flow if unanswered and closes its accepted conn.
-func (f *flow) end() {
+func (f *capturedFlow) end() {
 	f.Reject()
 	f.mu.Lock()
 	defer f.mu.Unlock()

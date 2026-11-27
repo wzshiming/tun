@@ -24,6 +24,7 @@ import (
 
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/bypass"
+	"github.com/wzshiming/tun/flow"
 	"github.com/wzshiming/tun/stack"
 	"github.com/wzshiming/tun/stack/dns"
 	"github.com/wzshiming/tun/stack/icmp"
@@ -195,9 +196,9 @@ func run(ctx context.Context, s settings) error {
 // It logs every flow, whichever handler serves it, and through dialer each dial and listen that fails.
 // It answers itself the ICMP echo to the addresses of the TUN device, which an OS that routes them into the device expects to be there.
 // It serves the ready page at s.readyPort, unless 0, of readyAddrs of those addresses.
-func newHandler(dialer *logDialer, s settings) stack.Handler {
+func newHandler(dialer *logDialer, s settings) flow.Handler {
 	addresses := s.tun.Addresses
-	m := stack.NewMux()
+	m := flow.NewMux()
 	m.Handle("icmp", "", &icmp.Handler{ListenConfig: dialer.icmp, Idle: s.icmpIdle})
 	for _, address := range addresses {
 		m.Handle("icmp", address.Addr().String(), icmp.Echo{Idle: s.icmpIdle})
@@ -206,12 +207,12 @@ func newHandler(dialer *logDialer, s settings) stack.Handler {
 	m.Handle("udp", "", &udp.Handler{Dialer: dialer, ListenConfig: dialer, Idle: s.udpIdle})
 	// The two servers below serve their listeners for as long as the process runs.
 	mirror := &dns.Handler{Dialer: dialer, Upstreams: s.dnsTargets, FailedFor: s.dnsFailedFor, Idle: s.dnsIdle, CacheSize: s.dnsCacheSize, Stale: s.dnsStale}
-	queries := stack.NewListener()
+	queries := flow.NewListener()
 	m.Handle("udp", ":53", queries)
 	m.Handle("tcp", ":53", queries)
 	go mirror.Serve(queries)
 	if addrs := readyAddrs(addresses); len(addrs) > 0 && s.readyPort != 0 {
-		ready := stack.NewListener()
+		ready := flow.NewListener()
 		for _, addr := range addrs {
 			m.Handle("tcp", netip.AddrPortFrom(addr, uint16(s.readyPort)).String(), ready)
 		}
@@ -259,7 +260,7 @@ func readyAddrs(addresses []netip.Prefix) []netip.Addr {
 // logDialer dials and listens for the handlers, logging each dial and listen that fails with the client it was for.
 type logDialer struct {
 	dialer *net.Dialer
-	listen stack.ListenConfig
+	listen flow.ListenConfig
 	// icmp opens the sockets of the ICMP echo sessions.
 	icmp *net.ListenConfig
 }
@@ -267,7 +268,7 @@ type logDialer struct {
 // logFailure logs err as the failure of a dial or listen of network and address for the client ctx carries.
 func logFailure(ctx context.Context, network, address string, err error) {
 	client := "unknown"
-	if addr := stack.ClientAddr(ctx); addr != nil {
+	if addr := flow.ClientAddr(ctx); addr != nil {
 		client = addr.String()
 	}
 	log.Printf("%s -> %s %s: %v", client, network, address, err)
@@ -295,8 +296,8 @@ func (d *logDialer) ListenPacket(ctx context.Context, network, address string) (
 }
 
 // logged returns a handler that serves each flow with next and logs it: as it starts, each further target a UDP session sends to, and as it ends, either rejected or with the bytes it carried each way and how long it lasted.
-func logged(next stack.Handler) stack.Handler {
-	return stack.HandlerFunc(func(ctx context.Context, f stack.Flow) {
+func logged(next flow.Handler) flow.Handler {
+	return flow.HandlerFunc(func(ctx context.Context, f flow.Flow) {
 		lf := &logFlow{Flow: f, start: time.Now()}
 		if f.Network() == "icmp" {
 			// Neither end of an echo session has a port.
@@ -312,7 +313,7 @@ func logged(next stack.Handler) stack.Handler {
 
 // logFlow is a flow that counts the bytes of its accepted conn.
 type logFlow struct {
-	stack.Flow
+	flow.Flow
 	// name is the flow as its log lines begin: its client, network and target.
 	name  string
 	start time.Time

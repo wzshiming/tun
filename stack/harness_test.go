@@ -19,6 +19,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+
+	"github.com/wzshiming/tun/flow"
 )
 
 const (
@@ -232,7 +234,7 @@ type testEnv struct {
 }
 
 // testEcho accepts every flow and writes back what it reads until its conn closes.
-var testEcho = HandlerFunc(func(_ context.Context, f Flow) {
+var testEcho = flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 	if conn, err := f.Accept(); err == nil {
 		io.Copy(conn, conn)
 	}
@@ -244,7 +246,7 @@ func testServe(t *testing.T, opts Options) *testEnv {
 	return testServeWith(t, opts, testEcho)
 }
 
-func testServeWith(t *testing.T, opts Options, handler Handler) *testEnv {
+func testServeWith(t *testing.T, opts Options, handler flow.Handler) *testEnv {
 	t.Helper()
 	clientDev, client, err := netstack.CreateNetTUN([]netip.Addr{testClient4, testClient6}, nil, testMTU)
 	if err != nil {

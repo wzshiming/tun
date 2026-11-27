@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wzshiming/tun/flow"
 	"github.com/wzshiming/tun/internal/stacktest"
-	"github.com/wzshiming/tun/stack"
 )
 
 // testWait bounds every wait.
@@ -47,7 +47,7 @@ type fakeDialer struct {
 func (d *fakeDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.dials = append(d.dials, dialRecord{network, address, stack.ClientAddr(ctx), d.flow.Accepted()})
+	d.dials = append(d.dials, dialRecord{network, address, flow.ClientAddr(ctx), d.flow.Accepted()})
 	if d.reject {
 		d.flow.Reject()
 	}

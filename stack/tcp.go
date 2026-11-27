@@ -17,7 +17,7 @@ func (g *gateway) forwardTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 	id := r.ID()
-	g.serve(&flow{
+	g.serve(&capturedFlow{
 		network: "tcp",
 		target:  addrPort(id.LocalAddress, id.LocalPort),
 		client:  addrPort(id.RemoteAddress, id.RemotePort),

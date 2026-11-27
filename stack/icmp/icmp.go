@@ -1,5 +1,5 @@
 // Package icmp relays the echo requests of an ICMP session to their target through an ICMP socket of the machine itself, and the echo replies back to the client; no proxy carries ICMP.
-// Mount its Handler on a stack.Mux for the "icmp" network, e.g. m.Handle("icmp", "", &icmp.Handler{ListenConfig: lc}); the package registers nothing itself.
+// Mount its Handler on a flow.Mux for the "icmp" network, e.g. m.Handle("icmp", "", &icmp.Handler{ListenConfig: lc}); the package registers nothing itself.
 package icmp
 
 import (
@@ -16,10 +16,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wzshiming/tun/stack"
+	"github.com/wzshiming/tun/flow"
 )
 
-var _ stack.Handler = (*Handler)(nil)
+var _ flow.Handler = (*Handler)(nil)
 
 // Handler serves an ICMP echo session by sending its echo requests to their target from a socket of its own and the target's echo replies back to the client; it rejects other flows.
 // The socket is a datagram ICMP one, which Linux grants to the groups of net.ipv4.ping_group_range and macOS to everyone, else a raw one, which needs root or, on Windows, an administrator; a session whose socket cannot be opened is rejected.
@@ -101,7 +101,7 @@ const (
 
 // ServeFlow opens the session's socket before accepting, so a failed open rejects the flow, then relays until the session idles, its conn or socket fails or ctx ends, and closes both.
 // An echo request the socket fails to send is lost alone. Only echo replies come back: an ICMP error about a request does not.
-func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
+func (h *Handler) ServeFlow(ctx context.Context, f flow.Flow) {
 	if f.Network() != "icmp" {
 		f.Reject()
 		return
@@ -111,7 +111,7 @@ func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
 	if h.open != nil {
 		open = h.open
 	}
-	sock, err := open(stack.WithClientAddr(ctx, &net.IPAddr{IP: f.Client().Addr().AsSlice()}), target.Is6())
+	sock, err := open(flow.WithClientAddr(ctx, &net.IPAddr{IP: f.Client().Addr().AsSlice()}), target.Is6())
 	if err != nil {
 		f.Reject()
 		return
