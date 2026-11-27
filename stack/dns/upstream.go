@@ -71,7 +71,7 @@ func (u *upstream) Write(datagram []byte) (int, error) {
 	if _, k, ok := queryKey(datagram); ok {
 		if reply, ok := u.cache.get(u.address, k, datagram); ok {
 			select {
-			case u.replies <- reply:
+			case u.replies <- fit(datagram, reply):
 				return len(datagram), nil
 			case <-u.ctx.Done():
 				return 0, net.ErrClosed
@@ -187,19 +187,23 @@ func (u *upstream) receive(conn *frameConn) {
 			return
 		}
 		// The cache has the reply before the client does, whose next query then finds it there.
-		u.answered(buf[:n])
+		reply := buf[:n]
+		if query := u.answered(reply); query != nil {
+			// The cache keeps the reply whole; only the client's datagram is cut to what it takes.
+			reply = fit(query, reply)
+		}
 		select {
-		case u.replies <- bytes.Clone(buf[:n]):
+		case u.replies <- bytes.Clone(reply):
 		case <-u.ctx.Done():
 			return
 		}
 	}
 }
 
-// answered forgets the unanswered query whose ID reply, a message read from the TCP conn, carries, and has the cache keep reply for as long as it may answer such a query.
-func (u *upstream) answered(reply []byte) {
+// answered forgets the unanswered query whose ID reply, a message read from the TCP conn, carries, has the cache keep reply for as long as it may answer such a query, and returns that query, nil if reply answers none.
+func (u *upstream) answered(reply []byte) (query []byte) {
 	if len(reply) < 2 {
-		return
+		return nil
 	}
 	id := binary.BigEndian.Uint16(reply)
 	u.mu.Lock()
@@ -207,11 +211,12 @@ func (u *upstream) answered(reply []byte) {
 	delete(u.pending, id)
 	u.mu.Unlock()
 	if q == nil {
-		return
+		return nil
 	}
 	if _, k, ok := queryKey(q.message); ok {
 		u.cache.put(u.address, k, reply, lifetime(reply, id, k.question))
 	}
+	return q.message
 }
 
 // retire closes conn, which failed, and sends the DNS queries it left unanswered once more on a new conn; with none of them, or no conn for them, it ends u as a failed conn ended its target before.

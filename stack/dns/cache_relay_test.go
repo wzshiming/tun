@@ -343,17 +343,22 @@ func TestAnswersFromCacheOnlyWithinLifetimeOfReply(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, clock := testClocked(&Handler{})
 			env := testServe(t, h, "udp")
-			env.send(testQuery, testServer)
+			query := testQuery
+			if len(tc.reply) > udpMin {
+				// A client that takes a reply of any length in a datagram asks for the long ones, which the relay would else cut for it.
+				query = string(testSized(t, 0x1234, 65535, 0))
+			}
+			env.send(query, testServer)
 			server := env.nextServer(t)
-			env.answer(t, server, testQuery, tc.reply, testServer)
+			env.answer(t, server, query, tc.reply, testServer)
 			if tc.life == 0 {
-				if !env.goesUpstream(t, server, testWithID(testQuery, 0x5678)) {
+				if !env.goesUpstream(t, server, testWithID(query, 0x5678)) {
 					t.Fatal("the relay answered from its cache a query that came right after a reply it may not store")
 				}
 				return
 			}
 			clock.pass(tc.life - time.Millisecond)
-			if env.goesUpstream(t, server, testWithID(testQuery, 0x5678)) {
+			if env.goesUpstream(t, server, testWithID(query, 0x5678)) {
 				t.Fatalf("the relay sent upstream a query that came %v after the reply that answers it for %v", tc.life-time.Millisecond, tc.life)
 			}
 			// The cache had the reply for all but the last of the whole seconds it answers for.
@@ -367,7 +372,7 @@ func TestAnswersFromCacheOnlyWithinLifetimeOfReply(t *testing.T) {
 			}
 			env.expectServed(t, want, testServer)
 			clock.pass(time.Millisecond)
-			if !env.goesUpstream(t, server, testWithID(testQuery, 0x9abc)) {
+			if !env.goesUpstream(t, server, testWithID(query, 0x9abc)) {
 				t.Fatalf("the relay answered from its cache a query that came %v after the reply, which answers for %v", tc.life, tc.life)
 			}
 		})
