@@ -60,7 +60,16 @@ func (d *ringDevice) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 		case err == nil:
 			sizes[0] = copy(bufs[0][offset:], p)
 			d.ring.release(p)
-			return 1, nil
+			// The packets already in the ring come along, so the caller handles a burst in one go; an error here is the next Read's to report.
+			n := 1
+			for ; n < len(bufs); n++ {
+				if p, err = d.ring.receive(); err != nil {
+					break
+				}
+				sizes[n] = copy(bufs[n][offset:], p)
+				d.ring.release(p)
+			}
+			return n, nil
 		case errors.Is(err, errRingEmpty):
 			// One reader at a time: Wintun's read event is auto-reset, so one SetEvent wakes one waiter.
 			d.ring.wait()
@@ -103,7 +112,7 @@ func (d *ringDevice) Write(bufs [][]byte, offset int) (int, error) {
 func (d *ringDevice) MTU() (int, error)          { return d.mtu, nil }
 func (d *ringDevice) Name() (string, error)      { return d.name, nil }
 func (d *ringDevice) Events() <-chan wgtun.Event { return d.events }
-func (d *ringDevice) BatchSize() int             { return 1 }
+func (d *ringDevice) BatchSize() int             { return deviceBatch }
 
 // Close wakes blocked readers, waits for every Read and Write to return, then ends the ring.
 func (d *ringDevice) Close() error {

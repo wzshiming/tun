@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -244,8 +245,8 @@ func TestRelayReportsNameMTUAndBatchSize(t *testing.T) {
 	relay, _, _ := ttRelayPair(t)
 	name, _ := relay.Name()
 	mtu, _ := relay.MTU()
-	if name != "relay0" || mtu != 1500 || relay.BatchSize() != 1 || relay.File() != nil {
-		t.Errorf("Name, MTU, BatchSize, File = %q, %d, %d, %v, want relay0, 1500, 1, nil", name, mtu, relay.BatchSize(), relay.File())
+	if name != "relay0" || mtu != 1500 || relay.BatchSize() != deviceBatch || relay.File() != nil {
+		t.Errorf("Name, MTU, BatchSize, File = %q, %d, %d, %v, want relay0, 1500, %d, nil", name, mtu, relay.BatchSize(), relay.File(), deviceBatch)
 	}
 }
 
@@ -737,5 +738,166 @@ func TestServeHelperRejectsInvalidRequest(t *testing.T) {
 	}
 	if c := <-code; c != 1 || opened {
 		t.Errorf("serveHelper = %d (opened %v), want 1 without opening", c, opened)
+	}
+}
+
+// ttRelayFrames returns packets as the frames a pump writes them in.
+func ttRelayFrames(packets ...[]byte) []byte {
+	var frames bytes.Buffer
+	for _, p := range packets {
+		writePacket(&frames, p)
+	}
+	return frames.Bytes()
+}
+
+// ttRelayReadBatch reads up to batch packets from dev in one Read within 5s.
+func ttRelayReadBatch(t *testing.T, dev wgtun.Device, batch int) ([][]byte, error) {
+	t.Helper()
+	type result struct {
+		packets [][]byte
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		bufs, sizes := make([][]byte, batch), make([]int, batch)
+		for i := range bufs {
+			bufs[i] = make([]byte, 16+packetMax)
+		}
+		n, err := dev.Read(bufs, sizes, 16)
+		var r result
+		for i := range n {
+			r.packets = append(r.packets, bufs[i][16:16+sizes[i]])
+		}
+		r.err = err
+		done <- r
+	}()
+	select {
+	case r := <-done:
+		return r.packets, r.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read still blocked after 5s")
+		return nil, nil
+	}
+}
+
+func TestRelayReadReturnsEveryPacketAlreadyBuffered(t *testing.T) {
+	a, b := net.Pipe()
+	relay := newRelay(a, "relay0", 1500)
+	defer relay.Close()
+	defer b.Close()
+	want := [][]byte{ttRelayRandom(40), ttRelayRandom(1500), ttRelayRandom(1)}
+	// One write of the pipe reaches the relay's buffer in one read.
+	go b.Write(ttRelayFrames(want...))
+	got, err := ttRelayReadBatch(t, relay, 8)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Read returned %d packets, want the %d buffered", len(got), len(want))
+	}
+	for i := range want {
+		if !bytes.Equal(got[i], want[i]) {
+			t.Errorf("packet %d = %d bytes, want the %d sent", i, len(got[i]), len(want[i]))
+		}
+	}
+}
+
+func TestRelayReadLeavesPacketsBeyondItsBuffersToTheNextRead(t *testing.T) {
+	a, b := net.Pipe()
+	relay := newRelay(a, "relay0", 1500)
+	defer relay.Close()
+	defer b.Close()
+	want := [][]byte{[]byte("one"), []byte("two"), []byte("three")}
+	go b.Write(ttRelayFrames(want...))
+	first, err := ttRelayReadBatch(t, relay, 2)
+	if err != nil || len(first) != 2 {
+		t.Fatalf("first Read = %d packets, %v, want 2, nil", len(first), err)
+	}
+	rest, err := ttRelayReadBatch(t, relay, 2)
+	if err != nil || len(rest) != 1 || string(rest[0]) != "three" {
+		t.Fatalf("second Read = %q, %v, want [three], nil", rest, err)
+	}
+}
+
+// A frame whose payload has not all arrived must not hold back the packets before it.
+func TestRelayReadDoesNotWaitForAPartlyBufferedPacket(t *testing.T) {
+	a, b := net.Pipe()
+	relay := newRelay(a, "relay0", 1500)
+	defer relay.Close()
+	defer b.Close()
+	frames := ttRelayFrames([]byte("whole"), []byte("partial"))
+	go b.Write(frames[:len(frames)-3])
+	got, err := ttRelayReadBatch(t, relay, 8)
+	if err != nil || len(got) != 1 || string(got[0]) != "whole" {
+		t.Fatalf("Read = %q, %v, want [whole], nil", got, err)
+	}
+	go b.Write(frames[len(frames)-3:])
+	got, err = ttRelayReadBatch(t, relay, 8)
+	if err != nil || len(got) != 1 || string(got[0]) != "partial" {
+		t.Fatalf("Read after the rest arrived = %q, %v, want [partial], nil", got, err)
+	}
+}
+
+func TestRelayReadReturnsThePacketsBeforeAnOversizedFrame(t *testing.T) {
+	a, b := net.Pipe()
+	relay := newRelay(a, "relay0", 1500)
+	defer relay.Close()
+	defer b.Close()
+	frames := append(ttRelayFrames([]byte("good")), 0xff, 0xff, 0xff, 0xff)
+	go b.Write(frames)
+	got, err := ttRelayReadBatch(t, relay, 8)
+	if err != nil || len(got) != 1 || string(got[0]) != "good" {
+		t.Fatalf("Read = %q, %v, want [good], nil", got, err)
+	}
+	if _, err = ttRelayReadBatch(t, relay, 8); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("Read of the oversized frame = %v, want an error that it exceeds the limit", err)
+	}
+}
+
+// ttRelayDiscardDev is a wgtun.Device that drops what it is written and never has a packet to read.
+type ttRelayDiscardDev struct{ *ttRelayFakeDev }
+
+func (d ttRelayDiscardDev) Write(bufs [][]byte, _ int) (int, error) { return len(bufs), nil }
+
+// BenchmarkRelayWrite sends 1400-byte packets through a relay device over loopback TCP, as Open's parent does to its helper, in the batches a caller gets from a BatchSize of 1 and of deviceBatch.
+func BenchmarkRelayWrite(b *testing.B) {
+	for _, batch := range []int{1, deviceBatch} {
+		b.Run(fmt.Sprintf("batch=%d", batch), func(b *testing.B) {
+			ln, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer ln.Close()
+			pumped := make(chan error, 1)
+			fake := ttRelayDiscardDev{ttRelayNewFakeDev()}
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					pumped <- err
+					return
+				}
+				pumped <- pump(fake, conn)
+			}()
+			conn, err := net.Dial("tcp4", ln.Addr().String())
+			if err != nil {
+				b.Fatal(err)
+			}
+			relay := newRelay(conn, "relay0", 1500)
+			bufs := make([][]byte, batch)
+			for i := range bufs {
+				bufs[i] = make([]byte, pumpOffset+1400)
+			}
+			b.SetBytes(1400)
+			b.ResetTimer()
+			for sent := 0; sent < b.N; sent += batch {
+				if _, err := relay.Write(bufs, pumpOffset); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			relay.Close()
+			fake.Close()
+			<-pumped
+		})
 	}
 }

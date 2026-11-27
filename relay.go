@@ -25,6 +25,9 @@ import (
 // packetMax bounds the payload of a packet frame.
 const packetMax = 65535
 
+// deviceBatch is how many packets a ringDevice or relayDevice takes per Read; a batch written to a relayDevice, or pumped from a ringDevice, costs one write of the conn.
+const deviceBatch = 32
+
 // pumpOffset is the headroom pump keeps in front of each packet, enough for a Linux TUN's virtio-net header.
 const pumpOffset = 16
 
@@ -75,7 +78,25 @@ func (d *relayDevice) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 		return 0, err
 	}
 	sizes[0] = n
-	return 1, nil
+	// The packets already buffered whole come along without another read of the conn.
+	count := 1
+	for ; count < len(bufs) && buffered(d.r); count++ {
+		if n, err = readPacket(d.r, bufs[count][offset:]); err != nil {
+			return count, err
+		}
+		sizes[count] = n
+	}
+	return count, nil
+}
+
+// buffered reports whether r holds a whole packet frame, so that reading it cannot block; a frame too large to be one is left for readPacket to refuse.
+func buffered(r *bufio.Reader) bool {
+	if r.Buffered() < 4 {
+		return false
+	}
+	size, _ := r.Peek(4)
+	n := binary.BigEndian.Uint32(size)
+	return n <= packetMax && r.Buffered()-4 >= int(n)
 }
 
 func (d *relayDevice) Write(bufs [][]byte, offset int) (int, error) {
@@ -95,7 +116,7 @@ func (d *relayDevice) Write(bufs [][]byte, offset int) (int, error) {
 func (d *relayDevice) MTU() (int, error)          { return d.mtu, nil }
 func (d *relayDevice) Name() (string, error)      { return d.name, nil }
 func (d *relayDevice) Events() <-chan wgtun.Event { return d.events }
-func (d *relayDevice) BatchSize() int             { return 1 }
+func (d *relayDevice) BatchSize() int             { return deviceBatch }
 
 func (d *relayDevice) Close() error {
 	var err error
