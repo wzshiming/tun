@@ -10,3 +10,6 @@
 
 # Output of the go coverage tool
 *.out
+
+# The command, built in the repository root with `go build ./cmd/tun`
+/tun

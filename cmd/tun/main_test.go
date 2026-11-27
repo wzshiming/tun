@@ -6,11 +6,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -49,42 +51,6 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestLogDialerListenPacketLogsEachNewTargetOnce(t *testing.T) {
-	var logged bytes.Buffer
-	flags, out := log.Flags(), log.Writer()
-	log.SetFlags(0)
-	log.SetOutput(&logged)
-	t.Cleanup(func() {
-		log.SetFlags(flags)
-		log.SetOutput(out)
-	})
-	var targets []net.PacketConn
-	for range 2 {
-		target, err := net.ListenPacket("udp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("listen for a target: %v", err)
-		}
-		defer target.Close()
-		targets = append(targets, target)
-	}
-	d := &logDialer{listen: &net.ListenConfig{}}
-	ctx := stack.WithClientAddr(context.Background(), &net.UDPAddr{IP: net.IPv4(198, 18, 0, 1), Port: 4000})
-	pc, err := d.ListenPacket(ctx, "udp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
-	}
-	defer pc.Close()
-	for _, target := range []net.PacketConn{targets[0], targets[1], targets[0], targets[1]} {
-		if _, err := pc.WriteTo([]byte("datagram"), target.LocalAddr()); err != nil {
-			t.Fatalf("WriteTo %v: %v", target.LocalAddr(), err)
-		}
-	}
-	want := "198.18.0.1:4000 -> udp " + targets[0].LocalAddr().String() + "\n198.18.0.1:4000 -> udp " + targets[1].LocalAddr().String() + "\n"
-	if got := logged.String(); got != want {
-		t.Errorf("logged %q, want one line per new target:\n%s", got, strings.TrimSpace(want))
-	}
-}
-
 type failingListener struct{ err error }
 
 func (l failingListener) Listen(context.Context, string, string) (net.Listener, error) {
@@ -104,14 +70,7 @@ func TestLogDialerListenUsesItsListenConfig(t *testing.T) {
 }
 
 func TestLogDialerListenPacketLogsItsFailure(t *testing.T) {
-	var logged bytes.Buffer
-	flags, out := log.Flags(), log.Writer()
-	log.SetFlags(0)
-	log.SetOutput(&logged)
-	t.Cleanup(func() {
-		log.SetFlags(flags)
-		log.SetOutput(out)
-	})
+	logged := testCaptureLog(t)
 	listenErr := errors.New("listen refused")
 	d := &logDialer{listen: failingListener{listenErr}}
 	ctx := stack.WithClientAddr(context.Background(), &net.UDPAddr{IP: net.IPv4(198, 18, 0, 1), Port: 4000})
@@ -157,20 +116,8 @@ func TestLogConnCloseWriteIsUnsupportedWithoutTheInnerOne(t *testing.T) {
 	}
 }
 
-// testClient is the source of every flow testServeUDP serves.
-var testClient = netip.MustParseAddrPort("198.18.0.1:4000")
-
-// testServeUDP serves newHandler with dnsTarget a UDP flow to target carrying one datagram, through a logDialer whose dials and listens all fail, and returns what it logged.
-func testServeUDP(t *testing.T, dnsTarget, target string) string {
-	to := netip.MustParseAddrPort(target)
-	session := stacktest.NewSession(testClient, to)
-	// A DNS query for the A record of example.com: the mirror at port 53 answers nothing else.
-	session.Send([]byte("\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01"), to)
-	return testServeLogged(t, dnsTarget, stacktest.NewFlow("udp", testClient, to, session))
-}
-
-// testServeLogged serves f with newHandler and the space-separated DNS targets of dnsTarget through a logDialer whose dials and listens all fail, and returns what it logged.
-func testServeLogged(t *testing.T, dnsTarget string, f *stacktest.Flow) string {
+// testCaptureLog returns what the log package writes until the test ends, without its date and time.
+func testCaptureLog(t *testing.T) *syncBuffer {
 	logged := &syncBuffer{}
 	flags, out := log.Flags(), log.Writer()
 	log.SetFlags(0)
@@ -179,6 +126,123 @@ func testServeLogged(t *testing.T, dnsTarget string, f *stacktest.Flow) string {
 		log.SetFlags(flags)
 		log.SetOutput(out)
 	})
+	return logged
+}
+
+// durations stands for the time a flow lasted, which no test fixes.
+var durations = regexp.MustCompile(` in \S+\n`)
+
+func TestLoggedLogsATCPFlowAndTheBytesItCarried(t *testing.T) {
+	captured := testCaptureLog(t)
+	conn, peer := net.Pipe()
+	t.Cleanup(func() {
+		conn.Close()
+		peer.Close()
+	})
+	go func() {
+		peer.Write([]byte("hello"))
+		io.Copy(io.Discard, peer)
+	}()
+	flow := stacktest.NewFlow("tcp", testClient, netip.MustParseAddrPort("192.0.2.9:443"), conn)
+	logged(stack.HandlerFunc(func(_ context.Context, f stack.Flow) {
+		c, err := f.Accept()
+		if err != nil {
+			t.Errorf("Accept: %v", err)
+			return
+		}
+		if _, err := io.ReadFull(c, make([]byte, 5)); err != nil {
+			t.Errorf("read the client's bytes: %v", err)
+		}
+		if _, err := c.Write([]byte("reply to it")); err != nil {
+			t.Errorf("write to the client: %v", err)
+		}
+	})).ServeFlow(t.Context(), flow)
+	want := "198.18.0.1:4000 -> tcp 192.0.2.9:443\n198.18.0.1:4000 -> tcp 192.0.2.9:443 closed: read 11, written 5 bytes in T\n"
+	if got := durations.ReplaceAllString(captured.String(), " in T\n"); got != want {
+		t.Errorf("logged %q, want %q", got, want)
+	}
+}
+
+func TestLoggedLogsAFlowLeftUnacceptedAsRejected(t *testing.T) {
+	for name, serve := range map[string]func(stack.Flow){
+		"rejected":   func(f stack.Flow) { f.Reject() },
+		"unanswered": func(stack.Flow) {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			captured := testCaptureLog(t)
+			flow := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.2:7"), netip.MustParseAddrPort("192.0.2.9:0"), nil)
+			logged(stack.HandlerFunc(func(_ context.Context, f stack.Flow) { serve(f) })).ServeFlow(t.Context(), flow)
+			want := "198.18.0.2 -> icmp 192.0.2.9\n198.18.0.2 -> icmp 192.0.2.9 rejected\n"
+			if got := captured.String(); got != want {
+				t.Errorf("logged %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestLoggedLogsEachFurtherTargetOfAUDPSessionOnce(t *testing.T) {
+	captured := testCaptureLog(t)
+	first, second := netip.MustParseAddrPort("192.0.2.9:5000"), netip.MustParseAddrPort("192.0.2.10:6000")
+	session := stacktest.NewSession(testClient, first)
+	for _, target := range []netip.AddrPort{first, second, first, second} {
+		session.Send([]byte("datagram"), target)
+	}
+	flow := stacktest.NewFlow("udp", testClient, first, session)
+	logged(stack.HandlerFunc(func(_ context.Context, f stack.Flow) {
+		c, err := f.Accept()
+		if err != nil {
+			t.Errorf("Accept: %v", err)
+			return
+		}
+		pc, ok := c.(net.PacketConn)
+		if !ok {
+			t.Errorf("the accepted conn of a udp flow is a %T, want a net.PacketConn", c)
+			return
+		}
+		buf := make([]byte, 64)
+		for range 4 {
+			if _, _, err := pc.ReadFrom(buf); err != nil {
+				t.Errorf("ReadFrom: %v", err)
+			}
+		}
+		if _, err := pc.WriteTo([]byte("reply"), net.UDPAddrFromAddrPort(second)); err != nil {
+			t.Errorf("WriteTo: %v", err)
+		}
+	})).ServeFlow(t.Context(), flow)
+	want := "198.18.0.1:4000 -> udp 192.0.2.9:5000\n198.18.0.1:4000 -> udp 192.0.2.10:6000\n198.18.0.1:4000 -> udp 192.0.2.9:5000 closed: read 5, written 32 bytes in T\n"
+	if got := durations.ReplaceAllString(captured.String(), " in T\n"); got != want {
+		t.Errorf("logged %q, want one line per new target and the session's bytes:\n%s", got, want)
+	}
+}
+
+func TestLogDialerLogsAFailedDial(t *testing.T) {
+	captured := testCaptureLog(t)
+	refused := errors.New("dial refused")
+	d := &logDialer{dialer: &net.Dialer{Control: func(string, string, syscall.RawConn) error { return refused }}}
+	ctx := stack.WithClientAddr(context.Background(), &net.TCPAddr{IP: net.IPv4(198, 18, 0, 1), Port: 4000})
+	if conn, err := d.DialContext(ctx, "tcp", "192.0.2.9:443"); !errors.Is(err, refused) {
+		t.Fatalf("DialContext = %v, %v; want the dialer's error", conn, err)
+	}
+	if got, want := captured.String(), "198.18.0.1:4000 -> tcp 192.0.2.9:443: dial tcp 192.0.2.9:443: dial refused\n"; got != want {
+		t.Errorf("logged %q, want the one line %q", got, want)
+	}
+}
+
+// testClient is the source of every flow testServeUDP serves.
+var testClient = netip.MustParseAddrPort("198.18.0.1:4000")
+
+// testServeUDP serves newHandler with dnsTarget a UDP flow to target carrying one datagram, as testServeLogged does.
+func testServeUDP(t *testing.T, dnsTarget, target, until string) string {
+	to := netip.MustParseAddrPort(target)
+	session := stacktest.NewSession(testClient, to)
+	// A DNS query for the A record of example.com: the mirror at port 53 answers nothing else.
+	session.Send([]byte("\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01"), to)
+	return testServeLogged(t, dnsTarget, stacktest.NewFlow("udp", testClient, to, session), until)
+}
+
+// testServeLogged serves f with newHandler and the space-separated DNS targets of dnsTarget through a logDialer whose dials and listens all fail, until it logged until, and returns what it logged once ServeFlow returned.
+func testServeLogged(t *testing.T, dnsTarget string, f *stacktest.Flow, until string) string {
+	logged := testCaptureLog(t)
 	refused := errors.New("dial refused")
 	d := &logDialer{
 		dialer: &net.Dialer{Control: func(string, string, syscall.RawConn) error { return refused }},
@@ -191,9 +255,9 @@ func testServeLogged(t *testing.T, dnsTarget string, f *stacktest.Flow) string {
 		h := newHandler(d, strings.Fields(dnsTarget), nil)
 		h.ServeFlow(ctx, f)
 	}()
-	for deadline := time.Now().Add(5 * time.Second); logged.String() == ""; time.Sleep(10 * time.Millisecond) {
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(logged.String(), until); time.Sleep(10 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatalf("nothing logged 5s after serving a %s flow to %v", f.Network(), f.Target())
+			t.Fatalf("logged %q 5s after serving a %s flow to %v, want it to hold %q", logged.String(), f.Network(), f.Target(), until)
 		}
 	}
 	cancel()
@@ -205,41 +269,48 @@ func testServeLogged(t *testing.T, dnsTarget string, f *stacktest.Flow) string {
 	return logged.String()
 }
 
+// The dials and listens of these tests all fail, so each shows as the line logDialer logs for a failure.
+const (
+	testFlowLine53   = "198.18.0.1:4000 -> udp 192.0.2.53:53\n"
+	testDialServer   = "198.18.0.1:4000 -> tcp 192.0.2.53:53: dial tcp 192.0.2.53:53: dial refused\n"
+	testDialTarget   = "198.18.0.1:4000 -> tcp 203.0.113.5:5353: dial tcp 203.0.113.5:5353: dial refused\n"
+	testDialTarget2  = "198.18.0.1:4000 -> tcp 203.0.113.6:53: dial tcp 203.0.113.6:53: dial refused\n"
+	testListenPacket = "198.18.0.1:4000 -> udp4 :0: listen refused\n"
+)
+
 func TestHandlerAsksServerOfUDPPort53OverTCP(t *testing.T) {
-	logged := testServeUDP(t, "", "192.0.2.53:53")
-	if first, _, _ := strings.Cut(logged, "\n"); first != "198.18.0.1:4000 -> tcp 192.0.2.53:53" {
-		t.Errorf("logged %q, want first the tcp dial line %q", logged, "198.18.0.1:4000 -> tcp 192.0.2.53:53")
+	logged := testServeUDP(t, "", "192.0.2.53:53", testDialServer)
+	if !strings.HasPrefix(logged, testFlowLine53+testDialServer) {
+		t.Errorf("logged %q, want first the flow's line and then the failed tcp dial %q", logged, testDialServer)
 	}
 }
 
 func TestHandlerAsksTheDNSTargetForUDPPort53OverTCP(t *testing.T) {
-	logged := testServeUDP(t, "203.0.113.5:5353", "192.0.2.53:53")
-	if first, _, _ := strings.Cut(logged, "\n"); first != "198.18.0.1:4000 -> tcp 203.0.113.5:5353" {
-		t.Errorf("logged %q, want first the tcp dial line %q to the -dns target", logged, "198.18.0.1:4000 -> tcp 203.0.113.5:5353")
+	logged := testServeUDP(t, "203.0.113.5:5353", "192.0.2.53:53", testDialTarget)
+	if !strings.HasPrefix(logged, testFlowLine53+testDialTarget) {
+		t.Errorf("logged %q, want first the flow's line and then the failed tcp dial %q to the -dns target", logged, testDialTarget)
 	}
 }
 
 func TestHandlerAsksTheNextDNSTargetWhenOneFails(t *testing.T) {
-	logged := testServeUDP(t, "203.0.113.5:5353 203.0.113.6:53", "192.0.2.53:53")
-	first := strings.Index(logged, "198.18.0.1:4000 -> tcp 203.0.113.5:5353\n")
-	second := strings.Index(logged, "198.18.0.1:4000 -> tcp 203.0.113.6:53\n")
-	if first != 0 || second <= first {
-		t.Errorf("logged %q, want the tcp dial line to the first -dns target and then the one to the second", logged)
+	logged := testServeUDP(t, "203.0.113.5:5353 203.0.113.6:53", "192.0.2.53:53", testDialTarget2)
+	if !strings.HasPrefix(logged, testFlowLine53+testDialTarget+testDialTarget2) {
+		t.Errorf("logged %q, want the failed tcp dial to the first -dns target and then the one to the second", logged)
 	}
 }
 
 func TestHandlerDoesNotDialTCPForOtherUDPPorts(t *testing.T) {
 	for _, dnsTarget := range []string{"", "203.0.113.5:5353"} {
-		if logged := testServeUDP(t, dnsTarget, "192.0.2.53:5353"); strings.Contains(logged, " -> tcp ") {
+		if logged := testServeUDP(t, dnsTarget, "192.0.2.53:5353", " closed: "); strings.Contains(logged, " -> tcp ") {
 			t.Errorf("logged %q for UDP to port 5353 with -dns %q, want no tcp dial", logged, dnsTarget)
 		}
 	}
 }
 
 func TestHandlerListensPacketsForOtherUDPPorts(t *testing.T) {
-	want := "198.18.0.1:4000 -> udp4 :0: listen refused"
-	if first, _, _ := strings.Cut(testServeUDP(t, "", "192.0.2.53:5353"), "\n"); first != want {
-		t.Errorf("logged first %q for UDP to port 5353, want the full cone ListenPacket line %q", first, want)
+	want := "198.18.0.1:4000 -> udp 192.0.2.53:5353\n" + testListenPacket
+	if logged := testServeUDP(t, "", "192.0.2.53:5353", testListenPacket); !strings.HasPrefix(logged, want) {
+		t.Errorf("logged %q for UDP to port 5353, want first the flow's line and then the failed full cone ListenPacket %q", logged, testListenPacket)
 	}
 }
 
@@ -250,13 +321,15 @@ func TestHandlerDialsTCPToTheFlowsTarget(t *testing.T) {
 		peer.Close()
 	})
 	to := netip.MustParseAddrPort("192.0.2.9:443")
-	logged := testServeLogged(t, "", stacktest.NewFlow("tcp", testClient, to, conn))
-	if first, _, _ := strings.Cut(logged, "\n"); first != "198.18.0.1:4000 -> tcp 192.0.2.9:443" {
-		t.Errorf("logged %q, want first the tcp dial line %q", logged, "198.18.0.1:4000 -> tcp 192.0.2.9:443")
+	logged := testServeLogged(t, "", stacktest.NewFlow("tcp", testClient, to, conn), " rejected\n")
+	want := "198.18.0.1:4000 -> tcp 192.0.2.9:443\n198.18.0.1:4000 -> tcp 192.0.2.9:443: dial tcp 192.0.2.9:443: dial refused\n198.18.0.1:4000 -> tcp 192.0.2.9:443 rejected\n"
+	if logged != want {
+		t.Errorf("logged %q, want the flow's line, its failed dial and its rejection:\n%s", logged, want)
 	}
 }
 
 func TestHandlerRejectsAnICMPSessionWithoutASocket(t *testing.T) {
+	testCaptureLog(t)
 	conn, peer := net.Pipe()
 	t.Cleanup(func() {
 		conn.Close()
@@ -277,9 +350,9 @@ func TestHandlerAsksTheDNSTargetForTCPPort53(t *testing.T) {
 		peer.Close()
 	})
 	go peer.Write([]byte("\x00\x1d\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01"))
-	logged := testServeLogged(t, "203.0.113.5:5353", stacktest.NewFlow("tcp", testClient, netip.MustParseAddrPort("192.0.2.53:53"), conn))
-	if first, _, _ := strings.Cut(logged, "\n"); first != "198.18.0.1:4000 -> tcp 203.0.113.5:5353" {
-		t.Errorf("logged %q, want first the tcp dial line %q to the -dns target", logged, "198.18.0.1:4000 -> tcp 203.0.113.5:5353")
+	logged := testServeLogged(t, "203.0.113.5:5353", stacktest.NewFlow("tcp", testClient, netip.MustParseAddrPort("192.0.2.53:53"), conn), testDialTarget)
+	if !strings.HasPrefix(logged, "198.18.0.1:4000 -> tcp 192.0.2.53:53\n"+testDialTarget) {
+		t.Errorf("logged %q, want first the flow's line and then the failed tcp dial %q to the -dns target", logged, testDialTarget)
 	}
 }
 
@@ -358,6 +431,7 @@ func (b *syncBuffer) String() string {
 }
 
 func TestHandlerAnswersICMPEchoToTheDeviceAddressesItself(t *testing.T) {
+	testCaptureLog(t)
 	conn, peer := net.Pipe()
 	t.Cleanup(func() {
 		conn.Close()
