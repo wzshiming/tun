@@ -1,4 +1,4 @@
-package stack_test
+package flow_test
 
 import (
 	"bufio"
@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wzshiming/tun/flow"
 	"github.com/wzshiming/tun/internal/stacktest"
-	"github.com/wzshiming/tun/stack"
 )
 
 // listenerWait bounds every wait.
@@ -59,7 +59,7 @@ type listenerEnv struct {
 }
 
 // listenerServe runs l on a tcp flow over a loopback conn until the test ends.
-func listenerServe(t *testing.T, l *stack.Listener) *listenerEnv {
+func listenerServe(t *testing.T, l *flow.Listener) *listenerEnv {
 	t.Helper()
 	accepted, peer := listenerPair(t)
 	env := &listenerEnv{flow: stacktest.NewFlow("tcp", listenerClient, listenerTarget, accepted), accepted: accepted, client: peer, done: make(chan struct{})}
@@ -96,9 +96,9 @@ func (e *listenerEnv) running(t *testing.T, during string) {
 }
 
 // listenerHTTP serves a new Listener with srv, plain or over TLS, until the test ends.
-func listenerHTTP(t *testing.T, srv *http.Server, overTLS bool) *stack.Listener {
+func listenerHTTP(t *testing.T, srv *http.Server, overTLS bool) *flow.Listener {
 	t.Helper()
-	l := stack.NewListener()
+	l := flow.NewListener()
 	go func() {
 		if overTLS {
 			srv.ServeTLS(l, "", "")
@@ -281,7 +281,7 @@ func TestListenerServesHTTPSWithHTTP2(t *testing.T) {
 }
 
 func TestListenerAcceptsAUDPSessionAsAPacketConn(t *testing.T) {
-	l := stack.NewListener()
+	l := flow.NewListener()
 	defer l.Close()
 	session := stacktest.NewSession(listenerClient, listenerTarget)
 	flow := stacktest.NewFlow("udp", listenerClient, listenerTarget, session)
@@ -326,7 +326,7 @@ func TestListenerAcceptsAUDPSessionAsAPacketConn(t *testing.T) {
 }
 
 func TestListenerLeavesAFlowNobodyAcceptsUnanswered(t *testing.T) {
-	l := stack.NewListener()
+	l := flow.NewListener()
 	flow := stacktest.NewFlow("tcp", listenerClient, listenerTarget, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -351,7 +351,7 @@ func TestListenerLeavesAFlowNobodyAcceptsUnanswered(t *testing.T) {
 }
 
 func TestListenerCloseFailsAcceptAndRejectsFlows(t *testing.T) {
-	l := stack.NewListener()
+	l := flow.NewListener()
 	waiting := stacktest.NewFlow("tcp", listenerClient, listenerTarget, nil)
 	done := make(chan struct{})
 	go func() {
@@ -377,7 +377,7 @@ func TestListenerCloseFailsAcceptAndRejectsFlows(t *testing.T) {
 }
 
 func TestListenerSkipsAFlowThatCannotBeAccepted(t *testing.T) {
-	l := stack.NewListener()
+	l := flow.NewListener()
 	defer l.Close()
 	gone := stacktest.NewFlow("tcp", listenerClient, listenerTarget, nil)
 	gone.Reject()

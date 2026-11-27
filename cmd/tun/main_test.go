@@ -22,14 +22,14 @@ import (
 	"time"
 
 	"github.com/wzshiming/tun"
+	"github.com/wzshiming/tun/flow"
 	"github.com/wzshiming/tun/internal/stacktest"
-	"github.com/wzshiming/tun/stack"
 )
 
 // logDialer must listen too, as newHandler's udp.Handler relays UDP full cone through it.
 var (
-	_ stack.ListenConfig = (*logDialer)(nil)
-	_ stack.Dialer       = (*logDialer)(nil)
+	_ flow.ListenConfig = (*logDialer)(nil)
+	_ flow.Dialer       = (*logDialer)(nil)
 )
 
 // testRunMainEnv set to 1 makes the test binary run main instead of the tests.
@@ -76,7 +76,7 @@ func TestLogDialerListenPacketLogsItsFailure(t *testing.T) {
 	logged := testCaptureLog(t)
 	listenErr := errors.New("listen refused")
 	d := &logDialer{listen: failingListener{listenErr}}
-	ctx := stack.WithClientAddr(context.Background(), &net.UDPAddr{IP: net.IPv4(198, 18, 0, 1), Port: 4000})
+	ctx := flow.WithClientAddr(context.Background(), &net.UDPAddr{IP: net.IPv4(198, 18, 0, 1), Port: 4000})
 	if pc, err := d.ListenPacket(ctx, "udp4", ":0"); !errors.Is(err, listenErr) {
 		t.Fatalf("ListenPacket = %v, %v; want the listener's error", pc, err)
 	}
@@ -146,8 +146,8 @@ func TestLoggedLogsATCPFlowAndTheBytesItCarried(t *testing.T) {
 		peer.Write([]byte("hello"))
 		io.Copy(io.Discard, peer)
 	}()
-	flow := stacktest.NewFlow("tcp", testClient, netip.MustParseAddrPort("192.0.2.9:443"), conn)
-	logged(stack.HandlerFunc(func(_ context.Context, f stack.Flow) {
+	served := stacktest.NewFlow("tcp", testClient, netip.MustParseAddrPort("192.0.2.9:443"), conn)
+	logged(flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 		c, err := f.Accept()
 		if err != nil {
 			t.Errorf("Accept: %v", err)
@@ -159,7 +159,7 @@ func TestLoggedLogsATCPFlowAndTheBytesItCarried(t *testing.T) {
 		if _, err := c.Write([]byte("reply to it")); err != nil {
 			t.Errorf("write to the client: %v", err)
 		}
-	})).ServeFlow(t.Context(), flow)
+	})).ServeFlow(t.Context(), served)
 	want := "198.18.0.1:4000 -> tcp 192.0.2.9:443\n198.18.0.1:4000 -> tcp 192.0.2.9:443 closed: read 11, written 5 bytes in T\n"
 	if got := durations.ReplaceAllString(captured.String(), " in T\n"); got != want {
 		t.Errorf("logged %q, want %q", got, want)
@@ -167,14 +167,14 @@ func TestLoggedLogsATCPFlowAndTheBytesItCarried(t *testing.T) {
 }
 
 func TestLoggedLogsAFlowLeftUnacceptedAsRejected(t *testing.T) {
-	for name, serve := range map[string]func(stack.Flow){
-		"rejected":   func(f stack.Flow) { f.Reject() },
-		"unanswered": func(stack.Flow) {},
+	for name, serve := range map[string]func(flow.Flow){
+		"rejected":   func(f flow.Flow) { f.Reject() },
+		"unanswered": func(flow.Flow) {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			captured := testCaptureLog(t)
-			flow := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.2:7"), netip.MustParseAddrPort("192.0.2.9:0"), nil)
-			logged(stack.HandlerFunc(func(_ context.Context, f stack.Flow) { serve(f) })).ServeFlow(t.Context(), flow)
+			served := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.2:7"), netip.MustParseAddrPort("192.0.2.9:0"), nil)
+			logged(flow.HandlerFunc(func(_ context.Context, f flow.Flow) { serve(f) })).ServeFlow(t.Context(), served)
 			want := "198.18.0.2 -> icmp 192.0.2.9\n198.18.0.2 -> icmp 192.0.2.9 rejected\n"
 			if got := captured.String(); got != want {
 				t.Errorf("logged %q, want %q", got, want)
@@ -190,8 +190,8 @@ func TestLoggedLogsEachFurtherTargetOfAUDPSessionOnce(t *testing.T) {
 	for _, target := range []netip.AddrPort{first, second, first, second} {
 		session.Send([]byte("datagram"), target)
 	}
-	flow := stacktest.NewFlow("udp", testClient, first, session)
-	logged(stack.HandlerFunc(func(_ context.Context, f stack.Flow) {
+	served := stacktest.NewFlow("udp", testClient, first, session)
+	logged(flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 		c, err := f.Accept()
 		if err != nil {
 			t.Errorf("Accept: %v", err)
@@ -211,7 +211,7 @@ func TestLoggedLogsEachFurtherTargetOfAUDPSessionOnce(t *testing.T) {
 		if _, err := pc.WriteTo([]byte("reply"), net.UDPAddrFromAddrPort(second)); err != nil {
 			t.Errorf("WriteTo: %v", err)
 		}
-	})).ServeFlow(t.Context(), flow)
+	})).ServeFlow(t.Context(), served)
 	want := "198.18.0.1:4000 -> udp 192.0.2.9:5000\n198.18.0.1:4000 -> udp 192.0.2.10:6000\n198.18.0.1:4000 -> udp 192.0.2.9:5000 closed: read 5, written 32 bytes in T\n"
 	if got := durations.ReplaceAllString(captured.String(), " in T\n"); got != want {
 		t.Errorf("logged %q, want one line per new target and the session's bytes:\n%s", got, want)
@@ -222,7 +222,7 @@ func TestLogDialerLogsAFailedDial(t *testing.T) {
 	captured := testCaptureLog(t)
 	refused := errors.New("dial refused")
 	d := &logDialer{dialer: &net.Dialer{Control: func(string, string, syscall.RawConn) error { return refused }}}
-	ctx := stack.WithClientAddr(context.Background(), &net.TCPAddr{IP: net.IPv4(198, 18, 0, 1), Port: 4000})
+	ctx := flow.WithClientAddr(context.Background(), &net.TCPAddr{IP: net.IPv4(198, 18, 0, 1), Port: 4000})
 	if conn, err := d.DialContext(ctx, "tcp", "192.0.2.9:443"); !errors.Is(err, refused) {
 		t.Fatalf("DialContext = %v, %v; want the dialer's error", conn, err)
 	}
@@ -338,10 +338,10 @@ func TestHandlerRejectsAnICMPSessionWithoutASocket(t *testing.T) {
 		conn.Close()
 		peer.Close()
 	})
-	flow := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.1:7"), netip.MustParseAddrPort("192.0.2.9:0"), conn)
+	served := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.1:7"), netip.MustParseAddrPort("192.0.2.9:0"), conn)
 	d := &logDialer{icmp: &net.ListenConfig{Control: func(string, string, syscall.RawConn) error { return errors.New("socket refused") }}}
-	newHandler(d, settings{readyPort: 80}).ServeFlow(t.Context(), flow)
-	if !flow.Rejected() {
+	newHandler(d, settings{readyPort: 80}).ServeFlow(t.Context(), served)
+	if !served.Rejected() {
 		t.Error("icmp flow not rejected though no ICMP socket can be opened")
 	}
 }
@@ -450,9 +450,9 @@ func TestHandlerAnswersICMPEchoToTheDeviceAddressesItself(t *testing.T) {
 		conn.Close()
 		peer.Close()
 	})
-	flow := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.2:7"), netip.MustParseAddrPort("198.18.0.1:0"), conn)
+	served := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.2:7"), netip.MustParseAddrPort("198.18.0.1:0"), conn)
 	d := &logDialer{icmp: &net.ListenConfig{Control: func(string, string, syscall.RawConn) error { return errors.New("socket refused") }}}
-	go newHandler(d, settings{tun: tun.Config{Addresses: []netip.Prefix{netip.MustParsePrefix("198.18.0.1/30")}}, readyPort: 80}).ServeFlow(t.Context(), flow)
+	go newHandler(d, settings{tun: tun.Config{Addresses: []netip.Prefix{netip.MustParsePrefix("198.18.0.1/30")}}, readyPort: 80}).ServeFlow(t.Context(), served)
 	peer.SetDeadline(time.Now().Add(10 * time.Second))
 	if _, err := peer.Write([]byte{8, 0, 0, 0, 0, 7, 0, 1, 'x'}); err != nil {
 		t.Fatalf("echo request to the device address: %v", err)

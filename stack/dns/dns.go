@@ -1,5 +1,5 @@
 // Package dns is a mirror DNS server: it answers the DNS queries of the conns it serves, over UDP and over TCP, with what the upstream DNS server answers, which it asks over TCP so that DNS keeps working through a proxy that only carries TCP, and keeps to answer later queries itself, also while the upstream is down.
-// Its Handler serves the conns of a net.Listener, which a stack.Listener mounted on a stack.Mux for both networks at the DNS port gives it, e.g. l := stack.NewListener(); m.Handle("udp", ":53", l); m.Handle("tcp", ":53", l); go h.Serve(l); the package registers nothing itself.
+// Its Handler serves the conns of a net.Listener, which a flow.Listener mounted on a flow.Mux for both networks at the DNS port gives it, e.g. l := flow.NewListener(); m.Handle("udp", ":53", l); m.Handle("tcp", ":53", l); go h.Serve(l); the package registers nothing itself.
 package dns
 
 import (
@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wzshiming/tun/stack"
+	"github.com/wzshiming/tun/flow"
 )
 
 // Handler serves a UDP session or a TCP conn as a DNS server that mirrors its upstream: every DNS query a client sends gets the answer of the upstream, which is the servers of Upstreams or else the server the client addressed, asked over TCP conns dialled through Dialer that all flows share.
@@ -22,7 +22,7 @@ import (
 // A reply too long for the client's UDP payload size, 512 bytes unless its OPT record tells more, is sent truncated, for the client to ask again over TCP.
 // Any other request is refused without asking upstream: a zone transfer, which takes more than one reply, with REFUSED, another opcode with NOTIMP, and a query of not exactly one question, or that does not parse, with FORMERR.
 type Handler struct {
-	Dialer stack.Dialer
+	Dialer flow.Dialer
 	// Upstreams, when set, are the host:port of the DNS servers mirrored, as one, for every query, whichever server the client addressed; replies still come back from that server. Empty mirrors each addressed server.
 	// A query goes to the first of them, and on to the next when one fails: when it cannot be dialled, does not answer within its share of Idle, which the servers not yet asked split evenly, or answers SERVFAIL; the reply of the last one asked stands.
 	// A server that failed to answer is asked after the others for the FailedFor that follows. Set them before the Handler serves flows.
@@ -80,7 +80,7 @@ func (h *Handler) idle() time.Duration {
 // A conn that is a net.PacketConn is served as a UDP session: each DNS query is answered from the server it was sent to, which ReadFrom returns as a *net.UDPAddr, with a WriteTo from that address.
 // Any other conn is served as a TCP one, which the client dialled to the server at its LocalAddr.
 // A conn is served until it idles or fails, a TCP one also once its client closed it and has every answer; it is then closed, and with the last conn served every upstream conn.
-// The dials for a conn carry its RemoteAddr as stack.ClientAddr.
+// The dials for a conn carry its RemoteAddr as flow.ClientAddr.
 func (h *Handler) Serve(l net.Listener) error {
 	for {
 		conn, err := l.Accept()
@@ -92,7 +92,7 @@ func (h *Handler) Serve(l net.Listener) error {
 }
 
 func (h *Handler) serveConn(conn net.Conn) {
-	ctx := stack.WithClientAddr(context.Background(), conn.RemoteAddr())
+	ctx := flow.WithClientAddr(context.Background(), conn.RemoteAddr())
 	if pc, ok := conn.(net.PacketConn); ok {
 		h.serve(ctx, conn, func(ctx context.Context, s *session) { s.serveUDP(ctx, pc) })
 		return

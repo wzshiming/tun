@@ -16,6 +16,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+
+	"github.com/wzshiming/tun/flow"
 )
 
 func TestServeNilHandlerAnswersUDPWithPortUnreachable(t *testing.T) {
@@ -33,7 +35,7 @@ func TestServeNilHandlerAnswersUDPWithPortUnreachable(t *testing.T) {
 
 func TestUDPWithoutHandlerIsDropped(t *testing.T) {
 	served := make(chan string, 4)
-	env := testServeMux(t, func(m *Mux) {
+	env := testServeMux(t, func(m *flow.Mux) {
 		m.Handle("tcp", "", testAnswer("tcp fallback", served))
 		m.Handle("udp", ":53", testAnswer("udp/53", served))
 	})
@@ -98,11 +100,11 @@ type udpRead struct {
 }
 
 // udpSessionServe serves handle as the udp fallback and counts its ServeFlow calls.
-func udpSessionServe(t *testing.T, handle func(context.Context, Flow)) (*testEnv, *atomic.Int32) {
+func udpSessionServe(t *testing.T, handle func(context.Context, flow.Flow)) (*testEnv, *atomic.Int32) {
 	t.Helper()
 	served := new(atomic.Int32)
-	env := testServeMux(t, func(m *Mux) {
-		m.Handle("udp", "", HandlerFunc(func(ctx context.Context, f Flow) {
+	env := testServeMux(t, func(m *flow.Mux) {
+		m.Handle("udp", "", flow.HandlerFunc(func(ctx context.Context, f flow.Flow) {
 			served.Add(1)
 			handle(ctx, f)
 		}))
@@ -170,7 +172,7 @@ func TestUDPSessionCarriesEveryTargetOfOneClientSocket(t *testing.T) {
 				reads          []udpRead
 			}
 			sessions := make(chan session, 4)
-			env, served := udpSessionServe(t, func(_ context.Context, f Flow) {
+			env, served := udpSessionServe(t, func(_ context.Context, f flow.Flow) {
 				s := session{target: f.Target(), client: f.Client()}
 				conn, err := f.Accept()
 				if err != nil {
@@ -201,7 +203,7 @@ func TestUDPSessionReadAndWriteAreTheConnectedView(t *testing.T) {
 	for _, fam := range udpFamilies {
 		t.Run(fam.name, func(t *testing.T) {
 			reads := make(chan string, 2)
-			env, _ := udpSessionServe(t, func(_ context.Context, f Flow) {
+			env, _ := udpSessionServe(t, func(_ context.Context, f flow.Flow) {
 				conn, err := f.Accept()
 				if err != nil {
 					return
@@ -237,7 +239,7 @@ func TestUDPSessionWriteToDeliversFromAnySource(t *testing.T) {
 	for _, fam := range udpFamilies {
 		t.Run(fam.name, func(t *testing.T) {
 			errs := make(chan error, 1)
-			env, _ := udpSessionServe(t, func(_ context.Context, f Flow) {
+			env, _ := udpSessionServe(t, func(_ context.Context, f flow.Flow) {
 				conn, err := f.Accept()
 				if err != nil {
 					errs <- err
@@ -264,7 +266,7 @@ func TestUDPSessionWriteToDeliversFromAnySource(t *testing.T) {
 func udpFixWriteFrom(t *testing.T, fam netip.Addr, src netip.AddrPort) (*gonet.UDPConn, error) {
 	t.Helper()
 	errs := make(chan error, 1)
-	env, _ := udpSessionServe(t, func(_ context.Context, f Flow) {
+	env, _ := udpSessionServe(t, func(_ context.Context, f flow.Flow) {
 		conn, err := f.Accept()
 		if err != nil {
 			errs <- err
@@ -322,7 +324,7 @@ func TestUDPSessionWriteToCarriesLargestDatagramAndRejectsLarger(t *testing.T) {
 	for _, fam := range udpFamilies {
 		t.Run(fam.name, func(t *testing.T) {
 			errs := make(chan error, 2)
-			env, _ := udpSessionServe(t, func(_ context.Context, f Flow) {
+			env, _ := udpSessionServe(t, func(_ context.Context, f flow.Flow) {
 				conn, err := f.Accept()
 				if err != nil {
 					errs <- err
@@ -363,7 +365,7 @@ func udpDatagram(size int, tag byte) []byte {
 
 func TestUDPSessionReadDeadlineTimesOutAndCanBeExtended(t *testing.T) {
 	reads := make(chan udpRead, 3)
-	env, _ := udpSessionServe(t, func(_ context.Context, f Flow) {
+	env, _ := udpSessionServe(t, func(_ context.Context, f flow.Flow) {
 		conn, err := f.Accept()
 		if err != nil {
 			return
@@ -427,7 +429,7 @@ func TestUDPSessionReadFromPastDeadlineTimesOutWithDatagramQueued(t *testing.T) 
 
 func TestUDPSessionClosedByHandlerFreesClientEndpoint(t *testing.T) {
 	release := make(chan struct{})
-	env, served := udpSessionServe(t, func(_ context.Context, f Flow) {
+	env, served := udpSessionServe(t, func(_ context.Context, f flow.Flow) {
 		conn, err := f.Accept()
 		if err != nil {
 			return
@@ -448,8 +450,8 @@ func TestUDPSessionClosedByHandlerFreesClientEndpoint(t *testing.T) {
 
 func TestUDPSessionRejectedByMuxIsRemoved(t *testing.T) {
 	reads := make(chan udpRead, 4)
-	env := testServeMux(t, func(m *Mux) {
-		m.Handle("udp", ":5353", HandlerFunc(func(_ context.Context, f Flow) {
+	env := testServeMux(t, func(m *flow.Mux) {
+		m.Handle("udp", ":5353", flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 			conn, err := f.Accept()
 			if err != nil {
 				return
@@ -485,14 +487,14 @@ func TestUDPSessionQueueDropsNewDatagramsBeyond128(t *testing.T) {
 	const sent = 128 + 10
 	accepted := make(chan net.Conn, 1)
 	release := make(chan struct{})
-	env := testServeMux(t, func(m *Mux) {
-		m.Handle("udp", "", HandlerFunc(func(_ context.Context, f Flow) {
+	env := testServeMux(t, func(m *flow.Mux) {
+		m.Handle("udp", "", flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 			if conn, err := f.Accept(); err == nil {
 				accepted <- conn
 			}
 			<-release
 		}))
-		m.Handle("tcp", "", HandlerFunc(func(_ context.Context, f Flow) {
+		m.Handle("tcp", "", flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 			if conn, err := f.Accept(); err == nil {
 				io.Copy(conn, conn)
 			}
@@ -531,7 +533,7 @@ func TestUDPDatagramWithBadChecksumIsDropped(t *testing.T) {
 	for _, fam := range udpFamilies {
 		t.Run(fam.name, func(t *testing.T) {
 			reads := make(chan udpRead, 4)
-			env, _ := udpSessionServe(t, func(_ context.Context, f Flow) {
+			env, _ := udpSessionServe(t, func(_ context.Context, f flow.Flow) {
 				conn, err := f.Accept()
 				if err != nil {
 					return
@@ -585,7 +587,7 @@ func testUDPPacket(src, dst netip.AddrPort, payload string, corrupt bool) []byte
 
 func TestServeCancelWakesUDPHandlerBlockedInReadFrom(t *testing.T) {
 	blocked := make(chan struct{})
-	env, _ := udpSessionServe(t, func(_ context.Context, f Flow) {
+	env, _ := udpSessionServe(t, func(_ context.Context, f flow.Flow) {
 		conn, err := f.Accept()
 		if err != nil {
 			return

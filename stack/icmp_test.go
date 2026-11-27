@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+
+	"github.com/wzshiming/tun/flow"
 )
 
 // testSilence is how long an echo request must stay unanswered.
@@ -33,8 +35,8 @@ type icmpEvent struct {
 }
 
 // testPong returns a handler that accepts every flow and answers each echo request with its echo reply, written under a wrong identifier and checksum, reporting what it read on events.
-func testPong(events chan<- icmpEvent) Handler {
-	return HandlerFunc(func(_ context.Context, f Flow) {
+func testPong(events chan<- icmpEvent) flow.Handler {
+	return flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 		conn, err := f.Accept()
 		if err != nil {
 			return
@@ -64,16 +66,16 @@ func testPong(events chan<- icmpEvent) Handler {
 func TestICMPEchoWithoutHandlerStaysUnanswered(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		handler Handler
+		handler flow.Handler
 	}{
 		{"nil handler", nil},
-		{"mux without icmp", func() Handler {
-			m := NewMux()
+		{"mux without icmp", func() flow.Handler {
+			m := flow.NewMux()
 			m.Handle("tcp", "", testEcho)
 			m.Handle("udp", "", testEcho)
 			return m
 		}()},
-		{"rejecting handler", RejectHandler()},
+		{"rejecting handler", flow.RejectHandler()},
 	} {
 		for _, fam := range icmpFamilies {
 			t.Run(tc.name+"/"+fam.name, func(t *testing.T) {
@@ -125,7 +127,7 @@ func TestICMPSessionWriteTakesOnlyEchoReplies(t *testing.T) {
 				errs          []error
 			}
 			results := make(chan result, 64)
-			env := testServeWith(t, Options{}, HandlerFunc(func(_ context.Context, f Flow) {
+			env := testServeWith(t, Options{}, flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 				conn, err := f.Accept()
 				if err != nil {
 					return
@@ -179,7 +181,7 @@ func TestServeDispatchesICMPByAddress(t *testing.T) {
 	for _, fam := range icmpFamilies {
 		t.Run(fam.name, func(t *testing.T) {
 			events := make(chan icmpEvent, 64)
-			env := testServeMux(t, func(m *Mux) { m.Handle("icmp", fam.other.String(), testPong(events)) })
+			env := testServeMux(t, func(m *flow.Mux) { m.Handle("icmp", fam.other.String(), testPong(events)) })
 			if testPing(t, env, fam.client, fam.other, testWait) == nil {
 				t.Fatalf("echo to %v, registered on the Mux, got no reply within %v", fam.other, testWait)
 			}

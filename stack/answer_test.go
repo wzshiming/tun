@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
+
+	"github.com/wzshiming/tun/flow"
 )
 
 const (
@@ -23,19 +25,19 @@ const (
 // answerCall is one ServeFlow call and what answering its flow at once returned.
 type answerCall struct {
 	ctx  context.Context
-	flow Flow
+	flow flow.Flow
 	conn net.Conn
 	err  error
 }
 
 // answerNever leaves a flow unanswered.
-func answerNever(Flow) (net.Conn, error) { return nil, nil }
+func answerNever(flow.Flow) (net.Conn, error) { return nil, nil }
 
 // answerServe serves with testAnswerTimeout a handler that passes each flow to answer, hands the call to the test and returns only when the test ends.
-func answerServe(t *testing.T, answer func(Flow) (net.Conn, error)) (*testEnv, <-chan answerCall) {
+func answerServe(t *testing.T, answer func(flow.Flow) (net.Conn, error)) (*testEnv, <-chan answerCall) {
 	t.Helper()
 	calls, release := make(chan answerCall, 4), make(chan struct{})
-	env := testServeWith(t, Options{AnswerTimeout: testAnswerTimeout}, HandlerFunc(func(ctx context.Context, f Flow) {
+	env := testServeWith(t, Options{AnswerTimeout: testAnswerTimeout}, flow.HandlerFunc(func(ctx context.Context, f flow.Flow) {
 		conn, err := answer(f)
 		calls <- answerCall{ctx, f, conn, err}
 		<-release
@@ -100,7 +102,7 @@ func TestFlowAcceptAfterAnswerTimeoutErrors(t *testing.T) {
 }
 
 func TestTCPFlowAcceptedWithinAnswerTimeoutOutlivesIt(t *testing.T) {
-	env, calls := answerServe(t, Flow.Accept)
+	env, calls := answerServe(t, flow.Flow.Accept)
 	client := env.dialTCP(t, "10.0.0.9:443")
 	call := testReceive(t, calls, "the handler's Accept")
 	if call.err != nil {

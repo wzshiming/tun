@@ -42,7 +42,7 @@ func (g *gateway) handleUDP(id stack.TransportEndpointID, pkt *stack.PacketBuffe
 		c, evicted = g.udp.open(&g.mu, &g.clock, client)
 		conn := &udpConn{session: c, s: g.s, netProto: pkt.NetworkProtocolNumber, target: d.target, client: client}
 		g.flows.Add(1)
-		go g.serve(&flow{
+		go g.serve(&capturedFlow{
 			network: "udp",
 			target:  d.target,
 			client:  client,

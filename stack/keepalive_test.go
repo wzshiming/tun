@@ -7,6 +7,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/wzshiming/tun/flow"
 )
 
 const (
@@ -27,7 +29,7 @@ func keepAliveServe(t *testing.T) (*testEnv, <-chan net.Conn) {
 	t.Helper()
 	conns, release := make(chan net.Conn, 4), make(chan struct{})
 	opts := Options{KeepAliveIdle: testKeepAliveIdle, KeepAliveInterval: testKeepAliveInterval}
-	env := testServeWith(t, opts, HandlerFunc(func(_ context.Context, f Flow) {
+	env := testServeWith(t, opts, flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 		if conn, err := f.Accept(); err == nil {
 			conns <- conn
 			<-release

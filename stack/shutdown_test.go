@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/wzshiming/tun/flow"
 )
 
 // shutdownReabortEvery sets Serve's re-abort interval and per-round hook until the test ends; call it before starting Serve.
@@ -20,8 +22,8 @@ func TestServeKeepsAbortingEndpointsWhileServeFlowIsOutstanding(t *testing.T) {
 	shutdownReabortEvery(t, 5*time.Millisecond, func() { rounds.Add(1) })
 	accepted := make(chan struct{}, 1)
 	// The handler ignores ctx and outlives the cancel until two re-abort rounds ran, or 2s passed.
-	env := testServeMux(t, func(m *Mux) {
-		m.Handle("tcp", "", HandlerFunc(func(_ context.Context, f Flow) {
+	env := testServeMux(t, func(m *flow.Mux) {
+		m.Handle("tcp", "", flow.HandlerFunc(func(_ context.Context, f flow.Flow) {
 			if _, err := f.Accept(); err != nil {
 				return
 			}
@@ -45,8 +47,8 @@ func TestServeKeepsAbortingEndpointsWhileServeFlowIsOutstanding(t *testing.T) {
 }
 
 func TestServeCancelWithoutFlowsReturnsWithin100ms(t *testing.T) {
-	env := testServeMux(t, func(m *Mux) {
-		m.Handle("tcp", "", HandlerFunc(func(context.Context, Flow) {}))
+	env := testServeMux(t, func(m *flow.Mux) {
+		m.Handle("tcp", "", flow.HandlerFunc(func(context.Context, flow.Flow) {}))
 	})
 	start := time.Now()
 	env.cancel()

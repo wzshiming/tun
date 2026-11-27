@@ -1,5 +1,5 @@
-// Package tcp relays a TCP flow to its target, dialled through a stack.Dialer, passing half-closes on between the two connections.
-// Mount its Handler on a stack.Mux for the "tcp" network, e.g. m.Handle("tcp", "", &tcp.Handler{Dialer: d}); the package registers nothing itself.
+// Package tcp relays a TCP flow to its target, dialled through a flow.Dialer, passing half-closes on between the two connections.
+// Mount its Handler on a flow.Mux for the "tcp" network, e.g. m.Handle("tcp", "", &tcp.Handler{Dialer: d}); the package registers nothing itself.
 package tcp
 
 import (
@@ -10,25 +10,25 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wzshiming/tun/stack"
+	"github.com/wzshiming/tun/flow"
 )
 
-var _ stack.Handler = (*Handler)(nil)
+var _ flow.Handler = (*Handler)(nil)
 
 // Handler serves a TCP flow by dialing its target through Dialer and passing the two connections' bytes into each other; it rejects other flows.
 type Handler struct {
-	Dialer stack.Dialer
+	Dialer flow.Dialer
 	// HalfCloseIdle ends a flow after this long without a byte in the direction a half-close left open; 0 means 60s.
 	HalfCloseIdle time.Duration
 }
 
 // ServeFlow dials f's target before accepting, so a failed dial resets the client, then passes half-closes on and ends with ctx or HalfCloseIdle, closing both conns.
-func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
+func (h *Handler) ServeFlow(ctx context.Context, f flow.Flow) {
 	if f.Network() != "tcp" {
 		f.Reject()
 		return
 	}
-	remote, err := h.Dialer.DialContext(stack.WithClientAddr(ctx, net.TCPAddrFromAddrPort(f.Client())), "tcp", f.Target().String())
+	remote, err := h.Dialer.DialContext(flow.WithClientAddr(ctx, net.TCPAddrFromAddrPort(f.Client())), "tcp", f.Target().String())
 	if err != nil {
 		f.Reject()
 		return

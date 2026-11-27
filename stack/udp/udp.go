@@ -1,5 +1,5 @@
 // Package udp relays the datagrams of a UDP session to their targets and the replies back to the client.
-// Mount its Handler on a stack.Mux for the "udp" network, e.g. m.Handle("udp", "", &udp.Handler{Dialer: d, ListenConfig: lc}); the package registers nothing itself.
+// Mount its Handler on a flow.Mux for the "udp" network, e.g. m.Handle("udp", "", &udp.Handler{Dialer: d, ListenConfig: lc}); the package registers nothing itself.
 package udp
 
 import (
@@ -12,17 +12,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wzshiming/tun/stack"
+	"github.com/wzshiming/tun/flow"
 )
 
-var _ stack.Handler = (*Handler)(nil)
+var _ flow.Handler = (*Handler)(nil)
 
 // Handler serves a UDP session by relaying its datagrams to their targets and the replies back to the client; it rejects other flows.
 type Handler struct {
 	// Dialer dials a "udp" conn per target when ListenConfig is nil.
-	Dialer stack.Dialer
+	Dialer flow.Dialer
 	// ListenConfig, when set, relays a session full cone: through one socket from its ListenPacket, to every target, delivering datagrams from any source.
-	ListenConfig stack.ListenConfig
+	ListenConfig flow.ListenConfig
 	// Idle ends a session after this long without datagrams either way to any target; 0 means 60s.
 	Idle time.Duration
 	// QueueLen is how many datagrams a target dialled through Dialer holds while it dials or sends; more are dropped. 0 means 64.
@@ -33,7 +33,7 @@ type Handler struct {
 // With ListenConfig set, it listens on one "udp4" or "udp6" socket, by the client's family, which sends the session's datagrams to their targets and returns every datagram it receives from its source; a failed listen ends the session.
 // Without ListenConfig, each target it sends to gets its own dialled conn, its datagrams relayed one for one and the replies sent back from that target; a failed dial or conn drops that target's datagrams until the next one dials again.
 // It uses such a dialled conn as a datagram conn: one Write per datagram, each Read taken as one reply into a buffer that holds any datagram, 65535 bytes, and Close; it calls no other method.
-func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
+func (h *Handler) ServeFlow(ctx context.Context, f flow.Flow) {
 	if f.Network() != "udp" {
 		f.Reject()
 		return
@@ -43,7 +43,7 @@ func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
 		return
 	}
 	defer conn.Close()
-	ctx = stack.WithClientAddr(ctx, net.UDPAddrFromAddrPort(f.Client()))
+	ctx = flow.WithClientAddr(ctx, net.UDPAddrFromAddrPort(f.Client()))
 	if h.ListenConfig != nil {
 		h.serveCone(ctx, conn, f.Client())
 		return

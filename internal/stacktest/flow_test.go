@@ -5,11 +5,11 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/wzshiming/tun/flow"
 	"github.com/wzshiming/tun/internal/stacktest"
-	"github.com/wzshiming/tun/stack"
 )
 
-var _ stack.Flow = (*stacktest.Flow)(nil)
+var _ flow.Flow = (*stacktest.Flow)(nil)
 
 var (
 	testClient = netip.MustParseAddrPort("10.0.0.2:40000")
