@@ -1,82 +1,257 @@
-// Package dns serves the DNS queries of a UDP session over TCP, each datagram a length-framed message, so DNS keeps working through a proxy that only carries TCP.
-// Mount its Handler on a stack.Mux for the "udp" network at the DNS port, e.g. m.Handle("udp", ":53", &dns.Handler{Dialer: d}); the package registers nothing itself.
+// Package dns is a mirror DNS server: it answers the DNS queries of the flows it serves, over UDP and over TCP, with what the upstream DNS server answers, which it asks over TCP so that DNS keeps working through a proxy that only carries TCP, and keeps to answer later queries itself, also while the upstream is down.
+// Mount its Handler on a stack.Mux for both networks at the DNS port, e.g. h := &dns.Handler{Dialer: d}; m.Handle("udp", ":53", h); m.Handle("tcp", ":53", h); the package registers nothing itself.
 package dns
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/binary"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/wzshiming/tun/stack"
-	"github.com/wzshiming/tun/stack/udp"
 )
 
 var _ stack.Handler = (*Handler)(nil)
 
-// Handler serves a UDP session by relaying the datagrams it sends to each server as length-framed messages over one TCP connection per server, dialled through Dialer and given Idle to connect, and the replies back from that server; a DNS query that an earlier reply still answers is answered from a cache all its sessions share, and one that a failed connection left unanswered is sent once more on a new one; it rejects other flows.
+// maxInFlight is how many queries of one flow may wait for their answers at once: a UDP session drops the queries beyond it, a TCP conn reads no more until one is answered.
+const maxInFlight = 64
+
+// Handler serves a UDP session or a TCP conn as a DNS server that mirrors its upstream: every DNS query a client sends gets the answer of the upstream, which is the servers of Upstreams or else the server the client addressed, asked over TCP conns dialled through Dialer that all flows share.
+// The replies are kept in a cache all flows share, and a query a kept reply answers is answered from it at once: within the lifetime the TTLs of the reply give it without asking upstream, and for Stale after with TTLs of 0, the upstream then being asked for a new reply once the client has its answer, so that a mirror whose upstream is down goes on answering what it has.
+// A query no kept reply answers goes upstream, once for the clients asking the same at once, is sent once more on a new conn if a failed one left it unanswered, and is answered with SERVFAIL if the upstream does not answer.
+// A reply too long for the client's UDP payload size, 512 bytes unless its OPT record tells more, is sent truncated, for the client to ask again over TCP.
+// Any other request is refused without asking upstream: a zone transfer, which takes more than one reply, with REFUSED, another opcode with NOTIMP, and a query of not exactly one question, or that does not parse, with FORMERR.
+// It rejects flows of other networks.
 type Handler struct {
 	Dialer stack.Dialer
-	// Target, when set, is the host:port every TCP connection dials instead of the server the client addressed; replies still come back from that server. Empty dials the addressed server.
-	Target string
-	// Idle ends a session after this long without datagrams either way to any server, and a TCP dial not back within it is abandoned; 0 means 10s.
+	// Upstreams, when set, are the host:port of the DNS servers mirrored, as one, for every query, whichever server the client addressed; replies still come back from that server. Empty mirrors each addressed server.
+	// A query goes to the first of them, and on to the next when one fails: when it cannot be dialled, does not answer within its share of Idle, which the servers not yet asked split evenly, or answers SERVFAIL; the reply of the last one asked stands.
+	// A server that failed to answer is asked after the others for the 30s that follow. Set them before the Handler serves flows.
+	Upstreams []string
+	// Idle ends a flow after this long without a message either way and none awaiting its answer; a query the upstream leaves unanswered, or a TCP dial not back, for this long is given up. 0 means 10s.
 	Idle time.Duration
 	// CacheSize is the most replies the cache keeps to answer later DNS queries with; 0 means 4096, a negative value disables the cache.
 	CacheSize int
 
-	// sized guards the one copy of CacheSize into cache, which the first session makes.
+	// Stale is how long past its lifetime a kept reply still answers, while the upstream is asked for a new one or does not give one; 0 means 24h, a negative value not at all.
+	Stale time.Duration
+
+	// sized guards the one copy of CacheSize and Stale into cache, which the first flow makes.
 	sized sync.Once
 	cache cache
+
+	// mu guards flows, the number of flows being served, links, the upstream conns by address, which last until no flow is served, flights, the DNS queries being asked upstream, and failed, when each server that failed to answer last did.
+	mu      sync.Mutex
+	flows   int
+	links   map[string]*link
+	flights map[origin]chan struct{}
+	failed  map[string]time.Time
+}
+
+// mirrored returns the upstream of a query sent to the server at addressed: the name the cache keeps its replies under and the addresses of its servers.
+func (h *Handler) mirrored(addressed string) (upstream string, servers []string) {
+	if len(h.Upstreams) == 0 {
+		return addressed, []string{addressed}
+	}
+	return strings.Join(h.Upstreams, " "), h.Upstreams
 }
 
 // answers returns the cache of h, sized by CacheSize.
 func (h *Handler) answers() *cache {
-	h.sized.Do(func() { h.cache.size = h.CacheSize })
+	h.sized.Do(func() { h.cache.size, h.cache.keep = h.CacheSize, h.Stale })
 	return &h.cache
 }
 
-// ServeFlow relays f until it idles, its conn fails or ctx ends, and then closes the session and every TCP conn.
-// A server whose dial or TCP conn fails loses only its own datagrams; its next one dials again.
+func (h *Handler) idle() time.Duration {
+	return cmp.Or(h.Idle, 10*time.Second)
+}
+
+// ServeFlow accepts f and answers its messages until it idles, its conn fails or ctx ends, a TCP conn also once its client closed it and has every answer; it then closes the conn, and with the last flow served every upstream conn.
 func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
-	if f.Network() != "udp" {
+	network := f.Network()
+	if network != "udp" && network != "tcp" {
 		f.Reject()
 		return
 	}
-	idle := cmp.Or(h.Idle, 10*time.Second)
-	(&udp.Handler{Dialer: upstreamDialer{h.Dialer, h.Target, idle, h.answers()}, Idle: idle}).ServeFlow(ctx, f)
-}
-
-// frameConn carries each Write as one message prefixed with its 2-byte big-endian length, and each Read returns one such message; only its first Close closes the conn, and with it ends the ctx of its dial.
-type frameConn struct {
-	net.Conn
-	release context.CancelFunc
-	closing sync.Once
-}
-
-func (c *frameConn) Write(message []byte) (int, error) {
-	frame := binary.BigEndian.AppendUint16(make([]byte, 0, 2+len(message)), uint16(len(message)))
-	if _, err := c.Conn.Write(append(frame, message...)); err != nil {
-		return 0, err
+	conn, err := f.Accept()
+	if err != nil {
+		return
 	}
-	return len(message), nil
-}
-
-// Read needs b to hold any message, 65535 bytes, as the buffer of upstream.receive does.
-func (c *frameConn) Read(b []byte) (int, error) {
-	var size [2]byte
-	if _, err := io.ReadFull(c.Conn, size[:]); err != nil {
-		return 0, err
+	defer conn.Close()
+	h.enter()
+	defer h.leave()
+	ctx, cancel := context.WithCancel(ctx)
+	s := &session{h: h, conn: conn, cancel: cancel, slots: make(chan struct{}, maxInFlight)}
+	defer s.workers.Wait()
+	defer s.end()
+	stop := context.AfterFunc(ctx, s.end)
+	defer stop()
+	defer s.watch(h.idle())()
+	if network == "udp" {
+		s.serveUDP(stack.WithClientAddr(ctx, net.UDPAddrFromAddrPort(f.Client())))
+	} else {
+		s.serveTCP(stack.WithClientAddr(ctx, net.TCPAddrFromAddrPort(f.Client())), f.Target().String())
 	}
-	return io.ReadFull(c.Conn, b[:binary.BigEndian.Uint16(size[:])])
 }
 
-func (c *frameConn) Close() error {
-	c.closing.Do(func() {
-		c.Conn.Close()
-		c.release()
+// enter counts one more flow served.
+func (h *Handler) enter() {
+	h.mu.Lock()
+	h.flows++
+	h.mu.Unlock()
+}
+
+// leave counts one flow less and, with none left, ends every upstream conn and dial.
+func (h *Handler) leave() {
+	h.mu.Lock()
+	h.flows--
+	var links map[string]*link
+	if h.flows == 0 {
+		links, h.links = h.links, nil
+	}
+	h.mu.Unlock()
+	for _, l := range links {
+		l.cancel()
+	}
+}
+
+// session is one flow being served.
+type session struct {
+	h    *Handler
+	conn net.Conn
+	// cancel ends the ctx of the answers.
+	cancel context.CancelFunc
+	ending sync.Once
+	// slots holds one token per query awaiting its answer, each on a goroutine of workers.
+	slots   chan struct{}
+	workers sync.WaitGroup
+	// touch pushes the idle end back.
+	touch func()
+}
+
+// end closes the conn and gives up the answers awaited.
+func (s *session) end() {
+	s.ending.Do(func() {
+		s.cancel()
+		s.conn.Close()
 	})
-	return nil
+}
+
+// watch ends s once idle passes without a touch while no query awaits its answer; stop ends the watch.
+func (s *session) watch(idle time.Duration) (stop func() bool) {
+	var timer *time.Timer
+	set := make(chan struct{})
+	timer = time.AfterFunc(idle, func() {
+		<-set
+		if len(s.slots) > 0 {
+			timer.Reset(idle)
+			return
+		}
+		s.end()
+	})
+	close(set)
+	s.touch = func() { timer.Reset(idle) }
+	return timer.Stop
+}
+
+// serveUDP answers each datagram of the session from the server it was sent to.
+func (s *session) serveUDP(ctx context.Context) {
+	pc, ok := s.conn.(net.PacketConn)
+	if !ok {
+		return
+	}
+	buf := make([]byte, 65535)
+	for {
+		n, addr, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		server, ok := addr.(*net.UDPAddr)
+		if !ok {
+			continue
+		}
+		s.touch()
+		select {
+		case s.slots <- struct{}{}:
+		default:
+			continue
+		}
+		query := bytes.Clone(buf[:n])
+		s.workers.Go(func() {
+			defer func() { <-s.slots }()
+			upstream, servers := s.h.mirrored(server.AddrPort().String())
+			reply, refresh := s.h.answer(ctx, upstream, servers, query)
+			if reply == nil {
+				return
+			}
+			if _, err := pc.WriteTo(fit(reply, query), server); err == nil {
+				s.touch()
+			}
+			if refresh != nil {
+				refresh()
+			}
+		})
+	}
+}
+
+// serveTCP answers each length-framed message of the conn, which the client dialled to the server at addressed, in the order the answers come, and returns once the client closed its side and has them all.
+func (s *session) serveTCP(ctx context.Context, addressed string) {
+	upstream, servers := s.h.mirrored(addressed)
+	var writing sync.Mutex
+	for {
+		query, err := readFrame(s.conn)
+		if err != nil {
+			break
+		}
+		s.touch()
+		select {
+		case s.slots <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		s.workers.Go(func() {
+			defer func() { <-s.slots }()
+			reply, refresh := s.h.answer(ctx, upstream, servers, query)
+			if reply == nil {
+				return
+			}
+			writing.Lock()
+			err := writeFrame(s.conn, reply)
+			writing.Unlock()
+			if err != nil {
+				s.end()
+				return
+			}
+			s.touch()
+			if refresh != nil {
+				refresh()
+			}
+		})
+	}
+	s.workers.Wait()
+}
+
+// readFrame reads one message prefixed with its 2-byte big-endian length.
+func readFrame(r io.Reader) ([]byte, error) {
+	var size [2]byte
+	if _, err := io.ReadFull(r, size[:]); err != nil {
+		return nil, err
+	}
+	message := make([]byte, binary.BigEndian.Uint16(size[:]))
+	if _, err := io.ReadFull(r, message); err != nil {
+		return nil, err
+	}
+	return message, nil
+}
+
+// writeFrame writes message, of at most 65535 bytes, prefixed with its 2-byte big-endian length in one Write.
+func writeFrame(w io.Writer, message []byte) error {
+	frame := binary.BigEndian.AppendUint16(make([]byte, 0, 2+len(message)), uint16(len(message)))
+	_, err := w.Write(append(frame, message...))
+	return err
 }
