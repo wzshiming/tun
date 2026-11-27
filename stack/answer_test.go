@@ -35,7 +35,7 @@ func answerNever(Flow) (net.Conn, error) { return nil, nil }
 func answerServe(t *testing.T, answer func(Flow) (net.Conn, error)) (*testEnv, <-chan answerCall) {
 	t.Helper()
 	calls, release := make(chan answerCall, 4), make(chan struct{})
-	env := testServeWith(t, Options{Addresses: testAddresses, AnswerTimeout: testAnswerTimeout}, HandlerFunc(func(ctx context.Context, f Flow) {
+	env := testServeWith(t, Options{AnswerTimeout: testAnswerTimeout}, HandlerFunc(func(ctx context.Context, f Flow) {
 		conn, err := answer(f)
 		calls <- answerCall{ctx, f, conn, err}
 		<-release

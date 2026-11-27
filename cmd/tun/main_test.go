@@ -188,7 +188,7 @@ func testServeLogged(t *testing.T, dnsTarget string, f *stacktest.Flow) string {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h := newHandler(d, strings.Fields(dnsTarget))
+		h := newHandler(d, strings.Fields(dnsTarget), nil)
 		h.ServeFlow(ctx, f)
 	}()
 	for deadline := time.Now().Add(5 * time.Second); logged.String() == ""; time.Sleep(10 * time.Millisecond) {
@@ -264,7 +264,7 @@ func TestHandlerRejectsAnICMPSessionWithoutASocket(t *testing.T) {
 	})
 	flow := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.1:7"), netip.MustParseAddrPort("192.0.2.9:0"), conn)
 	d := &logDialer{icmp: &net.ListenConfig{Control: func(string, string, syscall.RawConn) error { return errors.New("socket refused") }}}
-	newHandler(d, nil).ServeFlow(t.Context(), flow)
+	newHandler(d, nil, nil).ServeFlow(t.Context(), flow)
 	if !flow.Rejected() {
 		t.Error("icmp flow not rejected though no ICMP socket can be opened")
 	}
@@ -355,4 +355,24 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+func TestHandlerAnswersICMPEchoToTheDeviceAddressesItself(t *testing.T) {
+	conn, peer := net.Pipe()
+	t.Cleanup(func() {
+		conn.Close()
+		peer.Close()
+	})
+	flow := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.2:7"), netip.MustParseAddrPort("198.18.0.1:0"), conn)
+	d := &logDialer{icmp: &net.ListenConfig{Control: func(string, string, syscall.RawConn) error { return errors.New("socket refused") }}}
+	go newHandler(d, nil, []netip.Prefix{netip.MustParsePrefix("198.18.0.1/30")}).ServeFlow(t.Context(), flow)
+	peer.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := peer.Write([]byte{8, 0, 0, 0, 0, 7, 0, 1, 'x'}); err != nil {
+		t.Fatalf("echo request to the device address: %v", err)
+	}
+	reply := make([]byte, 64)
+	n, err := peer.Read(reply)
+	if want := []byte{0, 0, 0, 0, 0, 7, 0, 1, 'x'}; err != nil || !bytes.Equal(reply[:n], want) {
+		t.Fatalf("echo request to the device address got % x, %v, want the echo reply % x without any socket", reply[:n], err, want)
+	}
 }

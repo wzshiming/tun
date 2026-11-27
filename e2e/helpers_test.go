@@ -26,6 +26,7 @@ import (
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/stack"
 	"github.com/wzshiming/tun/stack/dns"
+	"github.com/wzshiming/tun/stack/icmp"
 	"github.com/wzshiming/tun/stack/tcp"
 	"github.com/wzshiming/tun/stack/udp"
 )
@@ -124,7 +125,7 @@ func ttOpen(t *testing.T, ctx context.Context, cfg tun.Config) *tun.Device {
 	return dev
 }
 
-// ttServeDev runs stack.Serve on dev until ctx ends, relaying TCP, DNS and, full cone, UDP to ttUDPEchoTarget's TEST-NET-2 prefix through dialer; the channel receives its result.
+// ttServeDev runs stack.Serve on dev until ctx ends, relaying TCP, DNS and, full cone, UDP to ttUDPEchoTarget's TEST-NET-2 prefix through dialer, and answering the ICMP echo to cfg's addresses; the channel receives its result.
 func ttServeDev(ctx context.Context, dev *tun.Device, cfg tun.Config, dialer *ttDialRecorder) <-chan error {
 	mux := stack.NewMux()
 	mux.Handle("tcp", "", &tcp.Handler{Dialer: dialer})
@@ -132,9 +133,12 @@ func ttServeDev(ctx context.Context, dev *tun.Device, cfg tun.Config, dialer *tt
 	mux.Handle("udp", ":53", mirror)
 	mux.Handle("tcp", ":53", mirror)
 	mux.Handle("udp", "198.51.100.0/24", &udp.Handler{Dialer: dialer, ListenConfig: dialer})
+	for _, address := range cfg.Addresses {
+		mux.Handle("icmp", address.Addr().String(), icmp.Echo{})
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- stack.Serve(ctx, dev, mux, stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
+		errCh <- stack.Serve(ctx, dev, mux, stack.Options{MTU: cfg.MTU})
 	}()
 	return errCh
 }

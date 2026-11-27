@@ -107,7 +107,7 @@ func run(ctx context.Context, cfg tun.Config, dnsTargets []string) error {
 
 	listen := bypass.NewListenConfig(capture)
 	dialer := &logDialer{dialer: bypass.NewDialer(capture), listen: listen, icmp: listen}
-	err = stack.Serve(ctx, dev.Device, newHandler(dialer, dnsTargets), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
+	err = stack.Serve(ctx, dev.Device, newHandler(dialer, dnsTargets, cfg.Addresses), stack.Options{MTU: cfg.MTU})
 	if ctx.Err() != nil {
 		log.Printf("interface %s down", dev.Interface)
 		return nil
@@ -116,9 +116,13 @@ func run(ctx context.Context, cfg tun.Config, dnsTargets []string) error {
 }
 
 // newHandler relays every flow through dialer, UDP full cone through its ListenPacket, and ICMP echo through sockets of its icmp config, and answers the DNS queries to port 53, of UDP and of TCP, as a mirror of the server they are addressed to, or of dnsTargets if any, which it asks over TCP.
-func newHandler(dialer *logDialer, dnsTargets []string) stack.Handler {
+// It answers itself the ICMP echo to addresses, those of the TUN device, which an OS that routes them into the device expects to be there.
+func newHandler(dialer *logDialer, dnsTargets []string, addresses []netip.Prefix) stack.Handler {
 	m := stack.NewMux()
 	m.Handle("icmp", "", &icmp.Handler{ListenConfig: dialer.icmp})
+	for _, address := range addresses {
+		m.Handle("icmp", address.Addr().String(), icmp.Echo{})
+	}
 	m.Handle("tcp", "", &tcp.Handler{Dialer: dialer})
 	m.Handle("udp", "", &udp.Handler{Dialer: dialer, ListenConfig: dialer})
 	mirror := &dns.Handler{Dialer: dialer, Upstreams: dnsTargets}

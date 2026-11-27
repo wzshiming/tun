@@ -15,13 +15,13 @@ import (
 // testSilence is how long an echo request must stay unanswered.
 const testSilence = time.Second
 
-// icmpFamilies are, per IP family, the client's address, the gateway's and two addresses that are not the gateway's.
+// icmpFamilies are, per IP family, the client's address and two addresses it pings.
 var icmpFamilies = []struct {
-	name                            string
-	client, gateway, other, another netip.Addr
+	name                   string
+	client, other, another netip.Addr
 }{
-	{"ipv4", testClient4, netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.9"), netip.MustParseAddr("10.0.0.10")},
-	{"ipv6", testClient6, netip.MustParseAddr("fd00::1"), netip.MustParseAddr("fd00::9"), netip.MustParseAddr("fd00::a")},
+	{"ipv4", testClient4, netip.MustParseAddr("10.0.0.9"), netip.MustParseAddr("10.0.0.10")},
+	{"ipv6", testClient6, netip.MustParseAddr("fd00::9"), netip.MustParseAddr("fd00::a")},
 }
 
 // icmpEvent is what a testPong session saw: its flow, then each echo request it read or the error that ended it.
@@ -61,23 +61,6 @@ func testPong(events chan<- icmpEvent) Handler {
 	})
 }
 
-func TestICMPEchoToGatewayIsAnsweredByTheStack(t *testing.T) {
-	for _, fam := range icmpFamilies {
-		t.Run(fam.name, func(t *testing.T) {
-			events := make(chan icmpEvent, 64)
-			env := testServeWith(t, Options{Addresses: testAddresses}, testPong(events))
-			if testPing(t, env, fam.client, fam.gateway, testWait) == nil {
-				t.Fatalf("echo to the gateway address %v got no reply within %v, want the stack to answer it", fam.gateway, testWait)
-			}
-			select {
-			case event := <-events:
-				t.Fatalf("the handler was served %+v, want echo to the gateway address never made a flow", event)
-			default:
-			}
-		})
-	}
-}
-
 func TestICMPEchoWithoutHandlerStaysUnanswered(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -94,11 +77,7 @@ func TestICMPEchoWithoutHandlerStaysUnanswered(t *testing.T) {
 	} {
 		for _, fam := range icmpFamilies {
 			t.Run(tc.name+"/"+fam.name, func(t *testing.T) {
-				env := testServeWith(t, Options{Addresses: testAddresses}, tc.handler)
-				// The gateway goes first: the client stack loses the replies to a ping that follows an unanswered one.
-				if testPing(t, env, fam.client, fam.gateway, testWait) == nil {
-					t.Fatalf("echo to the gateway address %v got no reply within %v", fam.gateway, testWait)
-				}
+				env := testServeWith(t, Options{}, tc.handler)
 				if reply := testPing(t, env, fam.client, fam.other, testSilence); reply != nil {
 					t.Fatalf("echo to %v was answered with % x, want it left without reply", fam.other, reply)
 				}
@@ -111,7 +90,7 @@ func TestICMPEchoFlowCarriesRequestsAndReplies(t *testing.T) {
 	for _, fam := range icmpFamilies {
 		t.Run(fam.name, func(t *testing.T) {
 			events := make(chan icmpEvent, 64)
-			env := testServeWith(t, Options{Addresses: testAddresses}, testPong(events))
+			env := testServeWith(t, Options{}, testPong(events))
 			reply := testPing(t, env, fam.client, fam.other, testWait)
 			if reply == nil {
 				t.Fatalf("echo to %v got no reply within %v, want the handler's", fam.other, testWait)
@@ -146,7 +125,7 @@ func TestICMPSessionWriteTakesOnlyEchoReplies(t *testing.T) {
 				errs          []error
 			}
 			results := make(chan result, 64)
-			env := testServeWith(t, Options{Addresses: testAddresses}, HandlerFunc(func(_ context.Context, f Flow) {
+			env := testServeWith(t, Options{}, HandlerFunc(func(_ context.Context, f Flow) {
 				conn, err := f.Accept()
 				if err != nil {
 					return
@@ -213,7 +192,7 @@ func TestServeDispatchesICMPByAddress(t *testing.T) {
 
 func TestICMPSessionBeyondTheLimitEndsTheOneIdleLongest(t *testing.T) {
 	events := make(chan icmpEvent, 1024)
-	env := testServeWith(t, Options{Addresses: testAddresses, MaxICMPSessions: 1}, testPong(events))
+	env := testServeWith(t, Options{MaxICMPSessions: 1}, testPong(events))
 	fam := icmpFamilies[0]
 	if testPing(t, env, fam.client, fam.other, testWait) == nil {
 		t.Fatalf("echo to %v got no reply within %v", fam.other, testWait)

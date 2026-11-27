@@ -22,7 +22,7 @@ type udpLimitEvent struct {
 func udpLimitServe(t *testing.T, limit int) (env *testEnv, events <-chan udpLimitEvent, release chan<- struct{}) {
 	t.Helper()
 	reported, held := make(chan udpLimitEvent, 64), make(chan struct{})
-	env = testServeWith(t, Options{Addresses: testAddresses, MaxUDPSessions: limit}, HandlerFunc(func(ctx context.Context, f Flow) {
+	env = testServeWith(t, Options{MaxUDPSessions: limit}, HandlerFunc(func(ctx context.Context, f Flow) {
 		conn, err := f.Accept()
 		if err != nil {
 			return

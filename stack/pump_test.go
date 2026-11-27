@@ -9,7 +9,7 @@ import (
 
 // Serve writes through buffers of the link MTU, so a packet that fills the MTU, and the fragments of one that exceeds it, must come through whole.
 func TestServeWritesPacketsUpToTheMTUAndFragmentsLargerOnes(t *testing.T) {
-	env := testServe(t, Options{Addresses: testAddresses})
+	env := testServe(t, Options{})
 	for _, tc := range []struct {
 		name    string
 		target  string

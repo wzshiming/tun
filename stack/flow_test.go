@@ -16,7 +16,7 @@ func testServeMux(t *testing.T, register func(m *Mux)) *testEnv {
 	t.Helper()
 	m := NewMux()
 	register(m)
-	return testServeWith(t, Options{Addresses: testAddresses}, m)
+	return testServeWith(t, Options{}, m)
 }
 
 // testAnswer returns a handler that sends name on served, accepts the flow and answers one datagram with name.
@@ -87,7 +87,7 @@ func TestServeRefusesTCPWithoutHandler(t *testing.T) {
 }
 
 func TestServeNilHandlerRefusesTCP(t *testing.T) {
-	env := testServeWith(t, Options{Addresses: testAddresses}, nil)
+	env := testServeWith(t, Options{}, nil)
 	env.dialTCPRefused(t, "10.0.0.9:443")
 }
 

@@ -32,8 +32,6 @@ const nicID tcpip.NICID = 1
 type Options struct {
 	// MTU is the link MTU of the stack; 0 takes the device's.
 	MTU int
-	// Addresses are the gateway's own addresses, whose ICMP echo requests Serve answers itself; those to any other address are flows for the handler.
-	Addresses []netip.Prefix
 	// AnswerTimeout is how long a handler may leave a TCP flow neither accepted nor rejected before Serve rejects it and ends its ctx; 0 means 30s.
 	AnswerTimeout time.Duration
 	// KeepAliveIdle is how long the client of an accepted TCP conn may stay silent before Serve sends it keepalive probes; 0 means 60s.
@@ -158,8 +156,6 @@ type gateway struct {
 	// keepAliveIdle and keepAliveInterval are Options.KeepAliveIdle and Options.KeepAliveInterval with their defaults, read once.
 	keepAliveIdle, keepAliveInterval time.Duration
 
-	// own holds Options.Addresses, the gateway's own.
-	own map[tcpip.Address]bool
 	// clock ticks with every datagram of a session, either way, which keeps the tick as its active.
 	clock atomic.Uint64
 
@@ -312,26 +308,6 @@ func (g *gateway) newStack(dev wgtun.Device, opts Options) (_ *stack.Stack, _ *c
 		{Destination: header.IPv6EmptySubnet, NIC: nicID},
 	})
 	g.s = s
-	g.own = make(map[tcpip.Address]bool, len(opts.Addresses))
-	for _, prefix := range opts.Addresses {
-		if !prefix.IsValid() {
-			return nil, nil, fmt.Errorf("stack: invalid address %v", prefix)
-		}
-		address := tcpip.ProtocolAddress{
-			Protocol: ipv4.ProtocolNumber,
-			AddressWithPrefix: tcpip.AddressWithPrefix{
-				Address:   tcpip.AddrFromSlice(prefix.Addr().AsSlice()),
-				PrefixLen: prefix.Bits(),
-			},
-		}
-		if prefix.Addr().Is6() {
-			address.Protocol = ipv6.ProtocolNumber
-		}
-		if e := s.AddProtocolAddress(nicID, address, stack.AddressProperties{}); e != nil {
-			return nil, nil, fmt.Errorf("stack: add address %v: %s", prefix, e)
-		}
-		g.own[address.AddressWithPrefix.Address] = true
-	}
 	s.SetTransportProtocolHandler(icmp.ProtocolNumber4, g.handleICMP)
 	s.SetTransportProtocolHandler(icmp.ProtocolNumber6, g.handleICMP)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(s, 0, 2048, g.forwardTCP).HandlePacket)
