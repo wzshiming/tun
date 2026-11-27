@@ -42,7 +42,7 @@ var udpFamilies = []struct {
 	{"ipv6", netip.MustParseAddrPort("[fd00::2]:40000"), netip.MustParseAddrPort("[fd00::9]:5000"), netip.MustParseAddrPort("[fd00::a]:6000"), netip.MustParseAddrPort("[fd00::77]:7777")},
 }
 
-// testEnv is one ServeFlow of a Handler on a session double.
+// testEnv is one ServeFlow of a Handler or a Cone on a session double.
 type testEnv struct {
 	client, target netip.AddrPort
 	flow           *stacktest.Flow
@@ -52,13 +52,13 @@ type testEnv struct {
 }
 
 // testServe serves h a "udp" session of client whose first datagram goes to target until the test ends.
-func testServe(t *testing.T, h *Handler, client, target netip.AddrPort) *testEnv {
+func testServe(t *testing.T, h stack.Handler, client, target netip.AddrPort) *testEnv {
 	t.Helper()
 	return testServeCtx(t, context.Background(), h, "udp", client, target)
 }
 
 // testServeCtx serves h, under ctx, a flow of network from client to target whose conn is a session double.
-func testServeCtx(t *testing.T, ctx context.Context, h *Handler, network string, client, target netip.AddrPort) *testEnv {
+func testServeCtx(t *testing.T, ctx context.Context, h stack.Handler, network string, client, target netip.AddrPort) *testEnv {
 	t.Helper()
 	ctx, cancel := context.WithCancel(ctx)
 	env := &testEnv{client: client, target: target, session: stacktest.NewSession(client, target), cancel: cancel, done: make(chan struct{})}
@@ -373,7 +373,7 @@ func (tg *udpRelayTarget) send(t *testing.T, datagram []byte) {
 
 func (tg *udpRelayTarget) gone() <-chan struct{} { return tg.dialled.closed }
 
-// relayEnd is one target's end of a session the Handler serves, in either mode.
+// relayEnd is one target's end of a session a Handler or a Cone serves.
 type relayEnd interface {
 	// recv reads one datagram the Handler sent the target.
 	recv(t *testing.T) []byte
@@ -389,29 +389,28 @@ type relayOpener interface {
 	opens() int
 }
 
-// relayMode sets up a Handler for one of its modes.
+// relayMode sets up one of the package's two handlers, a Handler or a Cone, with the given Idle.
 type relayMode struct {
 	name  string
-	setup func(t *testing.T, h *Handler) relayOpener
+	setup func(t *testing.T, idle time.Duration) (stack.Handler, relayOpener)
 }
 
-// relayModes are the Handler's modes, for the tests holding in each.
+// relayModes are the package's handlers, for the tests holding of each.
 var relayModes = []relayMode{
-	{"symmetric", func(t *testing.T, h *Handler) relayOpener {
+	{"symmetric", func(t *testing.T, idle time.Duration) (stack.Handler, relayOpener) {
 		d := newUDPRelayDialer(t)
-		h.Dialer = d
-		return relayDialled{d}
+		return &Handler{Dialer: d, Idle: idle}, relayDialled{d}
 	}},
-	{"full cone", func(t *testing.T, h *Handler) relayOpener {
-		listener, _ := coneSetup(t, h)
-		return listener
+	{"full cone", func(t *testing.T, idle time.Duration) (stack.Handler, relayOpener) {
+		h := &Cone{Idle: idle}
+		return h, coneSetup(t, h)
 	}},
 }
 
-// serve sets h up in mode and serves it a session of testClient to 10.0.0.9:5000.
-func (mode relayMode) serve(t *testing.T, h *Handler) (*testEnv, relayOpener) {
+// serve sets mode's handler up with idle and serves it a session of testClient to 10.0.0.9:5000.
+func (mode relayMode) serve(t *testing.T, idle time.Duration) (*testEnv, relayOpener) {
 	t.Helper()
-	opener := mode.setup(t, h)
+	h, opener := mode.setup(t, idle)
 	return testServe(t, h, testClient, udpFamilies[0].first), opener
 }
 
@@ -699,12 +698,12 @@ func (c coneStalled) ReadFrom(b []byte) (int, net.Addr, error) {
 
 func (c coneStalled) WriteTo(b []byte, _ net.Addr) (int, error) { return c.Write(b) }
 
-// coneSetup gives h a fresh coneListener as its ListenConfig and a udpRelayDialer as its Dialer.
-func coneSetup(t *testing.T, h *Handler) (*coneListener, *udpRelayDialer) {
+// coneSetup gives h a fresh coneListener as its ListenConfig.
+func coneSetup(t *testing.T, h *Cone) *coneListener {
 	t.Helper()
-	listener, dialer := newConeListener(t), newUDPRelayDialer(t)
-	h.ListenConfig, h.Dialer = listener, dialer
-	return listener, dialer
+	listener := newConeListener(t)
+	h.ListenConfig = listener
+	return listener
 }
 
 // udpRelayDatagram returns size bytes marked with tag.

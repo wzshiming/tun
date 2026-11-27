@@ -132,7 +132,7 @@ func ttServeDev(ctx context.Context, dev *tun.Device, cfg tun.Config, dialer *tt
 	mirror := &dns.Handler{Dialer: dialer}
 	mux.Handle("udp", ":53", mirror)
 	mux.Handle("tcp", ":53", mirror)
-	mux.Handle("udp", "198.51.100.0/24", &udp.Handler{Dialer: dialer, ListenConfig: dialer})
+	mux.Handle("udp", "198.51.100.0/24", &udp.Cone{ListenConfig: dialer})
 	for _, address := range cfg.Addresses {
 		mux.Handle("icmp", address.Addr().String(), icmp.Echo{})
 	}

@@ -23,7 +23,7 @@ import (
 	"github.com/wzshiming/tun/stack"
 )
 
-// logDialer must listen too, as newHandler's udp.Handler relays UDP full cone through it.
+// logDialer must listen too, as newHandler's udp.Cone relays UDP full cone through it.
 var (
 	_ stack.ListenConfig = (*logDialer)(nil)
 	_ stack.Dialer       = (*logDialer)(nil)

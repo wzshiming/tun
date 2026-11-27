@@ -15,8 +15,8 @@ import (
 func TestConeListensOnceAndRelaysEverySource(t *testing.T) {
 	for _, fam := range udpFamilies {
 		t.Run(fam.name, func(t *testing.T) {
-			h := &Handler{}
-			listener, dialer := coneSetup(t, h)
+			h := &Cone{}
+			listener := coneSetup(t, h)
 			env := testServe(t, h, fam.client, fam.first)
 			env.sendTo([]byte("to first"), fam.first)
 			first := listener.nextCone(t, env)
@@ -37,9 +37,6 @@ func TestConeListensOnceAndRelaysEverySource(t *testing.T) {
 			}
 			if got, want := calls[0].client, net.Addr(net.UDPAddrFromAddrPort(fam.client)); !sameAddr(got, want) {
 				t.Fatalf("ClientAddr(ListenPacket ctx) = %T %v, want the client's %T %v", got, got, want, want)
-			}
-			if dials := dialer.recorded(); len(dials) != 0 {
-				t.Fatalf("dialer.DialContext calls %+v, want none with ListenConfig set", dials)
 			}
 			second.send(t, []byte("from second"))
 			if got, want := env.reply(t), (udpRead{"from second", fam.second}); got != want {
@@ -65,8 +62,8 @@ func TestConeListensOnceAndRelaysEverySource(t *testing.T) {
 }
 
 func TestConeListenFailureEndsSessionAndNextSessionListensAgain(t *testing.T) {
-	h := &Handler{}
-	listener, _ := coneSetup(t, h)
+	h := &Cone{}
+	listener := coneSetup(t, h)
 	listener.fail(errors.New("cone test listen failure"))
 	env := testServe(t, h, testClient, udpFamilies[0].first)
 	env.send("first")
@@ -80,8 +77,8 @@ func TestConeListenFailureEndsSessionAndNextSessionListensAgain(t *testing.T) {
 }
 
 func TestConeIdleEndsSessionAndNextSessionListensAgain(t *testing.T) {
-	h := &Handler{Idle: 200 * time.Millisecond}
-	listener, _ := coneSetup(t, h)
+	h := &Cone{Idle: 200 * time.Millisecond}
+	listener := coneSetup(t, h)
 	env := testServe(t, h, testClient, udpFamilies[0].first)
 	env.send("open")
 	target := listener.nextCone(t, env)
@@ -94,8 +91,8 @@ func TestConeIdleEndsSessionAndNextSessionListensAgain(t *testing.T) {
 
 func TestConeClosesEachSessionSocketOnce(t *testing.T) {
 	const sessions = 5
-	h := &Handler{}
-	listener, _ := coneSetup(t, h)
+	h := &Cone{}
+	listener := coneSetup(t, h)
 	fam := udpFamilies[0]
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -118,8 +115,8 @@ func TestConeClosesEachSessionSocketOnce(t *testing.T) {
 
 func TestConeWriteFailureDropsOnlyThatDatagram(t *testing.T) {
 	fam := udpFamilies[0]
-	h := &Handler{}
-	listener, _ := coneSetup(t, h)
+	h := &Cone{}
+	listener := coneSetup(t, h)
 	listener.refuseWrites(fam.second)
 	env := testServe(t, h, fam.client, fam.first)
 	env.sendTo([]byte("open"), fam.first)
@@ -136,8 +133,8 @@ func TestConeWriteFailureDropsOnlyThatDatagram(t *testing.T) {
 }
 
 func TestConeReadErrorEndsSessionAndNextSessionListensAgain(t *testing.T) {
-	h := &Handler{}
-	listener, _ := coneSetup(t, h)
+	h := &Cone{}
+	listener := coneSetup(t, h)
 	env := testServe(t, h, testClient, udpFamilies[0].first)
 	env.send("open")
 	target := listener.nextCone(t, env)
@@ -155,8 +152,8 @@ func TestConeReadErrorEndsSessionAndNextSessionListensAgain(t *testing.T) {
 }
 
 func TestConeCancelEndsStalledSession(t *testing.T) {
-	h := &Handler{}
-	listener, _ := coneSetup(t, h)
+	h := &Cone{}
+	listener := coneSetup(t, h)
 	listener.stall()
 	env := testServe(t, h, testClient, udpFamilies[0].first)
 	env.send("datagram")
@@ -196,7 +193,7 @@ func TestSymmetricDialsIPv6InBracketForm(t *testing.T) {
 func TestKeepsDatagramsWholeAndInOrderBothWays(t *testing.T) {
 	for _, mode := range relayModes {
 		t.Run(mode.name, func(t *testing.T) {
-			env, opener := mode.serve(t, &Handler{})
+			env, opener := mode.serve(t, 0)
 			sizes := []int{1, 512, 1400}
 			for i, size := range sizes {
 				env.sendTo(udpRelayDatagram(size, byte(i)), env.target)
@@ -223,7 +220,7 @@ func TestKeepsDatagramsAbove32KiBWholeBothWays(t *testing.T) {
 	for _, mode := range relayModes {
 		for _, size := range []int{40000, 65507} {
 			t.Run(fmt.Sprint(mode.name, " ", size, " from the client"), func(t *testing.T) {
-				env, opener := mode.serve(t, &Handler{})
+				env, opener := mode.serve(t, 0)
 				env.sendTo(udpRelayDatagram(size, 1), env.target)
 				if got := opener.next(t, env).recv(t); !bytes.Equal(got, udpRelayDatagram(size, 1)) {
 					t.Fatalf("target got a %d-byte datagram, want the client's %d bytes unchanged", len(got), size)
@@ -243,7 +240,7 @@ func TestKeepsDatagramsAbove32KiBWholeBothWays(t *testing.T) {
 func TestTargetReusesItsSocket(t *testing.T) {
 	for _, mode := range relayModes {
 		t.Run(mode.name, func(t *testing.T) {
-			env, opener := mode.serve(t, &Handler{})
+			env, opener := mode.serve(t, 0)
 			env.send("first")
 			target := opener.next(t, env)
 			target.recv(t)
@@ -331,8 +328,7 @@ func TestSymmetricDialledReadErrorDropsTargetAndRedials(t *testing.T) {
 func udpRelayTwoTargets(t *testing.T, mode relayMode, idle time.Duration) (env *testEnv, opener relayOpener, first, second relayEnd) {
 	t.Helper()
 	fam := udpFamilies[0]
-	h := &Handler{Idle: idle}
-	opener = mode.setup(t, h)
+	h, opener := mode.setup(t, idle)
 	env = testServe(t, h, fam.client, fam.first)
 	env.sendTo([]byte("to first"), fam.first)
 	first = opener.next(t, env)
@@ -486,7 +482,7 @@ func TestHandlerIdleDefaultsTo60Seconds(t *testing.T) {
 // udpRelayOpen serves a Handler{Idle: idle} in mode a session and returns it and its target once the first datagram arrived.
 func udpRelayOpen(t *testing.T, mode relayMode, idle time.Duration) (*testEnv, relayEnd) {
 	t.Helper()
-	env, opener := mode.serve(t, &Handler{Idle: idle})
+	env, opener := mode.serve(t, idle)
 	env.send("open")
 	target := opener.next(t, env)
 	target.recv(t)
@@ -583,8 +579,8 @@ func TestCancelReturnsWithinBoundWithStalledRemote(t *testing.T) {
 		}
 	})
 	t.Run("full cone", func(t *testing.T) {
-		h := &Handler{}
-		listener, _ := coneSetup(t, h)
+		h := &Cone{}
+		listener := coneSetup(t, h)
 		listener.stall()
 		env := testServe(t, h, testClient, udpFamilies[0].first)
 		env.send("datagram")
@@ -599,21 +595,17 @@ func TestCancelReturnsWithinBoundWithStalledRemote(t *testing.T) {
 }
 
 func TestRejectsOtherNetworks(t *testing.T) {
-	for _, cone := range []bool{false, true} {
-		t.Run(fmt.Sprint("ListenConfig set ", cone), func(t *testing.T) {
-			h := &Handler{}
-			listener, dialer := coneSetup(t, h)
-			if !cone {
-				h.ListenConfig = nil
-			}
+	for _, mode := range relayModes {
+		t.Run(mode.name, func(t *testing.T) {
+			h, opener := mode.setup(t, 0)
 			env := testServeCtx(t, context.Background(), h, "tcp", testClient, udpFamilies[0].first)
 			env.send("datagram")
 			env.waitDone(t, testWait, "serving a tcp flow")
 			if !env.flow.Rejected() || env.flow.Accepted() {
 				t.Fatalf("tcp flow rejected %v and accepted %v, want rejected and never accepted", env.flow.Rejected(), env.flow.Accepted())
 			}
-			if dials, calls := dialer.recorded(), listener.recorded(); len(dials) != 0 || len(calls) != 0 {
-				t.Fatalf("tcp flow dialled %+v and listened %+v, want neither", dials, calls)
+			if opens := opener.opens(); opens != 0 {
+				t.Fatalf("tcp flow opened %d conns or sockets, want none", opens)
 			}
 		})
 	}

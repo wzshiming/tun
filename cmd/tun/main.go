@@ -125,7 +125,7 @@ func newHandler(dialer *logDialer, dnsTargets []string, addresses []netip.Prefix
 		m.Handle("icmp", address.Addr().String(), icmp.Echo{})
 	}
 	m.Handle("tcp", "", &tcp.Handler{Dialer: dialer})
-	m.Handle("udp", "", &udp.Handler{Dialer: dialer, ListenConfig: dialer})
+	m.Handle("udp", "", &udp.Cone{ListenConfig: dialer})
 	mirror := &dns.Handler{Dialer: dialer, Upstreams: dnsTargets}
 	m.Handle("udp", ":53", mirror)
 	m.Handle("tcp", ":53", mirror)
