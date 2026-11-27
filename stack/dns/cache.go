@@ -138,6 +138,8 @@ func lifetime(reply []byte, id uint16, q question) time.Duration {
 type cache struct {
 	// size is the most entries kept: 0 means 4096, a negative size none.
 	size int
+	// keep is how long past its lifetime an entry still answers as stale: 0 means 24h, a negative value not at all.
+	keep time.Duration
 	// now is the clock, time.Now if nil.
 	now func() time.Time
 
@@ -152,10 +154,13 @@ type origin struct {
 	key
 }
 
-// entry is a reply as its upstream sent it, which answers queries from stored until expires.
+// refreshRetry is how long a stale entry waits after one refresh was due before the next is.
+const refreshRetry = 5 * time.Second
+
+// entry is a reply as its upstream sent it, which answers queries from stored until expires and, as stale, for the keep of its cache after; retry is when its next refresh is due.
 type entry struct {
-	reply           []byte
-	stored, expires time.Time
+	reply                  []byte
+	stored, expires, retry time.Time
 }
 
 // limit returns the most entries c keeps, which is none unless it is positive.
@@ -206,13 +211,11 @@ func (c *cache) put(upstream string, k key, reply []byte, life time.Duration) {
 		c.entries = make(map[origin]entry)
 	}
 	now := c.clock()
-	c.entries[at] = entry{bytes.Clone(reply), now, now.Add(life)}
+	c.entries[at] = entry{reply: bytes.Clone(reply), stored: now, expires: now.Add(life)}
 }
 
-// get answers query, a DNS query of key k to upstream, with the reply kept for such queries, unless c keeps none, its lifetime has passed or the clock was set back to before c kept it, which drops it: the reply gets the ID and the question of query, loses from each TTL the whole seconds it was kept, and has an OPT record, without options, only if query has one too.
-func (c *cache) get(upstream string, k key, query []byte) ([]byte, bool) {
-	at := origin{upstream, k}
-	c.mu.Lock()
+// held returns the entry at and the time, unless c keeps none there or the clock was set back to before c kept it, which drops it; the caller holds c.mu.
+func (c *cache) held(at origin) (entry, time.Time, bool) {
 	e, ok := c.entries[at]
 	now := c.clock()
 	if ok && now.Before(e.stored) {
@@ -220,10 +223,42 @@ func (c *cache) get(upstream string, k key, query []byte) ([]byte, bool) {
 		delete(c.entries, at)
 		ok = false
 	}
+	return e, now, ok
+}
+
+// get answers query, a DNS query of key k to upstream, with the reply kept for such queries, unless c keeps none, its lifetime has passed or the clock was set back to before c kept it, which drops it: the reply gets the ID and the question of query, loses from each TTL the whole seconds it was kept, and has an OPT record, without options, only if query has one too.
+func (c *cache) get(upstream string, k key, query []byte) ([]byte, bool) {
+	c.mu.Lock()
+	e, now, ok := c.held(origin{upstream, k})
 	c.mu.Unlock()
 	if !ok || !now.Before(e.expires) {
 		return nil, false
 	}
+	return e.answer(k, query, now)
+}
+
+// stale answers query as get does, with TTLs of 0, from a reply whose lifetime has passed for no longer than c keeps it; due tells the caller to ask upstream for a new one, which it does of one entry once in refreshRetry.
+func (c *cache) stale(upstream string, k key, query []byte) (reply []byte, due, ok bool) {
+	keep := cmp.Or(c.keep, 24*time.Hour)
+	at := origin{upstream, k}
+	c.mu.Lock()
+	e, now, ok := c.held(at)
+	if ok = ok && now.Before(e.expires.Add(keep)); ok {
+		if due = !now.Before(e.retry); due {
+			e.retry = now.Add(refreshRetry)
+			c.entries[at] = e
+		}
+	}
+	c.mu.Unlock()
+	if !ok {
+		return nil, false, false
+	}
+	reply, ok = e.answer(k, query, now)
+	return reply, due && ok, ok
+}
+
+// answer returns the reply of e for query, of key k, at now.
+func (e entry) answer(k key, query []byte, now time.Time) ([]byte, bool) {
 	var m dnsmessage.Message
 	var p dnsmessage.Parser
 	// put saw e.reply unpack, and queryKey, which gave k, the header and the question of query parse.

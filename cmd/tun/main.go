@@ -58,8 +58,8 @@ func main() {
 	flag.IntVar(&cfg.MTU, "mtu", 1500, "TUN MTU")
 	flag.Var(&bypassed, "bypass", "destination CIDR never captured, repeatable")
 	flag.StringVar(&cfg.Name, "name", "tun", "interface name (ignored on macOS)")
-	var dnsTarget string
-	flag.Func("dns", "host:port every DNS query to UDP port 53 is sent to over TCP (default the server the query is addressed to)", func(v string) error {
+	var dnsTargets []string
+	flag.Func("dns", "host:port of a DNS server mirrored, over TCP, for every DNS query to port 53, repeatable: a later one is asked when the earlier ones fail (default the server the query is addressed to)", func(v string) error {
 		host, port, err := net.SplitHostPort(v)
 		if err != nil {
 			return err
@@ -70,7 +70,7 @@ func main() {
 		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
 			return fmt.Errorf("port %q is not a number from 1 to 65535", port)
 		}
-		dnsTarget = v
+		dnsTargets = append(dnsTargets, v)
 		return nil
 	})
 	flag.Parse()
@@ -83,7 +83,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, cfg, dnsTarget); err != nil {
+	if err := run(ctx, cfg, dnsTargets); err != nil {
 		if errors.Is(err, tun.ErrDenied) {
 			fmt.Fprintln(os.Stderr, "tun: the privilege prompt was refused; accept it or run as root/administrator")
 		} else {
@@ -94,7 +94,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, cfg tun.Config, dnsTarget string) error {
+func run(ctx context.Context, cfg tun.Config, dnsTargets []string) error {
 	dev, err := tun.Open(ctx, cfg)
 	if err != nil {
 		return err
@@ -107,7 +107,7 @@ func run(ctx context.Context, cfg tun.Config, dnsTarget string) error {
 
 	listen := bypass.NewListenConfig(capture)
 	dialer := &logDialer{dialer: bypass.NewDialer(capture), listen: listen, icmp: listen}
-	err = stack.Serve(ctx, dev.Device, newHandler(dialer, dnsTarget), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
+	err = stack.Serve(ctx, dev.Device, newHandler(dialer, dnsTargets), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
 	if ctx.Err() != nil {
 		log.Printf("interface %s down", dev.Interface)
 		return nil
@@ -115,13 +115,15 @@ func run(ctx context.Context, cfg tun.Config, dnsTarget string) error {
 	return err
 }
 
-// newHandler relays every flow through dialer, UDP full cone through its ListenPacket, the DNS queries to UDP port 53 over TCP, to dnsTarget if set, and ICMP echo through sockets of its icmp config.
-func newHandler(dialer *logDialer, dnsTarget string) stack.Handler {
+// newHandler relays every flow through dialer, UDP full cone through its ListenPacket, and ICMP echo through sockets of its icmp config, and answers the DNS queries to port 53, of UDP and of TCP, as a mirror of the server they are addressed to, or of dnsTargets if any, which it asks over TCP.
+func newHandler(dialer *logDialer, dnsTargets []string) stack.Handler {
 	m := stack.NewMux()
 	m.Handle("icmp", "", &icmp.Handler{ListenConfig: dialer.icmp})
 	m.Handle("tcp", "", &tcp.Handler{Dialer: dialer})
 	m.Handle("udp", "", &udp.Handler{Dialer: dialer, ListenConfig: dialer})
-	m.Handle("udp", ":53", &dns.Handler{Dialer: dialer, Target: dnsTarget})
+	mirror := &dns.Handler{Dialer: dialer, Upstreams: dnsTargets}
+	m.Handle("udp", ":53", mirror)
+	m.Handle("tcp", ":53", mirror)
 	return m
 }
 

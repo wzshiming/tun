@@ -1,253 +1,204 @@
 package dns
 
 import (
-	"bytes"
-	"cmp"
 	"context"
 	"encoding/binary"
+	"errors"
 	"net"
 	"sync"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
-
-	"github.com/wzshiming/tun/stack"
 )
 
-// upstreamDialer answers the "udp" dials of a symmetric udp.Handler with upstreams, which dial "tcp", to target if set, once a datagram has to go there.
-type upstreamDialer struct {
-	dialer stack.Dialer
-	target string
-	idle   time.Duration
-	cache  *cache
-}
+// errDown fails the messages a failed upstream conn left unanswered.
+var errDown = errors.New("dns: upstream conn failed")
 
-func (d upstreamDialer) DialContext(ctx context.Context, _, address string) (net.Conn, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	return &upstream{dialer: d.dialer, address: cmp.Or(d.target, address), idle: d.idle, cache: d.cache, ctx: ctx, cancel: cancel, replies: make(chan []byte), pending: make(map[uint16]*query)}, nil
-}
-
-// query is a DNS query sent upstream and not answered yet.
-type query struct {
-	message []byte
-	// resent tells that the query went out on a second conn, which is its last.
-	resent bool
-}
-
-// upstream is the conn udp.Handler relays one server's datagrams through: it answers a DNS query from cache when that holds a reply of address to such a query, dials its TCP conn, giving the dial idle to come back, when a datagram has to go there, and sends the DNS queries a failed conn left unanswered once more on a new one.
-type upstream struct {
-	// Conn is nil: it only completes net.Conn with the methods udp.Handler never calls.
-	net.Conn
-	dialer  stack.Dialer
-	address string
-	idle    time.Duration
-	cache   *cache
-	// ctx carries the values every dial gets and ends with u.
+// link is the TCP conn to one upstream, which every flow sends its messages on, each under an ID of its own there, and its dial before.
+type link struct {
+	// ctx carries the values of the dial and ends with the link; cancel ends it, and with it the dial and the conn.
 	ctx    context.Context
 	cancel context.CancelFunc
-	// replies hands Read the messages read from the TCP conn.
-	replies chan []byte
-	// sending is held to dial and to write, so that Write and the reader resending for a failed conn take turns.
-	sending sync.Mutex
+	// dialled is closed once the dial is back: with conn, or else err.
+	dialled chan struct{}
+	conn    net.Conn
+	err     error
+	// writing is held to write one message whole.
+	writing sync.Mutex
 
-	// mu guards conn, the live TCP conn if any, and pending, the unanswered DNS queries sent on it by ID.
+	// mu guards the rest: next, the ID given last, pending, the messages sent and not answered by the ID they were sent under, and down, closed once the conn failed.
 	mu      sync.Mutex
-	conn    *frameConn
-	pending map[uint16]*query
+	next    uint16
+	pending map[uint16]chan []byte
+	failed  bool
+	down    chan struct{}
 }
 
-// Read returns the next reply into b, which holds any message as udp.Handler's buffer does, and fails once u ended.
-func (u *upstream) Read(b []byte) (int, error) {
-	select {
-	case reply := <-u.replies:
-		return copy(b, reply), nil
-	case <-u.ctx.Done():
-		return 0, net.ErrClosed
+// exchange sends query to the upstream at address and returns its reply, within ctx; a query that a failed conn left unanswered is sent once more on a new one.
+func (h *Handler) exchange(ctx context.Context, address string, query []byte) ([]byte, error) {
+	for again := true; ; again = false {
+		l, err := h.connect(ctx, address)
+		if err != nil {
+			return nil, err
+		}
+		reply, err := l.roundTrip(ctx, query, h.idle())
+		if err == nil {
+			return reply, nil
+		}
+		if !again || ctx.Err() != nil {
+			return nil, err
+		}
+		h.drop(address, l)
 	}
 }
 
-// Write hands Read the reply the cache holds for datagram, if any, and else sends datagram on the TCP conn, dialling it first if there is none; a dial that fails or is abandoned fails the Write, a conn that fails does not, as its reader retires it.
-func (u *upstream) Write(datagram []byte) (int, error) {
-	if _, k, ok := queryKey(datagram); ok {
-		if reply, ok := u.cache.get(u.address, k, datagram); ok {
-			select {
-			case u.replies <- reply:
-				return len(datagram), nil
-			case <-u.ctx.Done():
-				return 0, net.ErrClosed
-			}
+// connect returns the link to address once its dial is back, starting one if h has none: the dial gets the values of ctx but outlasts it, as other flows wait for it too.
+func (h *Handler) connect(ctx context.Context, address string) (*link, error) {
+	h.mu.Lock()
+	l := h.links[address]
+	if l == nil {
+		l = &link{dialled: make(chan struct{}), pending: make(map[uint16]chan []byte), down: make(chan struct{})}
+		l.ctx, l.cancel = context.WithCancel(context.WithoutCancel(ctx))
+		if h.links == nil {
+			h.links = make(map[string]*link)
+		}
+		h.links[address] = l
+		go h.run(address, l)
+	}
+	h.mu.Unlock()
+	select {
+	case <-l.dialled:
+		return l, l.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// drop has the next message to address dial anew, if l is still the link there.
+func (h *Handler) drop(address string, l *link) {
+	h.mu.Lock()
+	if h.links[address] == l {
+		delete(h.links, address)
+	}
+	h.mu.Unlock()
+}
+
+// run dials l, giving the dial Idle to come back, and hands each message read from its conn to the one awaiting it, until the conn fails or l ends; it then drops l and fails what it left unanswered.
+func (h *Handler) run(address string, l *link) {
+	defer l.cancel()
+	l.conn, l.err = h.dial(l.ctx, address)
+	if l.err != nil {
+		h.drop(address, l)
+		close(l.dialled)
+		return
+	}
+	close(l.dialled)
+	stop := context.AfterFunc(l.ctx, func() { l.conn.Close() })
+	defer stop()
+	defer l.conn.Close()
+	defer func() {
+		h.drop(address, l)
+		l.mu.Lock()
+		l.failed = true
+		close(l.down)
+		l.mu.Unlock()
+	}()
+	for {
+		reply, err := readFrame(l.conn)
+		if err != nil {
+			return
+		}
+		if len(reply) < 12 {
+			continue
+		}
+		id := binary.BigEndian.Uint16(reply)
+		l.mu.Lock()
+		awaiting := l.pending[id]
+		delete(l.pending, id)
+		l.mu.Unlock()
+		if awaiting != nil {
+			awaiting <- reply
 		}
 	}
-	u.sending.Lock()
-	defer u.sending.Unlock()
-	conn, err := u.connect()
-	if err != nil {
-		return 0, err
-	}
-	if id, ok := queryID(datagram); ok {
-		u.mu.Lock()
-		u.pending[id] = &query{message: bytes.Clone(datagram)}
-		u.mu.Unlock()
-	}
-	if _, err := conn.Write(datagram); err != nil {
-		// The close wakes the reader of conn.
-		conn.Close()
-	}
-	return len(datagram), nil
 }
 
-// Close ends u at once: it cancels a dial in flight and closes the TCP conn, which fails a blocked Read or Write.
-func (u *upstream) Close() error {
-	u.cancel()
-	u.mu.Lock()
-	conn := u.conn
-	u.conn = nil
-	u.mu.Unlock()
-	if conn != nil {
-		conn.Close()
-	}
-	return nil
-}
-
-// connect returns the live TCP conn, dialling one first unless u has it or ended; the caller holds u.sending.
-func (u *upstream) connect() (*frameConn, error) {
-	u.mu.Lock()
-	conn := u.conn
-	u.mu.Unlock()
-	if conn != nil {
-		return conn, nil
-	}
-	if err := u.ctx.Err(); err != nil {
-		return nil, err
-	}
-	dialled, release, err := u.dial()
-	if err != nil {
-		return nil, err
-	}
-	conn = &frameConn{Conn: dialled, release: release}
-	u.mu.Lock()
-	ended := u.ctx.Err() != nil
-	if !ended {
-		u.conn = conn
-	}
-	u.mu.Unlock()
-	if ended {
-		conn.Close()
-		return nil, net.ErrClosed
-	}
-	go u.receive(conn)
-	return conn, nil
-}
-
-// dial dials the TCP conn on a goroutine of its own, so that neither the bound of idle nor the end of u waits for a dialer that ignores its ctx; a conn that comes too late is closed, one in time keeps its ctx, which a dialer may bind it to, until release.
-func (u *upstream) dial() (net.Conn, context.CancelFunc, error) {
-	ctx, cancel := context.WithCancel(u.ctx)
-	bound := time.AfterFunc(u.idle, cancel)
+// dial dials the TCP conn on a goroutine of its own, so that neither the bound of Idle nor the end of ctx waits for a dialer that ignores its ctx; a conn that comes too late is closed.
+func (h *Handler) dial(ctx context.Context, address string) (net.Conn, error) {
+	bounded, cancel := context.WithCancel(ctx)
+	defer cancel()
+	bound := time.AfterFunc(h.idle(), cancel)
+	defer bound.Stop()
 	type result struct {
 		conn net.Conn
 		err  error
 	}
 	done := make(chan result)
 	go func() {
-		conn, err := u.dialer.DialContext(ctx, "tcp", u.address)
+		// The conn keeps ctx, which a dialer may bind it to; only the wait for it is bounded.
+		conn, err := h.Dialer.DialContext(ctx, "tcp", address)
 		select {
 		case done <- result{conn, err}:
-		case <-ctx.Done():
+		case <-bounded.Done():
 			if err == nil {
 				conn.Close()
 			}
 		}
 	}()
-	var r result
 	select {
-	case r = <-done:
-	case <-ctx.Done():
-		r.err = ctx.Err()
+	case r := <-done:
+		return r.conn, r.err
+	case <-bounded.Done():
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, context.DeadlineExceeded
 	}
-	if r.err == nil && !bound.Stop() {
-		// The bound passed just as the dial came back.
-		r.conn.Close()
-		r.err = context.DeadlineExceeded
-	}
-	if r.err != nil {
-		bound.Stop()
-		cancel()
-		return nil, nil, r.err
-	}
-	return r.conn, cancel, nil
 }
 
-// receive hands Read each message read from conn, which answers the query of its ID, and retires conn once it fails.
-func (u *upstream) receive(conn *frameConn) {
-	defer u.retire(conn)
-	buf := make([]byte, 65535)
+// roundTrip sends message on the conn of l under an ID no message awaiting its reply there has, a write getting idle to pass, and returns the reply to it, under the ID of message, once it comes within ctx.
+func (l *link) roundTrip(ctx context.Context, message []byte, idle time.Duration) ([]byte, error) {
+	l.mu.Lock()
+	if l.failed || len(l.pending) > 0xffff {
+		l.mu.Unlock()
+		return nil, errDown
+	}
+	// IDs go round, so that a reply coming after its message was given up finds its ID unused for long.
 	for {
-		n, err := conn.Read(buf)
-		if err != nil {
-			return
+		l.next++
+		if _, used := l.pending[l.next]; !used {
+			break
 		}
-		// The cache has the reply before the client does, whose next query then finds it there.
-		u.answered(buf[:n])
+	}
+	id, awaiting := l.next, make(chan []byte, 1)
+	l.pending[id] = awaiting
+	l.mu.Unlock()
+
+	frame := binary.BigEndian.AppendUint16(make([]byte, 0, 2+len(message)), uint16(len(message)))
+	frame = append(frame, message...)
+	binary.BigEndian.PutUint16(frame[2:], id)
+	l.writing.Lock()
+	// Bounds a write the upstream does not read; a conn without deadlines is left to the ctx of its dial.
+	l.conn.SetWriteDeadline(time.Now().Add(idle))
+	_, err := l.conn.Write(frame)
+	l.writing.Unlock()
+	if err == nil {
 		select {
-		case u.replies <- bytes.Clone(buf[:n]):
-		case <-u.ctx.Done():
-			return
+		case reply := <-awaiting:
+			copy(reply, message[:2])
+			return reply, nil
+		case <-l.down:
+			err = errDown
+		case <-ctx.Done():
+			err = ctx.Err()
 		}
+	} else {
+		// A frame cut short leaves the conn of no use.
+		l.cancel()
 	}
-}
-
-// answered forgets the unanswered query whose ID reply, a message read from the TCP conn, carries, and has the cache keep reply for as long as it may answer such a query.
-func (u *upstream) answered(reply []byte) {
-	if len(reply) < 2 {
-		return
-	}
-	id := binary.BigEndian.Uint16(reply)
-	u.mu.Lock()
-	q := u.pending[id]
-	delete(u.pending, id)
-	u.mu.Unlock()
-	if q == nil {
-		return
-	}
-	if _, k, ok := queryKey(q.message); ok {
-		u.cache.put(u.address, k, reply, lifetime(reply, id, k.question))
-	}
-}
-
-// retire closes conn, which failed, and sends the DNS queries it left unanswered once more on a new conn; with none of them, or no conn for them, it ends u as a failed conn ended its target before.
-func (u *upstream) retire(conn *frameConn) {
-	// A Write blocked on conn holds u.sending until conn is closed.
-	conn.Close()
-	u.sending.Lock()
-	defer u.sending.Unlock()
-	u.mu.Lock()
-	u.conn = nil
-	var again [][]byte
-	for id, q := range u.pending {
-		if q.resent {
-			delete(u.pending, id)
-			continue
-		}
-		q.resent = true
-		again = append(again, q.message)
-	}
-	u.mu.Unlock()
-	if len(again) == 0 {
-		u.cancel()
-		return
-	}
-	next, err := u.connect()
-	if err != nil {
-		u.cancel()
-		return
-	}
-	for _, message := range again {
-		if _, err := next.Write(message); err != nil {
-			// The close wakes the reader of next, which finds every query resent and ends u.
-			next.Close()
-			return
-		}
-	}
+	l.mu.Lock()
+	delete(l.pending, id)
+	l.mu.Unlock()
+	return nil, err
 }
 
 // queryID returns the ID of datagram if it is a DNS query: a message that parses to its end with QR=0, opcode QUERY and exactly one question.
