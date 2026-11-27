@@ -43,6 +43,32 @@ type Options struct {
 	// MaxUDPSessions is how many UDP sessions may be live at once; a client endpoint starting one more ends the session whose last datagram, either way, is the oldest.
 	// 0 means 4096, a negative value no limit.
 	MaxUDPSessions int
+	// SessionQueueLen is how many datagrams a UDP or ICMP echo session holds for its handler; a datagram arriving at a full queue is dropped. 0 means 128.
+	SessionQueueLen int
+	// MaxTCPHandshakes is how many TCP connections may await their handler's answer at once; the SYN of one more is dropped. 0 means 2048.
+	MaxTCPHandshakes int
+	// LinkQueueLen is how many packets the stack holds for the device to write; a packet beyond it is dropped. 0 means 1024.
+	LinkQueueLen int
+}
+
+// positive returns n, or def unless n is positive.
+func positive(n, def int) int {
+	if n > 0 {
+		return n
+	}
+	return def
+}
+
+func (o Options) sessionQueueLen() int {
+	return positive(o.SessionQueueLen, 128)
+}
+
+func (o Options) maxTCPHandshakes() int {
+	return positive(o.MaxTCPHandshakes, 2048)
+}
+
+func (o Options) linkQueueLen() int {
+	return positive(o.LinkQueueLen, 1024)
 }
 
 func (o Options) answerTimeout() time.Duration {
@@ -84,8 +110,8 @@ func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options)
 		answerTimeout:     opts.answerTimeout(),
 		keepAliveIdle:     opts.keepAliveIdle(),
 		keepAliveInterval: opts.keepAliveInterval(),
-		udp:               sessions[netip.AddrPort]{max: opts.maxUDPSessions(), live: make(map[netip.AddrPort]*session)},
-		icmp:              sessions[icmpKey]{max: opts.maxICMPSessions(), live: make(map[icmpKey]*session)},
+		udp:               sessions[netip.AddrPort]{max: opts.maxUDPSessions(), queue: opts.sessionQueueLen(), live: make(map[netip.AddrPort]*session)},
+		icmp:              sessions[icmpKey]{max: opts.maxICMPSessions(), queue: opts.sessionQueueLen(), live: make(map[icmpKey]*session)},
 	}
 	s, ep, err := g.newStack(dev, opts)
 	if err != nil {
@@ -293,7 +319,7 @@ func (g *gateway) newStack(dev wgtun.Device, opts Options) (_ *stack.Stack, _ *c
 	if e := s.SetTransportProtocolOption(tcp.ProtocolNumber, &sack); e != nil {
 		return nil, nil, fmt.Errorf("stack: enable TCP SACK: %s", e)
 	}
-	ep := channel.New(1024, uint32(mtu), "")
+	ep := channel.New(opts.linkQueueLen(), uint32(mtu), "")
 	if e := s.CreateNIC(nicID, ep); e != nil {
 		return nil, nil, fmt.Errorf("stack: create NIC: %s", e)
 	}
@@ -310,7 +336,7 @@ func (g *gateway) newStack(dev wgtun.Device, opts Options) (_ *stack.Stack, _ *c
 	g.s = s
 	s.SetTransportProtocolHandler(icmp.ProtocolNumber4, g.handleICMP)
 	s.SetTransportProtocolHandler(icmp.ProtocolNumber6, g.handleICMP)
-	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(s, 0, 2048, g.forwardTCP).HandlePacket)
+	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(s, 0, opts.maxTCPHandshakes(), g.forwardTCP).HandlePacket)
 	// Without a handler UDP finds no endpoint, which the stack answers with ICMP port unreachable.
 	if g.handler != nil {
 		s.SetTransportProtocolHandler(udp.ProtocolNumber, g.handleUDP)

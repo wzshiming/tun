@@ -25,6 +25,8 @@ type Handler struct {
 	ListenConfig stack.ListenConfig
 	// Idle ends a session after this long without datagrams either way to any target; 0 means 60s.
 	Idle time.Duration
+	// QueueLen is how many datagrams a target dialled through Dialer holds while it dials or sends; more are dropped. 0 means 64.
+	QueueLen int
 }
 
 // ServeFlow accepts a UDP session and relays it until it idles, its conn fails or ctx ends, and then closes the session and every dialled conn or socket.
@@ -46,11 +48,18 @@ func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
 		h.serveCone(ctx, conn, f.Client())
 		return
 	}
-	relaySession(ctx, conn, h.idle(), func(target string) (net.Conn, error) { return h.Dialer.DialContext(ctx, "udp", target) })
+	relaySession(ctx, conn, h.idle(), h.queueLen(), func(target string) (net.Conn, error) { return h.Dialer.DialContext(ctx, "udp", target) })
 }
 
 func (h *Handler) idle() time.Duration {
 	return cmp.Or(h.Idle, 60*time.Second)
+}
+
+func (h *Handler) queueLen() int {
+	if h.QueueLen > 0 {
+		return h.QueueLen
+	}
+	return relayQueueLen
 }
 
 // afterIdle calls onIdle once d passes without a touch; stop cancels it.
@@ -109,17 +118,18 @@ func relayPackets(src, dst net.PacketConn, touch func()) {
 	}
 }
 
-// relayQueueLen is how many datagrams a target holds while it dials or sends; more are dropped.
+// relayQueueLen is the default of Handler.QueueLen.
 const relayQueueLen = 64
 
 // relaySession sends each datagram of conn, a UDP session's, to the remote dial opened for its target on the target's first datagram, and each remote's replies back from its target, until conn fails, ctx ends or idle passes without a datagram either way; it then closes conn and every remote.
 // Each target dials and sends on its own goroutine, so a slow one delays no other; a remote failing to dial, send or receive is dropped alone, and its target's next datagram dials again.
-func relaySession(ctx context.Context, conn net.Conn, idle time.Duration, dial func(target string) (net.Conn, error)) {
+// A target holds queueLen datagrams while it dials or sends; more are dropped.
+func relaySession(ctx context.Context, conn net.Conn, idle time.Duration, queueLen int, dial func(target string) (net.Conn, error)) {
 	pc, ok := conn.(net.PacketConn)
 	if !ok {
 		return
 	}
-	s := &sessionRelay{conn: pc, dial: dial, targets: make(map[netip.AddrPort]*sessionTarget)}
+	s := &sessionRelay{conn: pc, dial: dial, queueLen: queueLen, targets: make(map[netip.AddrPort]*sessionTarget)}
 	stop := context.AfterFunc(ctx, s.end)
 	defer stop()
 	touch, stopIdle := afterIdle(idle, s.end)
@@ -134,6 +144,8 @@ type sessionRelay struct {
 	conn  net.PacketConn
 	dial  func(target string) (net.Conn, error)
 	touch func()
+	// queueLen is how many datagrams each target holds.
+	queueLen int
 
 	mu      sync.Mutex
 	ended   bool
@@ -182,7 +194,7 @@ func (s *sessionRelay) target(addr netip.AddrPort) *sessionTarget {
 	if tg, ok := s.targets[addr]; ok {
 		return tg
 	}
-	tg := &sessionTarget{queue: make(chan []byte, relayQueueLen), done: make(chan struct{})}
+	tg := &sessionTarget{queue: make(chan []byte, s.queueLen), done: make(chan struct{})}
 	s.targets[addr] = tg
 	s.workers.Go(func() { s.relayTarget(addr, tg) })
 	return tg

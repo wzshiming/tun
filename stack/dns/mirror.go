@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"time"
@@ -65,9 +66,6 @@ func (h *Handler) answer(ctx context.Context, upstream string, servers []string,
 	return reply, nil
 }
 
-// failedFor is how long a server that failed to answer is asked after the others.
-const failedFor = 30 * time.Second
-
 // ask returns what upstream, whose servers are at servers, replies to query, a DNS query of id and key k, within Idle and ctx, and has the cache keep it; a reply that fails, as one the cache cannot keep, leaves the reply kept before in its place.
 // It asks the servers in turn until one answers other than SERVFAIL, each within an even share of the time left, and returns the reply of the last one that gave any.
 func (h *Handler) ask(ctx context.Context, upstream string, servers []string, id uint16, k key, query []byte) ([]byte, error) {
@@ -105,12 +103,13 @@ func (h *Handler) ask(ctx context.Context, upstream string, servers []string, id
 	return reply, nil
 }
 
-// order returns servers with those that failed to answer within failedFor after the others.
+// order returns servers with those that failed to answer within FailedFor after the others.
 func (h *Handler) order(servers []string) []string {
 	if len(servers) < 2 {
 		return servers
 	}
 	now := time.Now()
+	failedFor := cmp.Or(h.FailedFor, 30*time.Second)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	ordered := make([]string, 0, len(servers))

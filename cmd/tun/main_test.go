@@ -255,7 +255,7 @@ func testServeLogged(t *testing.T, dnsTarget string, f *stacktest.Flow, until st
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h := newHandler(d, strings.Fields(dnsTarget), nil)
+		h := newHandler(d, settings{dnsTargets: strings.Fields(dnsTarget), readyPort: 80})
 		h.ServeFlow(ctx, f)
 	}()
 	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(logged.String(), until); time.Sleep(10 * time.Millisecond) {
@@ -340,7 +340,7 @@ func TestHandlerRejectsAnICMPSessionWithoutASocket(t *testing.T) {
 	})
 	flow := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.1:7"), netip.MustParseAddrPort("192.0.2.9:0"), conn)
 	d := &logDialer{icmp: &net.ListenConfig{Control: func(string, string, syscall.RawConn) error { return errors.New("socket refused") }}}
-	newHandler(d, nil, nil).ServeFlow(t.Context(), flow)
+	newHandler(d, settings{readyPort: 80}).ServeFlow(t.Context(), flow)
 	if !flow.Rejected() {
 		t.Error("icmp flow not rejected though no ICMP socket can be opened")
 	}
@@ -452,7 +452,7 @@ func TestHandlerAnswersICMPEchoToTheDeviceAddressesItself(t *testing.T) {
 	})
 	flow := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.2:7"), netip.MustParseAddrPort("198.18.0.1:0"), conn)
 	d := &logDialer{icmp: &net.ListenConfig{Control: func(string, string, syscall.RawConn) error { return errors.New("socket refused") }}}
-	go newHandler(d, nil, []netip.Prefix{netip.MustParsePrefix("198.18.0.1/30")}).ServeFlow(t.Context(), flow)
+	go newHandler(d, settings{tun: tun.Config{Addresses: []netip.Prefix{netip.MustParsePrefix("198.18.0.1/30")}}, readyPort: 80}).ServeFlow(t.Context(), flow)
 	peer.SetDeadline(time.Now().Add(10 * time.Second))
 	if _, err := peer.Write([]byte{8, 0, 0, 0, 0, 7, 0, 1, 'x'}); err != nil {
 		t.Fatalf("echo request to the device address: %v", err)
@@ -467,8 +467,15 @@ func TestHandlerAnswersICMPEchoToTheDeviceAddressesItself(t *testing.T) {
 func TestHandlerServesTheReadyPageNextToTheDeviceAddresses(t *testing.T) {
 	testCaptureLog(t)
 	d := &logDialer{dialer: &net.Dialer{Control: func(string, string, syscall.RawConn) error { return errors.New("dial refused") }}}
-	h := newHandler(d, nil, []netip.Prefix{netip.MustParsePrefix("198.18.0.1/30"), netip.MustParsePrefix("fd00:6a77:7761::1/64")})
-	for _, target := range []string{"198.18.0.2:80", "[fd00:6a77:7761::2]:80"} {
+	addresses := []netip.Prefix{netip.MustParsePrefix("198.18.0.1/30"), netip.MustParsePrefix("fd00:6a77:7761::1/64")}
+	h := newHandler(d, settings{tun: tun.Config{Addresses: addresses}, readyPort: 80})
+	// The page moves with -ready-port.
+	moved := newHandler(d, settings{tun: tun.Config{Addresses: addresses}, readyPort: 8080})
+	for _, target := range []string{"198.18.0.2:80", "[fd00:6a77:7761::2]:80", "198.18.0.2:8080"} {
+		h := h
+		if strings.HasSuffix(target, ":8080") {
+			h = moved
+		}
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
