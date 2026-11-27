@@ -19,7 +19,7 @@ type netConfigurer interface {
 // configureVia configures each family of cfg that has an address, IPv4 first; an IPv6 failure only warns when IPv4 is configured.
 func configureVia(ctx context.Context, cfg Config, c netConfigurer) (warnings []string, err error) {
 	hasV4 := slices.ContainsFunc(cfg.Addresses, func(p netip.Prefix) bool { return p.Addr().Is4() })
-	capture := CaptureRoutes(cfg)
+	capture := installRoutes(cfg)
 	for _, v6 := range []bool{false, true} {
 		i := slices.IndexFunc(cfg.Addresses, func(p netip.Prefix) bool { return p.Addr().Is6() == v6 })
 		if i < 0 {

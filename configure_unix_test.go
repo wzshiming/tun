@@ -79,7 +79,7 @@ destination: default
        0         0         0         0         0         0      1500         0
 `
 
-// ttWantSteps renders this platform's command table with ttTools, routing every CaptureRoutes prefix.
+// ttWantSteps renders this platform's command table with ttTools, routing every installRoutes prefix.
 func ttWantSteps(t *testing.T, cfg Config) []step {
 	t.Helper()
 	var a4, a6 netip.Prefix
@@ -90,9 +90,9 @@ func ttWantSteps(t *testing.T, cfg Config) []step {
 			a6 = a
 		}
 	}
-	v4, v6 := ttSplit(CaptureRoutes(cfg))
+	v4, v6 := ttSplit(installRoutes(cfg))
 	if (a4.IsValid() && len(v4) == 0) || (a6.IsValid() && len(v6) == 0) {
-		t.Fatalf("CaptureRoutes(%v) left a configured family without routes", cfg.Addresses)
+		t.Fatalf("installRoutes(%v) left a configured family without routes", cfg.Addresses)
 	}
 	var want []step
 	add := func(isV6 bool, argv ...string) { want = append(want, step{argv: argv, v6: isV6}) }

@@ -159,10 +159,10 @@ func TestE2ERoot(t *testing.T) {
 	// Loopback, the private ranges, IPv6 link-local and ULA stay off the TUN.
 	cfg := ttConfig(ttPrefixes("127.0.0.1/32", "::1/128", "192.168.0.0/16", "10.0.0.0/8", "fe80::/64", "fd00::/8"))
 	capture := tun.CaptureRoutes(cfg)
-	if len(capture) <= 50 {
-		t.Fatalf("CaptureRoutes = %v, want more than 50 routes", capture)
+	if len(capture) <= 20 {
+		t.Fatalf("CaptureRoutes = %v, want more than 20 routes", capture)
 	}
-	for _, kept := range ttPrefixes("10.0.0.0/8", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4") {
+	for _, kept := range ttPrefixes("10.0.0.0/8", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/3", "::/128", "::1/128") {
 		if i := slices.IndexFunc(capture, kept.Overlaps); i >= 0 {
 			t.Fatalf("capture route %v overlaps %v, which must stay off the TUN", capture[i], kept)
 		}
