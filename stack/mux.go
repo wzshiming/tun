@@ -41,6 +41,12 @@ type HandlerFunc func(context.Context, Flow)
 // ServeFlow calls h(ctx, f).
 func (h HandlerFunc) ServeFlow(ctx context.Context, f Flow) { h(ctx, f) }
 
+// RejectHandler returns a handler that rejects every flow, as Flow.Reject does: a TCP connection is reset, a UDP session's datagrams and an ICMP session's echo requests are dropped unanswered.
+// Mounted on a Mux, it refuses the flows of its pattern which a wider one would serve, e.g. m.Handle("udp", ":443", stack.RejectHandler()) leaves a client without QUIC to fall back to TCP.
+func RejectHandler() Handler {
+	return HandlerFunc(func(_ context.Context, f Flow) { f.Reject() })
+}
+
 // Mux dispatches each flow by its network and destination to the handler whose pattern matches it, else to Fallback, else rejects it.
 // A UDP session goes by its first datagram's destination, its handler then serving its datagrams to every target.
 //
