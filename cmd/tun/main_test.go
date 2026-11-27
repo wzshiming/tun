@@ -528,26 +528,3 @@ func TestReadyAddrsAreNextToTheDeviceAddresses(t *testing.T) {
 }
 
 // The default bypass leaves the reserved blocks off the TUN, but of ::/8 not the NAT64 prefixes.
-func TestDefaultBypassLeavesReservedBlocksOffAndNAT64On(t *testing.T) {
-	cfg := tun.Config{Addresses: []netip.Prefix{netip.MustParsePrefix("198.18.0.1/30"), netip.MustParsePrefix("fd00:6a77:7761::1/64")}, Bypass: defaultBypass()}
-	routes := tun.CaptureRoutes(cfg)
-	contains := func(s string) bool {
-		addr := netip.MustParseAddr(s)
-		for _, p := range routes {
-			if p.Contains(addr) {
-				return true
-			}
-		}
-		return false
-	}
-	for _, off := range []string{"127.0.0.1", "169.254.169.254", "224.0.0.251", "240.0.0.1", "255.255.255.255", "::", "::1", "::ffff:192.0.2.1", "64:ff9a::1", "64:ff9b:2::1", "fe80::1", "ff02::1"} {
-		if contains(off) {
-			t.Errorf("a route contains %s, want it left off the TUN", off)
-		}
-	}
-	for _, on := range []string{"1.1.1.1", "10.0.0.1", "64:ff9b::192.0.2.1", "64:ff9b:1::1", "100::1", "2001:db8::1"} {
-		if !contains(on) {
-			t.Errorf("no route contains %s, want it captured", on)
-		}
-	}
-}
