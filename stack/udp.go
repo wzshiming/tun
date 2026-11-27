@@ -5,9 +5,7 @@ import (
 	"math"
 	"net"
 	"net/netip"
-	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -16,15 +14,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
-
-// udpQueueLen is how many datagrams a session holds for its handler; a datagram arriving at a full queue is dropped.
-const udpQueueLen = 128
-
-// datagram is one UDP payload and the destination its client addressed.
-type datagram struct {
-	payload []byte
-	target  netip.AddrPort
-}
 
 // handleUDP runs on the packet goroutine for every UDP packet, as no UDP endpoint is ever registered: it drops a datagram failing the length or checksum check, else queues it on its client endpoint's session, starting the session and its flow if none is live.
 func (g *gateway) handleUDP(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
@@ -42,26 +31,22 @@ func (g *gateway) handleUDP(id stack.TransportEndpointID, pkt *stack.PacketBuffe
 	}
 	d := datagram{payload: pkt.Data().AsRange().ToSlice(), target: addrPort(id.LocalAddress, id.LocalPort)}
 	client := addrPort(id.RemoteAddress, id.RemotePort)
-	var evicted *udpConn
+	var evicted *session
 	g.mu.Lock()
-	c, ok := g.sessions[client]
+	c, ok := g.udp.live[client]
 	if !ok {
 		if g.stopped {
 			g.mu.Unlock()
 			return true
 		}
-		if g.maxUDPSessions > 0 && len(g.sessions) >= g.maxUDPSessions {
-			evicted = g.idlestSession()
-			delete(g.sessions, evicted.client)
-		}
-		c = g.newUDPConn(d.target, client, pkt.NetworkProtocolNumber)
-		g.sessions[client] = c
+		c, evicted = g.udp.open(&g.mu, &g.clock, client)
+		conn := &udpConn{session: c, s: g.s, netProto: pkt.NetworkProtocolNumber, target: d.target, client: client}
 		g.flows.Add(1)
 		go g.serve(&flow{
 			network: "udp",
 			target:  d.target,
 			client:  client,
-			accept:  func() (net.Conn, error) { return c, nil },
+			accept:  func() (net.Conn, error) { return conn, nil },
 			reject:  func() { c.Close() },
 		})
 	}
@@ -70,85 +55,25 @@ func (g *gateway) handleUDP(id stack.TransportEndpointID, pkt *stack.PacketBuffe
 		// Its handler finds the conn closed and returns, which ends the flow.
 		evicted.Close()
 	}
-	c.touch()
-	select {
-	case c.queue <- d:
-	default:
-	}
+	c.deliver(d)
 	return true
-}
-
-// idlestSession returns the live session whose last datagram is the oldest; the caller holds g.mu and has at least one session.
-// It looks at every session, which only a client endpoint beyond the limit pays for.
-func (g *gateway) idlestSession() *udpConn {
-	var idlest *udpConn
-	for _, c := range g.sessions {
-		if idlest == nil || c.active.Load() < idlest.active.Load() {
-			idlest = c
-		}
-	}
-	return idlest
 }
 
 // udpConn is a UDP session: it reads the datagrams its client sends to any target and writes datagrams to its client from any source.
 type udpConn struct {
+	*session
 	s              *stack.Stack
 	netProto       tcpip.NetworkProtocolNumber
 	target, client netip.AddrPort
-	queue          chan datagram
-	readDeadline   deadline
-	closed         chan struct{}
-	closeOnce      sync.Once
-	onClose        func()
-	// active is the tick of the gateway's udpClock at the session's last datagram, either way.
-	active atomic.Uint64
-	clock  *atomic.Uint64
-}
-
-// touch marks the session as the one most recently active.
-func (c *udpConn) touch() { c.active.Store(c.clock.Add(1)) }
-
-func (g *gateway) newUDPConn(target, client netip.AddrPort, netProto tcpip.NetworkProtocolNumber) *udpConn {
-	c := &udpConn{
-		s:            g.s,
-		netProto:     netProto,
-		target:       target,
-		client:       client,
-		queue:        make(chan datagram, udpQueueLen),
-		readDeadline: deadline{passed: make(chan struct{})},
-		closed:       make(chan struct{}),
-		clock:        &g.udpClock,
-	}
-	c.onClose = func() {
-		g.mu.Lock()
-		defer g.mu.Unlock()
-		if g.sessions[client] == c {
-			delete(g.sessions, client)
-		}
-	}
-	return c
 }
 
 // ReadFrom returns the next datagram and the destination the client sent it to; a closed session or a passed deadline fails it even with datagrams queued.
 func (c *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	select {
-	case <-c.closed:
-		return 0, nil, net.ErrClosed
-	default:
+	d, err := c.next()
+	if err != nil {
+		return 0, nil, err
 	}
-	select {
-	case <-c.readDeadline.wait():
-		return 0, nil, os.ErrDeadlineExceeded
-	default:
-	}
-	select {
-	case d := <-c.queue:
-		return copy(b, d.payload), net.UDPAddrFromAddrPort(d.target), nil
-	case <-c.closed:
-		return 0, nil, net.ErrClosed
-	case <-c.readDeadline.wait():
-		return 0, nil, os.ErrDeadlineExceeded
-	}
+	return copy(b, d.payload), net.UDPAddrFromAddrPort(d.target), nil
 }
 
 func (c *udpConn) Read(b []byte) (int, error) {
@@ -170,10 +95,8 @@ func (c *udpConn) Write(b []byte) (int, error) {
 }
 
 func (c *udpConn) writeFrom(b []byte, src netip.AddrPort) (int, error) {
-	select {
-	case <-c.closed:
+	if c.isClosed() {
 		return 0, net.ErrClosed
-	default:
 	}
 	ip, maxSize := src.Addr().Unmap(), 65527
 	if ip.IsUnspecified() {
@@ -217,27 +140,8 @@ func (c *udpConn) writeFrom(b []byte, src netip.AddrPort) (int, error) {
 	return len(b), nil
 }
 
-// Close ends the session; the client's next datagram starts a new one.
-func (c *udpConn) Close() error {
-	c.closeOnce.Do(func() {
-		close(c.closed)
-		c.onClose()
-	})
-	return nil
-}
-
 func (c *udpConn) LocalAddr() net.Addr  { return net.UDPAddrFromAddrPort(c.target) }
 func (c *udpConn) RemoteAddr() net.Addr { return net.UDPAddrFromAddrPort(c.client) }
-
-func (c *udpConn) SetDeadline(t time.Time) error { return c.SetReadDeadline(t) }
-
-func (c *udpConn) SetReadDeadline(t time.Time) error {
-	c.readDeadline.set(t)
-	return nil
-}
-
-// SetWriteDeadline does nothing, as writes never block.
-func (c *udpConn) SetWriteDeadline(time.Time) error { return nil }
 
 // deadline closes its passed channel once the time last set passes; setting it again reopens the channel.
 type deadline struct {

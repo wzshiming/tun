@@ -11,19 +11,20 @@ import (
 	"sync"
 )
 
-// Flow is a TCP connection or UDP session captured by Serve, not yet answered.
+// Flow is a TCP connection, UDP session or ICMP echo session captured by Serve, not yet answered.
 // A UDP session carries every datagram one client address and port sends, to any target, until its conn is closed or the flow rejected.
+// An ICMP session carries the echo requests, IPv4 or IPv6, one client address sends to one target under one identifier, until its conn is closed or the flow rejected.
 type Flow interface {
-	// Network is "tcp" or "udp".
+	// Network is "tcp", "udp" or "icmp".
 	Network() string
-	// Target is the destination the client dialled; for udp the destination of the session's first datagram.
+	// Target is the destination the client dialled; for udp the destination of the session's first datagram; for icmp the address pinged, with port 0.
 	Target() netip.AddrPort
-	// Client is the flow's source.
+	// Client is the flow's source; for icmp its port is the echo identifier.
 	Client() netip.AddrPort
-	// Accept answers the flow and returns its connection: for tcp it completes the handshake; for udp it is also a net.PacketConn whose ReadFrom returns each datagram, the first one already queued, with the target the client sent it to, and whose WriteTo sends one to the client from any address; Read and Write are its view connected to Target.
+	// Accept answers the flow and returns its connection: for tcp it completes the handshake; for udp it is also a net.PacketConn whose ReadFrom returns each datagram, the first one already queued, with the target the client sent it to, and whose WriteTo sends one to the client from any address; Read and Write are its view connected to Target; for icmp Read returns each echo request, the first one already queued, as the ICMP message from its type byte on, and Write sends such a message, an echo reply, to the client from Target, with the session's identifier and a fresh checksum in place of its own.
 	// It may be called once; a second call, or one after Reject, returns an error.
 	Accept() (net.Conn, error)
-	// Reject refuses the flow: tcp resets the client, udp drops the session's datagrams without an ICMP error. After Accept it does nothing.
+	// Reject refuses the flow: tcp resets the client, udp drops the session's datagrams without an ICMP error, icmp leaves its echo requests unanswered. After Accept it does nothing.
 	Reject()
 }
 
@@ -45,7 +46,7 @@ func (h HandlerFunc) ServeFlow(ctx context.Context, f Flow) { h(ctx, f) }
 //
 // A pattern is "" for any address and port, host for that host and any port, host:port, or :port for any address and that port.
 // host is an IP address or a CIDR prefix, its host bits masked off, IPv6 in brackets when a port follows; an IPv4-mapped IPv6 address, or prefix of /96 or longer, is taken as IPv4; a zone is rejected.
-// Port 0 means any port.
+// Port 0 means any port; an "icmp" flow has no port, so its pattern names none.
 //
 // The registered hosts form layers, longest prefix first, an address being a full-length prefix, and the any-address layer last.
 // A flow goes to the first layer containing its destination address, of its family, with a handler for its port or for any port; one with neither passes the flow on to the next layer.
@@ -72,11 +73,11 @@ func NewMux() *Mux {
 	return &Mux{handlers: make(map[muxRoute]Handler), layers: make(map[string][]netip.Prefix)}
 }
 
-// Handle registers h for the flows of network, "tcp" or "udp", whose destination matches pattern.
-// It panics on another network, a nil handler, an invalid pattern or one already registered for network.
+// Handle registers h for the flows of network, "tcp", "udp" or "icmp", whose destination matches pattern.
+// It panics on another network, a nil handler, an invalid pattern, an "icmp" one with a port, or one already registered for network.
 func (m *Mux) Handle(network, pattern string, h Handler) {
-	if network != "tcp" && network != "udp" {
-		panic(fmt.Sprintf("stack: Mux.Handle of network %q, want tcp or udp", network))
+	if network != "tcp" && network != "udp" && network != "icmp" {
+		panic(fmt.Sprintf("stack: Mux.Handle of network %q, want tcp, udp or icmp", network))
 	}
 	if h == nil {
 		panic(fmt.Sprintf("stack: Mux.Handle of a nil handler for %s %q", network, pattern))
@@ -84,6 +85,9 @@ func (m *Mux) Handle(network, pattern string, h Handler) {
 	prefix, port, err := parseMuxPattern(pattern)
 	if err != nil {
 		panic(fmt.Sprintf("stack: Mux.Handle of %s pattern %q: %v", network, pattern, err))
+	}
+	if network == "icmp" && port != 0 {
+		panic(fmt.Sprintf("stack: Mux.Handle of icmp pattern %q: icmp has no port", pattern))
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

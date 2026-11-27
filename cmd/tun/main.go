@@ -23,6 +23,7 @@ import (
 	"github.com/wzshiming/tun/bypass"
 	"github.com/wzshiming/tun/stack"
 	"github.com/wzshiming/tun/stack/dns"
+	"github.com/wzshiming/tun/stack/icmp"
 	"github.com/wzshiming/tun/stack/tcp"
 	"github.com/wzshiming/tun/stack/udp"
 )
@@ -104,7 +105,8 @@ func run(ctx context.Context, cfg tun.Config, dnsTarget string) error {
 		log.Printf("warning: %s", w)
 	}
 
-	dialer := &logDialer{dialer: bypass.NewDialer(capture), listen: bypass.NewListenConfig(capture)}
+	listen := bypass.NewListenConfig(capture)
+	dialer := &logDialer{dialer: bypass.NewDialer(capture), listen: listen, icmp: listen}
 	err = stack.Serve(ctx, dev.Device, newHandler(dialer, dnsTarget), stack.Options{MTU: cfg.MTU, Addresses: cfg.Addresses})
 	if ctx.Err() != nil {
 		log.Printf("interface %s down", dev.Interface)
@@ -113,9 +115,10 @@ func run(ctx context.Context, cfg tun.Config, dnsTarget string) error {
 	return err
 }
 
-// newHandler relays every flow through dialer, UDP full cone through its ListenPacket, the DNS queries to UDP port 53 over TCP, to dnsTarget if set.
+// newHandler relays every flow through dialer, UDP full cone through its ListenPacket, the DNS queries to UDP port 53 over TCP, to dnsTarget if set, and ICMP echo through sockets of its icmp config.
 func newHandler(dialer *logDialer, dnsTarget string) stack.Handler {
 	m := stack.NewMux()
+	m.Handle("icmp", "", &icmp.Handler{ListenConfig: dialer.icmp})
 	m.Handle("tcp", "", &tcp.Handler{Dialer: dialer})
 	m.Handle("udp", "", &udp.Handler{Dialer: dialer, ListenConfig: dialer})
 	m.Handle("udp", ":53", &dns.Handler{Dialer: dialer, Target: dnsTarget})
@@ -125,6 +128,8 @@ func newHandler(dialer *logDialer, dnsTarget string) stack.Handler {
 type logDialer struct {
 	dialer *net.Dialer
 	listen stack.ListenConfig
+	// icmp opens the sockets of the ICMP echo sessions.
+	icmp *net.ListenConfig
 }
 
 func (d *logDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {

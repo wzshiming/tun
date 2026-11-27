@@ -246,6 +246,20 @@ func TestHandlerDialsTCPToTheFlowsTarget(t *testing.T) {
 	}
 }
 
+func TestHandlerRejectsAnICMPSessionWithoutASocket(t *testing.T) {
+	conn, peer := net.Pipe()
+	t.Cleanup(func() {
+		conn.Close()
+		peer.Close()
+	})
+	flow := stacktest.NewFlow("icmp", netip.MustParseAddrPort("198.18.0.1:7"), netip.MustParseAddrPort("192.0.2.9:0"), conn)
+	d := &logDialer{icmp: &net.ListenConfig{Control: func(string, string, syscall.RawConn) error { return errors.New("socket refused") }}}
+	newHandler(d, "").ServeFlow(t.Context(), flow)
+	if !flow.Rejected() {
+		t.Error("icmp flow not rejected though no ICMP socket can be opened")
+	}
+}
+
 // testRunMainTimeout bounds a child of testRunMain, which exits within flag parsing.
 const testRunMainTimeout = 30 * time.Second
 

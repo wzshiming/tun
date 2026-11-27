@@ -391,13 +391,13 @@ func TestUDPSessionReadDeadlineTimesOutAndCanBeExtended(t *testing.T) {
 
 // udpFixQueued returns a session conn outside any stack with n datagrams queued, so a read racing them against another wake-up shows within n reads.
 func udpFixQueued(n int) *udpConn {
-	c := &udpConn{
+	c := &udpConn{session: &session{
 		queue:        make(chan datagram, n),
 		readDeadline: deadline{passed: make(chan struct{})},
 		closed:       make(chan struct{}),
 		onClose:      func() {},
 		clock:        new(atomic.Uint64),
-	}
+	}}
 	for range n {
 		c.queue <- datagram{payload: []byte("queued"), target: udpFamilies[0].first}
 	}

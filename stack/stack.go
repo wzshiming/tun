@@ -1,4 +1,4 @@
-// Package stack terminates the IP packets of a TUN device in a gVisor netstack and hands the TCP connections and UDP flows it captures to a Handler.
+// Package stack terminates the IP packets of a TUN device in a gVisor netstack and hands the TCP connections, UDP flows and ICMP echo sessions it captures to a Handler.
 package stack
 
 import (
@@ -32,7 +32,7 @@ const nicID tcpip.NICID = 1
 type Options struct {
 	// MTU is the link MTU of the stack; 0 takes the device's.
 	MTU int
-	// Addresses are the gateway's own addresses, the only ones answering ICMP echo.
+	// Addresses are the gateway's own addresses, whose ICMP echo requests Serve answers itself; those to any other address are flows for the handler.
 	Addresses []netip.Prefix
 	// AnswerTimeout is how long a handler may leave a TCP flow neither accepted nor rejected before Serve rejects it and ends its ctx; 0 means 30s.
 	AnswerTimeout time.Duration
@@ -40,6 +40,8 @@ type Options struct {
 	KeepAliveIdle time.Duration
 	// KeepAliveInterval is the time between those probes; once gVisor's default of 9 in a row go unanswered, a Read blocked on the conn fails; 0 means 15s.
 	KeepAliveInterval time.Duration
+	// MaxICMPSessions is how many ICMP echo sessions may be live at once, with the limit of MaxUDPSessions and its way of ending the idlest; 0 means 1024, a negative value no limit.
+	MaxICMPSessions int
 	// MaxUDPSessions is how many UDP sessions may be live at once; a client endpoint starting one more ends the session whose last datagram, either way, is the oldest.
 	// 0 means 4096, a negative value no limit.
 	MaxUDPSessions int
@@ -57,12 +59,16 @@ func (o Options) maxUDPSessions() int {
 	return cmp.Or(o.MaxUDPSessions, 4096)
 }
 
+func (o Options) maxICMPSessions() int {
+	return cmp.Or(o.MaxICMPSessions, 1024)
+}
+
 func (o Options) keepAliveInterval() time.Duration {
 	return cmp.Or(o.KeepAliveInterval, 15*time.Second)
 }
 
-// Serve hands each TCP connection and UDP flow arriving on dev to handler until ctx ends or reading dev fails, and always closes dev.
-// A nil handler refuses every flow: TCP with a reset, UDP with ICMP port unreachable.
+// Serve hands each TCP connection, UDP flow and ICMP echo session arriving on dev to handler until ctx ends or reading dev fails, and always closes dev.
+// A nil handler refuses every flow: TCP with a reset, UDP with ICMP port unreachable, ICMP echo with silence.
 // Before returning it closes the conns still accepted and waits for every ServeFlow to return.
 func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options) error {
 	// The event goroutines of a native device block once its Events buffer is full.
@@ -80,8 +86,8 @@ func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options)
 		answerTimeout:     opts.answerTimeout(),
 		keepAliveIdle:     opts.keepAliveIdle(),
 		keepAliveInterval: opts.keepAliveInterval(),
-		maxUDPSessions:    opts.maxUDPSessions(),
-		sessions:          make(map[netip.AddrPort]*udpConn),
+		udp:               sessions[netip.AddrPort]{max: opts.maxUDPSessions(), live: make(map[netip.AddrPort]*session)},
+		icmp:              sessions[icmpKey]{max: opts.maxICMPSessions(), live: make(map[icmpKey]*session)},
 	}
 	s, ep, err := g.newStack(dev, opts)
 	if err != nil {
@@ -152,15 +158,16 @@ type gateway struct {
 	// keepAliveIdle and keepAliveInterval are Options.KeepAliveIdle and Options.KeepAliveInterval with their defaults, read once.
 	keepAliveIdle, keepAliveInterval time.Duration
 
-	// maxUDPSessions is Options.MaxUDPSessions with its default, read once; negative means no limit.
-	maxUDPSessions int
-	// udpClock ticks with every datagram of a session, either way, which keeps the tick as its active.
-	udpClock atomic.Uint64
+	// own holds Options.Addresses, the gateway's own.
+	own map[tcpip.Address]bool
+	// clock ticks with every datagram of a session, either way, which keeps the tick as its active.
+	clock atomic.Uint64
 
-	mu       sync.Mutex
-	stopped  bool
-	flows    sync.WaitGroup
-	sessions map[netip.AddrPort]*udpConn // live UDP sessions by client endpoint
+	mu      sync.Mutex
+	stopped bool
+	flows   sync.WaitGroup
+	udp     sessions[netip.AddrPort] // by client endpoint
+	icmp    sessions[icmpKey]
 }
 
 // start counts a new flow in; it reports false once Serve is shutting down.
@@ -173,13 +180,13 @@ func (g *gateway) start() bool {
 	return !g.stopped
 }
 
-// stop refuses new flows and closes the live UDP sessions, which have no endpoint for Close to abort.
+// stop refuses new flows and closes the live UDP and ICMP sessions, which have no endpoint for Close to abort.
 func (g *gateway) stop() {
 	g.mu.Lock()
 	g.stopped = true
-	sessions := slices.Collect(maps.Values(g.sessions))
+	live := slices.AppendSeq(slices.Collect(maps.Values(g.udp.live)), maps.Values(g.icmp.live))
 	g.mu.Unlock()
-	for _, c := range sessions {
+	for _, c := range live {
 		c.Close()
 	}
 }
@@ -304,7 +311,8 @@ func (g *gateway) newStack(dev wgtun.Device, opts Options) (_ *stack.Stack, _ *c
 		{Destination: header.IPv4EmptySubnet, NIC: nicID},
 		{Destination: header.IPv6EmptySubnet, NIC: nicID},
 	})
-	own := make(map[tcpip.Address]bool, len(opts.Addresses))
+	g.s = s
+	g.own = make(map[tcpip.Address]bool, len(opts.Addresses))
 	for _, prefix := range opts.Addresses {
 		if !prefix.IsValid() {
 			return nil, nil, fmt.Errorf("stack: invalid address %v", prefix)
@@ -322,16 +330,13 @@ func (g *gateway) newStack(dev wgtun.Device, opts Options) (_ *stack.Stack, _ *c
 		if e := s.AddProtocolAddress(nicID, address, stack.AddressProperties{}); e != nil {
 			return nil, nil, fmt.Errorf("stack: add address %v: %s", prefix, e)
 		}
-		own[address.AddressWithPrefix.Address] = true
+		g.own[address.AddressWithPrefix.Address] = true
 	}
-	// Under spoofing ICMPv6 would answer echo requests to any destination, so those not sent to the gateway are consumed.
-	consumeEcho := func(id stack.TransportEndpointID, _ *stack.PacketBuffer) bool { return !own[id.LocalAddress] }
-	s.SetTransportProtocolHandler(icmp.ProtocolNumber4, consumeEcho)
-	s.SetTransportProtocolHandler(icmp.ProtocolNumber6, consumeEcho)
+	s.SetTransportProtocolHandler(icmp.ProtocolNumber4, g.handleICMP)
+	s.SetTransportProtocolHandler(icmp.ProtocolNumber6, g.handleICMP)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(s, 0, 2048, g.forwardTCP).HandlePacket)
 	// Without a handler UDP finds no endpoint, which the stack answers with ICMP port unreachable.
 	if g.handler != nil {
-		g.s = s
 		s.SetTransportProtocolHandler(udp.ProtocolNumber, g.handleUDP)
 	}
 	return s, ep, nil

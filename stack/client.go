@@ -23,7 +23,7 @@ func WithClientAddr(ctx context.Context, addr net.Addr) context.Context {
 	return context.WithValue(ctx, clientAddrKey{}, addr)
 }
 
-// ClientAddr returns the client address ctx carries, or nil; a handler passes the flow's *net.TCPAddr or *net.UDPAddr source to its dials and listens with WithClientAddr.
+// ClientAddr returns the client address ctx carries, or nil; a handler passes the flow's source, a *net.TCPAddr, *net.UDPAddr or for icmp *net.IPAddr, to its dials and listens with WithClientAddr.
 func ClientAddr(ctx context.Context) net.Addr {
 	addr, _ := ctx.Value(clientAddrKey{}).(net.Addr)
 	return addr
