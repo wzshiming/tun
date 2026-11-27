@@ -209,7 +209,61 @@ func TestRingDeviceReportsNameMTUAndBatchSize(t *testing.T) {
 	if mtu, err := dev.MTU(); err != nil || mtu != 1400 {
 		t.Errorf("MTU = %d, %v, want 1400", mtu, err)
 	}
-	if dev.BatchSize() != 1 || dev.File() != nil {
-		t.Errorf("BatchSize, File = %d, %v, want 1, nil", dev.BatchSize(), dev.File())
+	if dev.BatchSize() != deviceBatch || dev.File() != nil {
+		t.Errorf("BatchSize, File = %d, %v, want %d, nil", dev.BatchSize(), dev.File(), deviceBatch)
 	}
+}
+
+func TestRingDeviceReadDrainsTheRingIntoItsBuffers(t *testing.T) {
+	ring := ttNewRingFake()
+	ring.rx = [][]byte{[]byte("one"), []byte("two"), []byte("three")}
+	dev := newRingDevice(ring, "tun0", 1500)
+	defer dev.Close()
+	bufs, sizes := [][]byte{make([]byte, 64), make([]byte, 64)}, make([]int, 2)
+	n, err := dev.Read(bufs, sizes, 16)
+	if err != nil || n != 2 {
+		t.Fatalf("Read = %d, %v, want 2, nil", n, err)
+	}
+	if one, two := string(bufs[0][16:16+sizes[0]]), string(bufs[1][16:16+sizes[1]]); one != "one" || two != "two" {
+		t.Errorf("Read packets = %q, %q, want one, two", one, two)
+	}
+	if n, err = dev.Read(bufs, sizes, 16); err != nil || n != 1 || string(bufs[0][16:16+sizes[0]]) != "three" {
+		t.Fatalf("second Read = %d, %v, %q, want 1, nil, three", n, err, bufs[0][16:16+sizes[0]])
+	}
+	if ring.released != 3 {
+		t.Errorf("released %d packets, want 3", ring.released)
+	}
+	select {
+	case <-ring.waiting:
+		t.Error("Read waited on a ring that held packets")
+	default:
+	}
+}
+
+// The ring ending behind a packet is the next Read's to report.
+func TestRingDeviceReadReturnsThePacketsBeforeTheRingEnded(t *testing.T) {
+	ring := &ttEndingRing{ttRingFake: ttNewRingFake()}
+	ring.rx = [][]byte{[]byte("last")}
+	dev := newRingDevice(ring, "tun0", 1500)
+	defer dev.Close()
+	bufs, sizes := [][]byte{make([]byte, 64), make([]byte, 64)}, make([]int, 2)
+	if n, err := dev.Read(bufs, sizes, 0); err != nil || n != 1 || string(bufs[0][:sizes[0]]) != "last" {
+		t.Fatalf("Read = %d, %v, want 1, nil with the last packet", n, err)
+	}
+	if n, err := dev.Read(bufs, sizes, 0); n != 0 || !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Read of the ended ring = %d, %v, want 0, os.ErrClosed", n, err)
+	}
+}
+
+// ttEndingRing ends once its last packet is received.
+type ttEndingRing struct{ *ttRingFake }
+
+func (r *ttEndingRing) receive() ([]byte, error) {
+	p, err := r.ttRingFake.receive()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err == nil && len(r.rx) == 0 {
+		r.ended = true
+	}
+	return p, err
 }
