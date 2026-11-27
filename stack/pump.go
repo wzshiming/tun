@@ -48,27 +48,34 @@ func injectPacket(ep *channel.Endpoint, packet []byte) {
 	pkt.DecRef()
 }
 
+// writePackets writes the packets the stack sends to dev, in batches of those already queued.
+// Its buffers hold a packet of the link MTU, which the stack never exceeds, rather than the 65535 bytes a device may read.
 func writePackets(ctx context.Context, dev wgtun.Device, ep *channel.Endpoint) {
 	bufs := make([][]byte, dev.BatchSize())
 	for i := range bufs {
-		bufs[i] = make([]byte, offset+65535)
+		bufs[i] = make([]byte, offset+int(ep.MTU()))
 	}
 	batch := make([][]byte, 0, len(bufs))
 	for pkt := ep.ReadContext(ctx); pkt != nil; pkt = ep.ReadContext(ctx) {
 		batch = batch[:0]
 		for pkt != nil {
-			buf, n := bufs[len(batch)], offset
-			for _, view := range pkt.AsSlices() {
-				n += copy(buf[n:], view)
+			// A packet over the MTU would be cut short, so it is dropped instead.
+			if buf := bufs[len(batch)]; pkt.Size() <= len(buf)-offset {
+				n := offset
+				for _, view := range pkt.AsSlices() {
+					n += copy(buf[n:], view)
+				}
+				batch = append(batch, buf[:n])
 			}
 			pkt.DecRef()
-			batch = append(batch, buf[:n])
 			if len(batch) == len(bufs) {
 				break
 			}
 			pkt = ep.Read()
 		}
-		dev.Write(batch, offset)
+		if len(batch) > 0 {
+			dev.Write(batch, offset)
+		}
 	}
 }
 
