@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -41,12 +42,17 @@ func (g *gateway) handleUDP(id stack.TransportEndpointID, pkt *stack.PacketBuffe
 	}
 	d := datagram{payload: pkt.Data().AsRange().ToSlice(), target: addrPort(id.LocalAddress, id.LocalPort)}
 	client := addrPort(id.RemoteAddress, id.RemotePort)
+	var evicted *udpConn
 	g.mu.Lock()
 	c, ok := g.sessions[client]
 	if !ok {
 		if g.stopped {
 			g.mu.Unlock()
 			return true
+		}
+		if g.maxUDPSessions > 0 && len(g.sessions) >= g.maxUDPSessions {
+			evicted = g.idlestSession()
+			delete(g.sessions, evicted.client)
 		}
 		c = g.newUDPConn(d.target, client, pkt.NetworkProtocolNumber)
 		g.sessions[client] = c
@@ -60,11 +66,28 @@ func (g *gateway) handleUDP(id stack.TransportEndpointID, pkt *stack.PacketBuffe
 		})
 	}
 	g.mu.Unlock()
+	if evicted != nil {
+		// Its handler finds the conn closed and returns, which ends the flow.
+		evicted.Close()
+	}
+	c.touch()
 	select {
 	case c.queue <- d:
 	default:
 	}
 	return true
+}
+
+// idlestSession returns the live session whose last datagram is the oldest; the caller holds g.mu and has at least one session.
+// It looks at every session, which only a client endpoint beyond the limit pays for.
+func (g *gateway) idlestSession() *udpConn {
+	var idlest *udpConn
+	for _, c := range g.sessions {
+		if idlest == nil || c.active.Load() < idlest.active.Load() {
+			idlest = c
+		}
+	}
+	return idlest
 }
 
 // udpConn is a UDP session: it reads the datagrams its client sends to any target and writes datagrams to its client from any source.
@@ -77,7 +100,13 @@ type udpConn struct {
 	closed         chan struct{}
 	closeOnce      sync.Once
 	onClose        func()
+	// active is the tick of the gateway's udpClock at the session's last datagram, either way.
+	active atomic.Uint64
+	clock  *atomic.Uint64
 }
+
+// touch marks the session as the one most recently active.
+func (c *udpConn) touch() { c.active.Store(c.clock.Add(1)) }
 
 func (g *gateway) newUDPConn(target, client netip.AddrPort, netProto tcpip.NetworkProtocolNumber) *udpConn {
 	c := &udpConn{
@@ -88,6 +117,7 @@ func (g *gateway) newUDPConn(target, client netip.AddrPort, netProto tcpip.Netwo
 		queue:        make(chan datagram, udpQueueLen),
 		readDeadline: deadline{passed: make(chan struct{})},
 		closed:       make(chan struct{}),
+		clock:        &g.udpClock,
 	}
 	c.onClose = func() {
 		g.mu.Lock()
@@ -183,6 +213,7 @@ func (c *udpConn) writeFrom(b []byte, src netip.AddrPort) (int, error) {
 	if e := route.WritePacket(stack.NetworkHeaderParams{Protocol: header.UDPProtocolNumber, TTL: route.DefaultTTL()}, pkt); e != nil {
 		return 0, fmt.Errorf("stack: write udp from %v: %s", src, e)
 	}
+	c.touch()
 	return len(b), nil
 }
 

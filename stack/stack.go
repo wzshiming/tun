@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	wgtun "golang.zx2c4.com/wireguard/tun"
@@ -39,6 +40,9 @@ type Options struct {
 	KeepAliveIdle time.Duration
 	// KeepAliveInterval is the time between those probes; once gVisor's default of 9 in a row go unanswered, a Read blocked on the conn fails; 0 means 15s.
 	KeepAliveInterval time.Duration
+	// MaxUDPSessions is how many UDP sessions may be live at once; a client endpoint starting one more ends the session whose last datagram, either way, is the oldest.
+	// 0 means 4096, a negative value no limit.
+	MaxUDPSessions int
 }
 
 func (o Options) answerTimeout() time.Duration {
@@ -47,6 +51,10 @@ func (o Options) answerTimeout() time.Duration {
 
 func (o Options) keepAliveIdle() time.Duration {
 	return cmp.Or(o.KeepAliveIdle, 60*time.Second)
+}
+
+func (o Options) maxUDPSessions() int {
+	return cmp.Or(o.MaxUDPSessions, 4096)
 }
 
 func (o Options) keepAliveInterval() time.Duration {
@@ -72,6 +80,7 @@ func Serve(ctx context.Context, dev wgtun.Device, handler Handler, opts Options)
 		answerTimeout:     opts.answerTimeout(),
 		keepAliveIdle:     opts.keepAliveIdle(),
 		keepAliveInterval: opts.keepAliveInterval(),
+		maxUDPSessions:    opts.maxUDPSessions(),
 		sessions:          make(map[netip.AddrPort]*udpConn),
 	}
 	s, ep, err := g.newStack(dev, opts)
@@ -142,6 +151,11 @@ type gateway struct {
 	answerTimeout time.Duration
 	// keepAliveIdle and keepAliveInterval are Options.KeepAliveIdle and Options.KeepAliveInterval with their defaults, read once.
 	keepAliveIdle, keepAliveInterval time.Duration
+
+	// maxUDPSessions is Options.MaxUDPSessions with its default, read once; negative means no limit.
+	maxUDPSessions int
+	// udpClock ticks with every datagram of a session, either way, which keeps the tick as its active.
+	udpClock atomic.Uint64
 
 	mu       sync.Mutex
 	stopped  bool
