@@ -161,6 +161,9 @@ func (d *logDialer) ListenPacket(ctx context.Context, network, address string) (
 	return &logPacketConn{PacketConn: pc, client: client, seen: make(map[string]bool)}, nil
 }
 
+// logSeenMax is how many targets a logPacketConn remembers having logged.
+const logSeenMax = 1024
+
 type logPacketConn struct {
 	net.PacketConn
 	client string
@@ -172,7 +175,13 @@ func (c *logPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	target := addr.String()
 	c.mu.Lock()
 	seen := c.seen[target]
-	c.seen[target] = true
+	if !seen {
+		// A session that never idles, a DHT node's for one, sends to targets without end: forgetting them all only logs a target again.
+		if len(c.seen) >= logSeenMax {
+			clear(c.seen)
+		}
+		c.seen[target] = true
+	}
 	c.mu.Unlock()
 	if !seen {
 		log.Printf("%s -> udp %s", c.client, target)
