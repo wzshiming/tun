@@ -1,5 +1,6 @@
 // Command tun captures the system's traffic into a TUN device, forwards every
 // flow directly through the physical interface and logs it.
+// It serves a page saying ready over HTTP at port 80 of the address next to each of the device's, by default http://198.18.0.2/ and http://[fd00:6a77:7761::2]/, which answers once the device captures and the flows are served.
 package main
 
 import (
@@ -7,8 +8,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	nethttp "net/http"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -26,6 +29,7 @@ import (
 	"github.com/wzshiming/tun/stack/icmp"
 	"github.com/wzshiming/tun/stack/tcp"
 	"github.com/wzshiming/tun/stack/udp"
+	"go4.org/netipx"
 )
 
 type prefixes []netip.Prefix
@@ -105,6 +109,14 @@ func run(ctx context.Context, cfg tun.Config, dnsTargets []string) error {
 		log.Printf("warning: %s", w)
 	}
 
+	for _, addr := range readyAddrs(cfg.Addresses) {
+		host := addr.String()
+		if addr.Is6() {
+			host = "[" + host + "]"
+		}
+		log.Printf("ready page at http://%s/", host)
+	}
+
 	listen := bypass.NewListenConfig(capture)
 	dialer := &logDialer{dialer: bypass.NewDialer(capture), listen: listen, icmp: listen}
 	err = stack.Serve(ctx, dev.Device, newHandler(dialer, dnsTargets, cfg.Addresses), stack.Options{MTU: cfg.MTU})
@@ -118,6 +130,7 @@ func run(ctx context.Context, cfg tun.Config, dnsTargets []string) error {
 // newHandler relays every flow through dialer, UDP full cone through its ListenPacket, and ICMP echo through sockets of its icmp config, and answers the DNS queries to port 53, of UDP and of TCP, as a mirror of the server they are addressed to, or of dnsTargets if any, which it asks over TCP.
 // It logs every flow, whichever handler serves it, and through dialer each dial and listen that fails.
 // It answers itself the ICMP echo to addresses, those of the TUN device, which an OS that routes them into the device expects to be there.
+// It serves the ready page at port 80 of readyAddrs(addresses).
 func newHandler(dialer *logDialer, dnsTargets []string, addresses []netip.Prefix) stack.Handler {
 	m := stack.NewMux()
 	m.Handle("icmp", "", &icmp.Handler{ListenConfig: dialer.icmp})
@@ -126,10 +139,56 @@ func newHandler(dialer *logDialer, dnsTargets []string, addresses []netip.Prefix
 	}
 	m.Handle("tcp", "", &tcp.Handler{Dialer: dialer})
 	m.Handle("udp", "", &udp.Handler{Dialer: dialer, ListenConfig: dialer})
+	// The two servers below serve their listeners for as long as the process runs.
 	mirror := &dns.Handler{Dialer: dialer, Upstreams: dnsTargets}
-	m.Handle("udp", ":53", mirror)
-	m.Handle("tcp", ":53", mirror)
+	queries := stack.NewListener()
+	m.Handle("udp", ":53", queries)
+	m.Handle("tcp", ":53", queries)
+	go mirror.Serve(queries)
+	if addrs := readyAddrs(addresses); len(addrs) > 0 {
+		ready := stack.NewListener()
+		for _, addr := range addrs {
+			m.Handle("tcp", netip.AddrPortFrom(addr, 80).String(), ready)
+		}
+		go (&nethttp.Server{Handler: nethttp.HandlerFunc(serveReady), ReadHeaderTimeout: 10 * time.Second}).Serve(ready)
+	}
 	return logged(m)
+}
+
+// serveReady answers a request for / with the page that says the TUN serves its flows, which a client reaches only through the device.
+func serveReady(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if r.URL.Path != "/" {
+		nethttp.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	io.WriteString(w, "ready\n")
+}
+
+// readyAddrs returns, for each of the device's addresses, the address that serves the ready page: the next one of its subnet, else the one before.
+// The device's own would not do, as an OS like Linux answers its own addresses itself, without routing them into the device.
+// It is never an IPv4 subnet's network or broadcast address, and an address whose subnet has no other gets none.
+func readyAddrs(addresses []netip.Prefix) []netip.Addr {
+	var addrs []netip.Addr
+	for _, address := range addresses {
+		subnet := address.Masked()
+		usable := func(addr netip.Addr) bool {
+			if !addr.IsValid() || !subnet.Contains(addr) {
+				return false
+			}
+			// A /31 has neither a network nor a broadcast address.
+			if addr.Is4() && subnet.Bits() < 31 {
+				return addr != subnet.Addr() && addr != netipx.PrefixLastIP(subnet)
+			}
+			return true
+		}
+		if next := address.Addr().Next(); usable(next) {
+			addrs = append(addrs, next)
+		} else if prev := address.Addr().Prev(); usable(prev) {
+			addrs = append(addrs, prev)
+		}
+	}
+	return addrs
 }
 
 // logDialer dials and listens for the handlers, logging each dial and listen that fails with the client it was for.

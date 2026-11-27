@@ -1,5 +1,5 @@
-// Package dns is a mirror DNS server: it answers the DNS queries of the flows it serves, over UDP and over TCP, with what the upstream DNS server answers, which it asks over TCP so that DNS keeps working through a proxy that only carries TCP, and keeps to answer later queries itself, also while the upstream is down.
-// Mount its Handler on a stack.Mux for both networks at the DNS port, e.g. h := &dns.Handler{Dialer: d}; m.Handle("udp", ":53", h); m.Handle("tcp", ":53", h); the package registers nothing itself.
+// Package dns is a mirror DNS server: it answers the DNS queries of the conns it serves, over UDP and over TCP, with what the upstream DNS server answers, which it asks over TCP so that DNS keeps working through a proxy that only carries TCP, and keeps to answer later queries itself, also while the upstream is down.
+// Its Handler serves the conns of a net.Listener, which a stack.Listener mounted on a stack.Mux for both networks at the DNS port gives it, e.g. l := stack.NewListener(); m.Handle("udp", ":53", l); m.Handle("tcp", ":53", l); go h.Serve(l); the package registers nothing itself.
 package dns
 
 import (
@@ -16,8 +16,6 @@ import (
 	"github.com/wzshiming/tun/stack"
 )
 
-var _ stack.Handler = (*Handler)(nil)
-
 // maxInFlight is how many queries of one flow may wait for their answers at once: a UDP session drops the queries beyond it, a TCP conn reads no more until one is answered.
 const maxInFlight = 64
 
@@ -26,7 +24,6 @@ const maxInFlight = 64
 // A query no kept reply answers goes upstream, once for the clients asking the same at once, is sent once more on a new conn if a failed one left it unanswered, and is answered with SERVFAIL if the upstream does not answer.
 // A reply too long for the client's UDP payload size, 512 bytes unless its OPT record tells more, is sent truncated, for the client to ask again over TCP.
 // Any other request is refused without asking upstream: a zone transfer, which takes more than one reply, with REFUSED, another opcode with NOTIMP, and a query of not exactly one question, or that does not parse, with FORMERR.
-// It rejects flows of other networks.
 type Handler struct {
 	Dialer stack.Dialer
 	// Upstreams, when set, are the host:port of the DNS servers mirrored, as one, for every query, whichever server the client addressed; replies still come back from that server. Empty mirrors each addressed server.
@@ -71,17 +68,32 @@ func (h *Handler) idle() time.Duration {
 	return cmp.Or(h.Idle, 10*time.Second)
 }
 
-// ServeFlow accepts f and answers its messages until it idles, its conn fails or ctx ends, a TCP conn also once its client closed it and has every answer; it then closes the conn, and with the last flow served every upstream conn.
-func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
-	network := f.Network()
-	if network != "udp" && network != "tcp" {
-		f.Reject()
+// Serve accepts the conns of l, each on its own goroutine, until l fails, and returns that error.
+// A conn that is a net.PacketConn is served as a UDP session: each DNS query is answered from the server it was sent to, which ReadFrom returns as a *net.UDPAddr, with a WriteTo from that address.
+// Any other conn is served as a TCP one, which the client dialled to the server at its LocalAddr.
+// A conn is served until it idles or fails, a TCP one also once its client closed it and has every answer; it is then closed, and with the last conn served every upstream conn.
+// The dials for a conn carry its RemoteAddr as stack.ClientAddr.
+func (h *Handler) Serve(l net.Listener) error {
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			return err
+		}
+		go h.serveConn(conn)
+	}
+}
+
+func (h *Handler) serveConn(conn net.Conn) {
+	ctx := stack.WithClientAddr(context.Background(), conn.RemoteAddr())
+	if pc, ok := conn.(net.PacketConn); ok {
+		h.serve(ctx, conn, func(ctx context.Context, s *session) { s.serveUDP(ctx, pc) })
 		return
 	}
-	conn, err := f.Accept()
-	if err != nil {
-		return
-	}
+	h.serve(ctx, conn, func(ctx context.Context, s *session) { s.serveTCP(ctx, conn, conn.LocalAddr().String()) })
+}
+
+// serve runs answer on a session of conn, which it closes once answer returned or the session idled.
+func (h *Handler) serve(ctx context.Context, conn io.Closer, answer func(context.Context, *session)) {
 	defer conn.Close()
 	h.enter()
 	defer h.leave()
@@ -92,11 +104,7 @@ func (h *Handler) ServeFlow(ctx context.Context, f stack.Flow) {
 	stop := context.AfterFunc(ctx, s.end)
 	defer stop()
 	defer s.watch(h.idle())()
-	if network == "udp" {
-		s.serveUDP(stack.WithClientAddr(ctx, net.UDPAddrFromAddrPort(f.Client())))
-	} else {
-		s.serveTCP(stack.WithClientAddr(ctx, net.TCPAddrFromAddrPort(f.Client())), f.Target().String())
-	}
+	answer(ctx, s)
 }
 
 // enter counts one more flow served.
@@ -120,10 +128,10 @@ func (h *Handler) leave() {
 	}
 }
 
-// session is one flow being served.
+// session is one conn being served.
 type session struct {
 	h    *Handler
-	conn net.Conn
+	conn io.Closer
 	// cancel ends the ctx of the answers.
 	cancel context.CancelFunc
 	ending sync.Once
@@ -160,11 +168,7 @@ func (s *session) watch(idle time.Duration) (stop func() bool) {
 }
 
 // serveUDP answers each datagram of the session from the server it was sent to.
-func (s *session) serveUDP(ctx context.Context) {
-	pc, ok := s.conn.(net.PacketConn)
-	if !ok {
-		return
-	}
+func (s *session) serveUDP(ctx context.Context, pc net.PacketConn) {
 	buf := make([]byte, 65535)
 	for {
 		n, addr, err := pc.ReadFrom(buf)
@@ -199,12 +203,12 @@ func (s *session) serveUDP(ctx context.Context) {
 	}
 }
 
-// serveTCP answers each length-framed message of the conn, which the client dialled to the server at addressed, in the order the answers come, and returns once the client closed its side and has them all.
-func (s *session) serveTCP(ctx context.Context, addressed string) {
+// serveTCP answers each length-framed message of conn, which the client dialled to the server at addressed, in the order the answers come, and returns once the client closed its side and has them all.
+func (s *session) serveTCP(ctx context.Context, conn net.Conn, addressed string) {
 	upstream, servers := s.h.mirrored(addressed)
 	var writing sync.Mutex
 	for {
-		query, err := readFrame(s.conn)
+		query, err := readFrame(conn)
 		if err != nil {
 			break
 		}
@@ -221,7 +225,7 @@ func (s *session) serveTCP(ctx context.Context, addressed string) {
 				return
 			}
 			writing.Lock()
-			err := writeFrame(s.conn, reply)
+			err := writeFrame(conn, reply)
 			writing.Unlock()
 			if err != nil {
 				s.end()

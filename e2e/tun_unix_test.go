@@ -50,7 +50,7 @@ func TestE2EHelper(t *testing.T) {
 	}
 
 	// Bypassing everything else keeps the runner's own traffic off the TUN.
-	captured := ttPrefixes("1.1.1.1/32", "2606:4700:4700::1111/128", netip.PrefixFrom(ttUDPEchoTarget.Addr(), 32).String(), netip.PrefixFrom(ttConeSecondTarget.Addr(), 32).String())
+	captured := ttPrefixes("1.1.1.1/32", "2606:4700:4700::1111/128", netip.PrefixFrom(ttUDPEchoTarget.Addr(), 32).String(), netip.PrefixFrom(ttConeSecondTarget.Addr(), 32).String(), netip.PrefixFrom(ttServed, 32).String())
 	cfg := ttConfig(ttSet(t, ttPrefixes("0.0.0.0/0", "::/0"), captured).Prefixes())
 	want := captured
 	if got := tun.CaptureRoutes(cfg); len(got) != len(want) || slices.ContainsFunc(want, func(p netip.Prefix) bool { return !slices.Contains(got, p) }) {
@@ -70,6 +70,8 @@ func TestE2EHelper(t *testing.T) {
 			"[2606:4700:4700::1111]:8080": echo,
 			ttUDPEchoTarget.String():      ttServeUDPEcho(t),
 			ttConeSecondTarget.String():   ttServeUDPEcho(t),
+			"1.1.1.1:443":                 ttServeTLSWeb(t),
+			ttQUICTarget.String():         ttServeQUICEcho(t),
 		},
 		dns: ttServeLocal(t, ttDNSServer),
 	}
@@ -79,7 +81,7 @@ func TestE2EHelper(t *testing.T) {
 	ttWaitFor(t, 10*time.Second, func() bool {
 		return ttIfaceHas(dev.Interface, "198.18.0.1") && ttIfaceHas(dev.Interface, "fd00:6a77:7761::1")
 	}, dev.Interface+" to hold 198.18.0.1 and fd00:6a77:7761::1")
-	for _, ip := range []string{"1.1.1.1", "2606:4700:4700::1111", ttUDPEchoTarget.Addr().String(), ttConeSecondTarget.Addr().String()} {
+	for _, ip := range []string{"1.1.1.1", "2606:4700:4700::1111", ttUDPEchoTarget.Addr().String(), ttConeSecondTarget.Addr().String(), ttServed.String()} {
 		if got := ttRouteDev(t, ip); got != dev.Interface {
 			t.Fatalf("route to %s leaves through %q, want %s", ip, got, dev.Interface)
 		}
@@ -90,6 +92,15 @@ func TestE2EHelper(t *testing.T) {
 
 	t.Run("tcp4 echo", func(t *testing.T) { ttEchoVia(t, rec, "1.1.1.1:8080", "198.18.0.1") })
 	t.Run("tcp6 echo", func(t *testing.T) { ttEchoVia(t, rec, "[2606:4700:4700::1111]:8080", "fd00:6a77:7761::1") })
+	t.Run("https relayed", func(t *testing.T) {
+		ttGetBody(t, "https://1.1.1.1/relayed", "HTTP/2.0 /relayed tls=true")
+		rec.wantDial(t, "tcp", "1.1.1.1:443", "198.18.0.1")
+	})
+	t.Run("quic relayed", func(t *testing.T) {
+		ttQUICEcho(t, ttQUICTarget)
+		rec.wantDial(t, "udp", ttQUICTarget.String(), "198.18.0.1")
+	})
+	ttServedVia(t, rec)
 	t.Run("dns over udp", func(t *testing.T) {
 		ttDNSVia(t, "1.1.1.1:53")
 		rec.wantDial(t, "tcp", "1.1.1.1:53", "")
@@ -205,6 +216,7 @@ func TestE2ERoot(t *testing.T) {
 	if !ttPingOK(t, "198.18.0.1") {
 		t.Error("ping 198.18.0.1 got no reply")
 	}
+	ttServedVia(t, rec)
 
 	ttTeardown(t, cancel, errCh, dev)
 	if err := ttGet(t, "https://1.1.1.1/", 20*time.Second); err != nil {

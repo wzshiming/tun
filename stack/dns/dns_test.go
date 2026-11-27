@@ -181,14 +181,17 @@ type testFlow struct {
 	done   chan struct{}
 }
 
-// testStart serves f with h until the test ends.
+// testStart serves f with h through a stack.Listener until the test ends.
 func testStart(t *testing.T, h *Handler, f *stacktest.Flow) *testFlow {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	tf := &testFlow{flow: f, cancel: cancel, done: make(chan struct{})}
+	l := stack.NewListener()
+	go h.Serve(l)
+	t.Cleanup(func() { l.Close() })
 	go func() {
 		defer close(tf.done)
-		h.ServeFlow(ctx, f)
+		l.ServeFlow(ctx, f)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -250,8 +253,17 @@ func testServeTCP(t *testing.T, h *Handler, server netip.AddrPort) *testTCP {
 	t.Helper()
 	client, served := net.Pipe()
 	t.Cleanup(func() { client.Close() })
-	return &testTCP{testStart(t, h, stacktest.NewFlow("tcp", testClient, server, served)), client}
+	return &testTCP{testStart(t, h, stacktest.NewFlow("tcp", testClient, server, addressedConn{served, server})), client}
 }
+
+// addressedConn is a conn whose LocalAddr is the server its client dialled and RemoteAddr testClient, as those of a TCP flow are.
+type addressedConn struct {
+	net.Conn
+	server netip.AddrPort
+}
+
+func (c addressedConn) LocalAddr() net.Addr  { return net.TCPAddrFromAddrPort(c.server) }
+func (c addressedConn) RemoteAddr() net.Addr { return net.TCPAddrFromAddrPort(testClient) }
 
 // ask sends query, length-framed, and returns the next reply.
 func (c *testTCP) ask(t *testing.T, query []byte) dnsmessage.Message {
@@ -735,15 +747,6 @@ func TestFlowEndsWithCtxWhileUpstreamIsSilent(t *testing.T) {
 func TestIdleDefaultsToTenSeconds(t *testing.T) {
 	if got := new(Handler).idle(); got != 10*time.Second {
 		t.Errorf("idle of the zero Handler = %v, want 10s", got)
-	}
-}
-
-func TestRejectsOtherNetworks(t *testing.T) {
-	up := &fakeUpstream{}
-	f := stacktest.NewFlow("icmp", testClient, testServer, stacktest.NewSession(testClient, testServer))
-	testMirror(up, 0).ServeFlow(context.Background(), f)
-	if !f.Rejected() || f.Accepted() {
-		t.Errorf("flow of network icmp: rejected %v, accepted %v, want it rejected", f.Rejected(), f.Accepted())
 	}
 }
 
