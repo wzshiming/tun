@@ -19,7 +19,7 @@ import (
 )
 
 func TestServeNilHandlerAnswersUDPWithPortUnreachable(t *testing.T) {
-	env := testServeWith(t, Options{Addresses: testAddresses}, nil)
+	env := testServeWith(t, Options{}, nil)
 	conn := env.dialUDP(t, "10.0.0.9:1234")
 	testSend(t, conn, "datagram")
 	err := testUDPError(t, env, conn, testWait)

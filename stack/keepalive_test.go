@@ -26,7 +26,7 @@ const (
 func keepAliveServe(t *testing.T) (*testEnv, <-chan net.Conn) {
 	t.Helper()
 	conns, release := make(chan net.Conn, 4), make(chan struct{})
-	opts := Options{Addresses: testAddresses, KeepAliveIdle: testKeepAliveIdle, KeepAliveInterval: testKeepAliveInterval}
+	opts := Options{KeepAliveIdle: testKeepAliveIdle, KeepAliveInterval: testKeepAliveInterval}
 	env := testServeWith(t, opts, HandlerFunc(func(_ context.Context, f Flow) {
 		if conn, err := f.Accept(); err == nil {
 			conns <- conn

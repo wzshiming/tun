@@ -14,7 +14,7 @@ import (
 const testStopBound = 3 * time.Second
 
 func TestServeReturnsContextErrorAndClosesDevice(t *testing.T) {
-	env := testServe(t, Options{Addresses: testAddresses})
+	env := testServe(t, Options{})
 	select {
 	case <-env.done:
 		t.Fatalf("Serve() = %v before its context ended, want it to block until then", env.err)
@@ -68,7 +68,7 @@ func TestServeCancelEndsServeFlowContext(t *testing.T) {
 }
 
 func TestServeReturnsDeviceReadError(t *testing.T) {
-	env := testServe(t, Options{Addresses: testAddresses})
+	env := testServe(t, Options{})
 	injected := errors.New("test read failure")
 	env.dev.failRead(injected)
 	if err := env.wait(t); !errors.Is(err, injected) {
@@ -80,14 +80,14 @@ func TestServeReturnsDeviceReadError(t *testing.T) {
 }
 
 func TestServeKeepsReadingAfterTooManySegments(t *testing.T) {
-	env := testServe(t, Options{Addresses: testAddresses})
+	env := testServe(t, Options{})
 	env.failOneRead(t, tun.ErrTooManySegments)
 	conn := env.dialTCP(t, "10.0.0.9:443")
 	testDeliver(t, conn, conn, "echoed both ways")
 }
 
 func TestServeDeliversPacketsReadWithTooManySegments(t *testing.T) {
-	env := testServe(t, Options{Addresses: testAddresses})
+	env := testServe(t, Options{})
 	env.dev.segmentSYN()
 	ctx, cancel := context.WithTimeout(env.alive, testWait)
 	defer cancel()
@@ -104,7 +104,7 @@ func TestServeDeliversPacketsReadWithTooManySegments(t *testing.T) {
 
 func TestServeDrainsDeviceEvents(t *testing.T) {
 	const sends, wait = 20, 2 * time.Second
-	env := testServe(t, Options{Addresses: testAddresses})
+	env := testServe(t, Options{})
 	received, all := env.dev.feedEvents(sends)
 	select {
 	case <-all:

@@ -31,9 +31,8 @@ const (
 )
 
 var (
-	testClient4   = netip.MustParseAddr("10.0.0.2")
-	testClient6   = netip.MustParseAddr("fd00::2")
-	testAddresses = []netip.Prefix{netip.MustParsePrefix("10.0.0.1/24"), netip.MustParsePrefix("fd00::1/64")}
+	testClient4 = netip.MustParseAddr("10.0.0.2")
+	testClient6 = netip.MustParseAddr("fd00::2")
 )
 
 // fakeDevice is the tun.Device handed to Serve, wired back-to-back to a netstack client device.

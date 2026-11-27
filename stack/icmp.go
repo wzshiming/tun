@@ -21,12 +21,8 @@ type icmpKey struct {
 }
 
 // handleICMP runs on the packet goroutine for every ICMP packet, as no ICMP endpoint is ever registered.
-// One sent to the gateway's own address is left to the stack, which answers its echo requests.
-// Any other is consumed, as under spoofing the stack would answer echo requests to every destination: a valid echo request is queued on its session, starting the session and its flow if none is live, and the rest is dropped.
+// It consumes every one, as under spoofing the stack would answer echo requests to every destination: a valid echo request is queued on its session, starting the session and its flow if none is live, and the rest is dropped.
 func (g *gateway) handleICMP(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
-	if g.own[id.LocalAddress] {
-		return false
-	}
 	if g.handler == nil {
 		return true
 	}
