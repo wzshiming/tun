@@ -60,7 +60,7 @@ func main() {
 	var addrs, bypassed prefixes
 	flag.Var(&addrs, "addr", "TUN address in CIDR form, repeatable (default 198.18.0.1/30 and fd00:6a77:7761::1/64)")
 	flag.IntVar(&cfg.MTU, "mtu", 1500, "TUN MTU")
-	flag.Var(&bypassed, "bypass", "destination CIDR never captured, repeatable")
+	flag.Var(&bypassed, "bypass", "destination CIDR never captured, repeatable; any given replace the defaults (default 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/3, fe80::/10, ff00::/8 and ::/8 but for the NAT64 prefixes 64:ff9b::/96 and 64:ff9b:1::/48)")
 	flag.StringVar(&cfg.Name, "name", "tun", "interface name (ignored on macOS)")
 	var dnsTargets []string
 	flag.Func("dns", "host:port of a DNS server mirrored, over TCP, for every DNS query to port 53, repeatable: a later one is asked when the earlier ones fail (default the server the query is addressed to)", func(v string) error {
@@ -81,6 +81,9 @@ func main() {
 	if len(addrs) == 0 {
 		addrs = prefixes{netip.MustParsePrefix("198.18.0.1/30"), netip.MustParsePrefix("fd00:6a77:7761::1/64")}
 	}
+	if len(bypassed) == 0 {
+		bypassed = defaultBypass()
+	}
 	cfg.Addresses = addrs
 	cfg.Bypass = bypassed
 
@@ -96,6 +99,30 @@ func main() {
 		stop()
 		os.Exit(1)
 	}
+}
+
+// defaultBypass returns the destinations left off the TUN when no -bypass is given: whole reserved blocks, so that carving them out of a family leaves few routes.
+func defaultBypass() []netip.Prefix {
+	var b netipx.IPSetBuilder
+	for _, p := range []string{
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		// Multicast, the reserved 240.0.0.0/4 and with it the limited broadcast address.
+		"224.0.0.0/3",
+		// The unspecified, loopback, IPv4-compatible and IPv4-mapped addresses.
+		"::/8",
+		"fe80::/10",
+		"ff00::/8",
+	} {
+		b.AddPrefix(netip.MustParsePrefix(p))
+	}
+	// The NAT64 prefixes of RFC 6052 and RFC 8215 are destinations, though they lie in ::/8.
+	for _, p := range []string{"64:ff9b::/96", "64:ff9b:1::/48"} {
+		b.RemovePrefix(netip.MustParsePrefix(p))
+	}
+	// The prefixes above are valid, so the set has no error.
+	set, _ := b.IPSet()
+	return set.Prefixes()
 }
 
 func run(ctx context.Context, cfg tun.Config, dnsTargets []string) error {
