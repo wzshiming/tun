@@ -30,7 +30,6 @@ import (
 	"github.com/wzshiming/tun/stack/icmp"
 	"github.com/wzshiming/tun/stack/tcp"
 	"github.com/wzshiming/tun/stack/udp"
-	"go4.org/netipx"
 )
 
 type prefixes []netip.Prefix
@@ -220,7 +219,8 @@ func readyAddrs(addresses []netip.Prefix) []netip.Addr {
 			}
 			// A /31 has neither a network nor a broadcast address.
 			if addr.Is4() && subnet.Bits() < 31 {
-				return addr != subnet.Addr() && addr != netipx.PrefixLastIP(subnet)
+				// The broadcast address is the last of the subnet.
+				return addr != subnet.Addr() && subnet.Contains(addr.Next())
 			}
 			return true
 		}

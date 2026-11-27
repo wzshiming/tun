@@ -5,7 +5,6 @@ go 1.27.3
 require (
 	github.com/wzshiming/elevate v0.0.0-20261106133939-3adb24e4f001
 	github.com/wzshiming/wintun v0.0.0-20261106175824-f7950ee936b8
-	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb
 	golang.org/x/net v0.63.0
 	golang.org/x/sys v0.50.0
 	golang.zx2c4.com/wireguard v0.0.0-20261024220952-b3bc704ef0ee

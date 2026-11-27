@@ -20,6 +20,7 @@ import (
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/bypass"
 	"github.com/wzshiming/tun/internal/hook"
+	"github.com/wzshiming/tun/routes"
 )
 
 // TestE2EHelper swaps hook.Launch, so it must not run in parallel.
@@ -51,7 +52,8 @@ func TestE2EHelper(t *testing.T) {
 
 	// Bypassing everything else keeps the runner's own traffic off the TUN.
 	captured := ttPrefixes("1.1.1.1/32", "2606:4700:4700::1111/128", netip.PrefixFrom(ttUDPEchoTarget.Addr(), 32).String(), netip.PrefixFrom(ttConeSecondTarget.Addr(), 32).String(), netip.PrefixFrom(ttServed, 32).String())
-	cfg := ttConfig(ttSet(t, ttPrefixes("0.0.0.0/0", "::/0"), captured).Prefixes())
+	// Captured takes a prefix of each family to cover, here the whole of it.
+	cfg := ttConfig(routes.Captured(ttPrefixes("0.0.0.0/0", "::/0"), captured))
 	want := captured
 	if got := tun.CaptureRoutes(cfg); len(got) != len(want) || slices.ContainsFunc(want, func(p netip.Prefix) bool { return !slices.Contains(got, p) }) {
 		t.Fatalf("CaptureRoutes = %v, want exactly %v", got, want)
