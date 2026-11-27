@@ -1,4 +1,4 @@
-package tun
+package ring
 
 import (
 	"errors"
@@ -10,13 +10,13 @@ import (
 	wgtun "golang.zx2c4.com/wireguard/tun"
 )
 
-// ttRingFake is a packetRing whose receive ring holds rx and whose send ring records sent.
+// ttRingFake is a Ring whose receive ring holds rx and whose send ring records sent.
 type ttRingFake struct {
 	mu        sync.Mutex
 	rx        [][]byte
 	sent      [][]byte
 	allocErrs []error // returned by successive allocate calls; nil means success
-	ended     bool    // receive and allocate return errRingEnded
+	ended     bool    // receive and allocate return ErrEnded
 	endCalls  int
 	released  int           // release zeroes the packet, as the ring may reuse it
 	waiting   chan struct{} // receives a value each time wait blocks
@@ -28,32 +28,32 @@ func ttNewRingFake() *ttRingFake {
 	return &ttRingFake{waiting: make(chan struct{}, 16), woken: make(chan struct{})}
 }
 
-func (r *ttRingFake) receive() ([]byte, error) {
+func (r *ttRingFake) Receive() ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.ended {
-		return nil, errRingEnded
+		return nil, ErrEnded
 	}
 	if len(r.rx) == 0 {
-		return nil, errRingEmpty
+		return nil, ErrEmpty
 	}
 	p := r.rx[0]
 	r.rx = r.rx[1:]
 	return p, nil
 }
 
-func (r *ttRingFake) release(p []byte) {
+func (r *ttRingFake) Release(p []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.released++
 	clear(p)
 }
 
-func (r *ttRingFake) allocate(n int) ([]byte, error) {
+func (r *ttRingFake) Allocate(n int) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.ended {
-		return nil, errRingEnded
+		return nil, ErrEnded
 	}
 	if len(r.allocErrs) > 0 {
 		err := r.allocErrs[0]
@@ -65,20 +65,20 @@ func (r *ttRingFake) allocate(n int) ([]byte, error) {
 	return make([]byte, n), nil
 }
 
-func (r *ttRingFake) send(p []byte) {
+func (r *ttRingFake) Send(p []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sent = append(r.sent, p)
 }
 
-func (r *ttRingFake) wait() {
+func (r *ttRingFake) Wait() {
 	r.waiting <- struct{}{}
 	<-r.woken
 }
 
-func (r *ttRingFake) wake() { r.wakeOnce.Do(func() { close(r.woken) }) }
+func (r *ttRingFake) Wake() { r.wakeOnce.Do(func() { close(r.woken) }) }
 
-func (r *ttRingFake) end() {
+func (r *ttRingFake) End() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.endCalls++
@@ -88,7 +88,7 @@ func (r *ttRingFake) end() {
 func TestRingDeviceReadReturnsPacketAndSize(t *testing.T) {
 	ring := ttNewRingFake()
 	ring.rx = [][]byte{[]byte("ping")}
-	dev := newRingDevice(ring, "tun0", 1500)
+	dev := New(ring, "tun0", 1500)
 	defer dev.Close()
 	bufs, sizes := [][]byte{make([]byte, 64)}, []int{0}
 	n, err := dev.Read(bufs, sizes, 16)
@@ -105,7 +105,7 @@ func TestRingDeviceReadReturnsPacketAndSize(t *testing.T) {
 
 func TestRingDeviceReadBlockedOnEmptyRingReturnsErrClosedOnClose(t *testing.T) {
 	ring := ttNewRingFake()
-	dev := newRingDevice(ring, "tun0", 1500)
+	dev := New(ring, "tun0", 1500)
 	errc := make(chan error, 1)
 	go func() {
 		_, err := dev.Read([][]byte{make([]byte, 64)}, []int{0}, 0)
@@ -129,8 +129,8 @@ func TestRingDeviceReadBlockedOnEmptyRingReturnsErrClosedOnClose(t *testing.T) {
 
 func TestRingDeviceWriteDropsOnOverflowAndContinues(t *testing.T) {
 	ring := ttNewRingFake()
-	ring.allocErrs = []error{errRingFull, nil}
-	dev := newRingDevice(ring, "tun0", 1500)
+	ring.allocErrs = []error{ErrFull, nil}
+	dev := New(ring, "tun0", 1500)
 	defer dev.Close()
 	n, err := dev.Write([][]byte{[]byte("xxdropped"), []byte("xxkept")}, 2)
 	if err != nil || n != 2 {
@@ -143,7 +143,7 @@ func TestRingDeviceWriteDropsOnOverflowAndContinues(t *testing.T) {
 
 func TestRingDeviceWriteSkipsOversizedPacket(t *testing.T) {
 	ring := ttNewRingFake()
-	dev := newRingDevice(ring, "tun0", 1500)
+	dev := New(ring, "tun0", 1500)
 	defer dev.Close()
 	n, err := dev.Write([][]byte{make([]byte, packetMax+1), []byte("kept")}, 0)
 	if err != nil || n != 2 {
@@ -157,7 +157,7 @@ func TestRingDeviceWriteSkipsOversizedPacket(t *testing.T) {
 func TestRingDeviceReadReturnsErrClosedOnEndedRing(t *testing.T) {
 	ring := ttNewRingFake()
 	ring.ended = true
-	dev := newRingDevice(ring, "tun0", 1500)
+	dev := New(ring, "tun0", 1500)
 	defer dev.Close()
 	if _, err := dev.Read([][]byte{make([]byte, 64)}, []int{0}, 0); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("Read = %v, want os.ErrClosed", err)
@@ -167,7 +167,7 @@ func TestRingDeviceReadReturnsErrClosedOnEndedRing(t *testing.T) {
 func TestRingDeviceWriteReturnsErrClosedOnEndedRing(t *testing.T) {
 	ring := ttNewRingFake()
 	ring.ended = true
-	dev := newRingDevice(ring, "tun0", 1500)
+	dev := New(ring, "tun0", 1500)
 	defer dev.Close()
 	if _, err := dev.Write([][]byte{[]byte("ping")}, 0); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("Write = %v, want os.ErrClosed", err)
@@ -176,7 +176,7 @@ func TestRingDeviceWriteReturnsErrClosedOnEndedRing(t *testing.T) {
 
 func TestRingDeviceCloseIsIdempotentAndClosesEventsAfterUp(t *testing.T) {
 	ring := ttNewRingFake()
-	dev := newRingDevice(ring, "tun0", 1500)
+	dev := New(ring, "tun0", 1500)
 	if err := dev.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestRingDeviceCloseIsIdempotentAndClosesEventsAfterUp(t *testing.T) {
 }
 
 func TestRingDeviceReportsNameMTUAndBatchSize(t *testing.T) {
-	dev := newRingDevice(ttNewRingFake(), "tun0", 1400)
+	dev := New(ttNewRingFake(), "tun0", 1400)
 	defer dev.Close()
 	if name, err := dev.Name(); err != nil || name != "tun0" {
 		t.Errorf("Name = %q, %v, want tun0", name, err)
@@ -209,15 +209,15 @@ func TestRingDeviceReportsNameMTUAndBatchSize(t *testing.T) {
 	if mtu, err := dev.MTU(); err != nil || mtu != 1400 {
 		t.Errorf("MTU = %d, %v, want 1400", mtu, err)
 	}
-	if dev.BatchSize() != deviceBatch || dev.File() != nil {
-		t.Errorf("BatchSize, File = %d, %v, want %d, nil", dev.BatchSize(), dev.File(), deviceBatch)
+	if dev.BatchSize() != batchSize || dev.File() != nil {
+		t.Errorf("BatchSize, File = %d, %v, want %d, nil", dev.BatchSize(), dev.File(), batchSize)
 	}
 }
 
 func TestRingDeviceReadDrainsTheRingIntoItsBuffers(t *testing.T) {
 	ring := ttNewRingFake()
 	ring.rx = [][]byte{[]byte("one"), []byte("two"), []byte("three")}
-	dev := newRingDevice(ring, "tun0", 1500)
+	dev := New(ring, "tun0", 1500)
 	defer dev.Close()
 	bufs, sizes := [][]byte{make([]byte, 64), make([]byte, 64)}, make([]int, 2)
 	n, err := dev.Read(bufs, sizes, 16)
@@ -244,7 +244,7 @@ func TestRingDeviceReadDrainsTheRingIntoItsBuffers(t *testing.T) {
 func TestRingDeviceReadReturnsThePacketsBeforeTheRingEnded(t *testing.T) {
 	ring := &ttEndingRing{ttRingFake: ttNewRingFake()}
 	ring.rx = [][]byte{[]byte("last")}
-	dev := newRingDevice(ring, "tun0", 1500)
+	dev := New(ring, "tun0", 1500)
 	defer dev.Close()
 	bufs, sizes := [][]byte{make([]byte, 64), make([]byte, 64)}, make([]int, 2)
 	if n, err := dev.Read(bufs, sizes, 0); err != nil || n != 1 || string(bufs[0][:sizes[0]]) != "last" {
@@ -258,8 +258,8 @@ func TestRingDeviceReadReturnsThePacketsBeforeTheRingEnded(t *testing.T) {
 // ttEndingRing ends once its last packet is received.
 type ttEndingRing struct{ *ttRingFake }
 
-func (r *ttEndingRing) receive() ([]byte, error) {
-	p, err := r.ttRingFake.receive()
+func (r *ttEndingRing) Receive() ([]byte, error) {
+	p, err := r.ttRingFake.Receive()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err == nil && len(r.rx) == 0 {
