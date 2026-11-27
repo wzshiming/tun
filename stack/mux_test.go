@@ -90,6 +90,9 @@ func TestMuxHandlePanics(t *testing.T) {
 	}{
 		{"unknown network", func(m *Mux) { m.Handle("ip", "", noop) }},
 		{"nil handler", func(m *Mux) { m.Handle("tcp", ":80", nil) }},
+		{"icmp port", func(m *Mux) { m.Handle("icmp", ":7", noop) }},
+		{"icmp host and port", func(m *Mux) { m.Handle("icmp", "10.0.0.9:7", noop) }},
+		{"duplicate icmp any as :0", func(m *Mux) { m.Handle("icmp", "", noop); m.Handle("icmp", ":0", noop) }},
 		{"duplicate", func(m *Mux) { m.Handle("udp", ":53", noop); m.Handle("udp", ":53", noop) }},
 		{"duplicate any", func(m *Mux) { m.Handle("tcp", "", noop); m.Handle("tcp", "", noop) }},
 		{"duplicate any as :0", func(m *Mux) { m.Handle("tcp", "", noop); m.Handle("tcp", ":0", noop) }},

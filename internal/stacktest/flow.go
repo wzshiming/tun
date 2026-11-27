@@ -19,7 +19,7 @@ type Flow struct {
 	rejected bool
 }
 
-// NewFlow returns a flow of network, "tcp" or "udp", from client to target, whose Accept returns conn: for udp a *Session.
+// NewFlow returns a flow of network, "tcp", "udp" or "icmp", from client to target, whose Accept returns conn: for udp a *Session.
 func NewFlow(network string, client, target netip.AddrPort, conn net.Conn) *Flow {
 	return &Flow{network: network, client: client, target: target, conn: conn}
 }
