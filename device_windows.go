@@ -5,6 +5,8 @@ import (
 
 	"github.com/wzshiming/wintun"
 	"golang.org/x/sys/windows"
+
+	"github.com/wzshiming/tun/internal/ring"
 )
 
 // wintunRingCapacity is the size of each of the session's rings, 8 MiB.
@@ -12,7 +14,7 @@ const wintunRingCapacity = 0x800000
 
 // wintunDevice is a wgtun.Device over a Wintun adapter's session.
 type wintunDevice struct {
-	*ringDevice
+	*ring.Device
 	adapter *wintun.Adapter
 }
 
@@ -27,41 +29,38 @@ func newWintunDevice(name string, guid *windows.GUID, mtu int) (*wintunDevice, e
 		adapter.Close()
 		return nil, err
 	}
-	ring := &wintunRing{adapter: adapter, session: session, readWait: session.ReadWaitEvent()}
-	return &wintunDevice{ringDevice: newRingDevice(ring, name, mtu), adapter: adapter}, nil
+	r := &wintunRing{adapter: adapter, session: session, readWait: session.ReadWaitEvent()}
+	return &wintunDevice{Device: ring.New(r, name, mtu), adapter: adapter}, nil
 }
 
 // LUID returns the adapter's LUID, or 0 once closed.
 func (d *wintunDevice) LUID() uint64 {
-	d.running.RLock()
-	defer d.running.RUnlock()
-	if d.closed.Load() {
-		return 0
-	}
-	return d.adapter.LUID()
+	var luid uint64
+	d.WhileOpen(func() { luid = d.adapter.LUID() })
+	return luid
 }
 
-// wintunRing is a packetRing over a Wintun session; end also closes the adapter.
+// wintunRing is a ring.Ring over a Wintun session; End also closes the adapter.
 type wintunRing struct {
 	adapter  *wintun.Adapter
 	session  *wintun.Session
 	readWait windows.Handle
 }
 
-// ringErr maps the Wintun error codes to the packetRing errors.
+// ringErr maps the Wintun error codes to the ring.Ring errors.
 func ringErr(err error) error {
 	switch {
 	case errors.Is(err, windows.ERROR_NO_MORE_ITEMS):
-		return errRingEmpty
+		return ring.ErrEmpty
 	case errors.Is(err, windows.ERROR_BUFFER_OVERFLOW):
-		return errRingFull
+		return ring.ErrFull
 	case errors.Is(err, windows.ERROR_HANDLE_EOF):
-		return errRingEnded
+		return ring.ErrEnded
 	}
 	return err
 }
 
-func (r *wintunRing) receive() ([]byte, error) {
+func (r *wintunRing) Receive() ([]byte, error) {
 	p, err := r.session.ReceivePacket()
 	if err != nil {
 		return nil, ringErr(err)
@@ -69,9 +68,9 @@ func (r *wintunRing) receive() ([]byte, error) {
 	return p, nil
 }
 
-func (r *wintunRing) release(p []byte) { r.session.ReleaseReceivePacket(p) }
+func (r *wintunRing) Release(p []byte) { r.session.ReleaseReceivePacket(p) }
 
-func (r *wintunRing) allocate(n int) ([]byte, error) {
+func (r *wintunRing) Allocate(n int) ([]byte, error) {
 	p, err := r.session.AllocateSendPacket(n)
 	if err != nil {
 		return nil, ringErr(err)
@@ -79,11 +78,11 @@ func (r *wintunRing) allocate(n int) ([]byte, error) {
 	return p, nil
 }
 
-func (r *wintunRing) send(p []byte) { r.session.SendPacket(p) }
-func (r *wintunRing) wait()         { windows.WaitForSingleObject(r.readWait, windows.INFINITE) }
-func (r *wintunRing) wake()         { windows.SetEvent(r.readWait) }
+func (r *wintunRing) Send(p []byte) { r.session.SendPacket(p) }
+func (r *wintunRing) Wait()         { windows.WaitForSingleObject(r.readWait, windows.INFINITE) }
+func (r *wintunRing) Wake()         { windows.SetEvent(r.readWait) }
 
-func (r *wintunRing) end() {
+func (r *wintunRing) End() {
 	r.session.End()
 	r.adapter.Close()
 }
