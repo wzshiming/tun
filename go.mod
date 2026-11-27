@@ -6,8 +6,8 @@ require (
 	github.com/wzshiming/elevate v0.0.0-20261106133939-3adb24e4f001
 	github.com/wzshiming/wintun v0.0.0-20261106175824-f7950ee936b8
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb
-	golang.org/x/net v0.60.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/net v0.63.0
+	golang.org/x/sys v0.50.0
 	golang.zx2c4.com/wireguard v0.0.0-20261024220952-b3bc704ef0ee
 	golang.zx2c4.com/wireguard/windows v1.1.1
 	gvisor.dev/gvisor v0.0.0-20261029062900-94fcb330700e
