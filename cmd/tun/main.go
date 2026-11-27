@@ -116,6 +116,7 @@ func run(ctx context.Context, cfg tun.Config, dnsTargets []string) error {
 }
 
 // newHandler relays every flow through dialer, UDP full cone through its ListenPacket, and ICMP echo through sockets of its icmp config, and answers the DNS queries to port 53, of UDP and of TCP, as a mirror of the server they are addressed to, or of dnsTargets if any, which it asks over TCP.
+// It logs every flow, whichever handler serves it, and through dialer each dial and listen that fails.
 // It answers itself the ICMP echo to addresses, those of the TUN device, which an OS that routes them into the device expects to be there.
 func newHandler(dialer *logDialer, dnsTargets []string, addresses []netip.Prefix) stack.Handler {
 	m := stack.NewMux()
@@ -128,9 +129,10 @@ func newHandler(dialer *logDialer, dnsTargets []string, addresses []netip.Prefix
 	mirror := &dns.Handler{Dialer: dialer, Upstreams: dnsTargets}
 	m.Handle("udp", ":53", mirror)
 	m.Handle("tcp", ":53", mirror)
-	return m
+	return logged(m)
 }
 
+// logDialer dials and listens for the handlers, logging each dial and listen that fails with the client it was for.
 type logDialer struct {
 	dialer *net.Dialer
 	listen stack.ListenConfig
@@ -138,19 +140,21 @@ type logDialer struct {
 	icmp *net.ListenConfig
 }
 
-func (d *logDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+// logFailure logs err as the failure of a dial or listen of network and address for the client ctx carries.
+func logFailure(ctx context.Context, network, address string, err error) {
 	client := "unknown"
 	if addr := stack.ClientAddr(ctx); addr != nil {
 		client = addr.String()
 	}
-	flow := fmt.Sprintf("%s -> %s %s", client, network, address)
-	log.Print(flow)
+	log.Printf("%s -> %s %s: %v", client, network, address, err)
+}
+
+func (d *logDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	conn, err := d.dialer.DialContext(ctx, network, address)
 	if err != nil {
-		log.Printf("%s: %v", flow, err)
-		return nil, err
+		logFailure(ctx, network, address, err)
 	}
-	return &logConn{Conn: conn, flow: flow, start: time.Now()}, nil
+	return conn, err
 }
 
 // Listen is unlogged, as the stack never calls it.
@@ -158,60 +162,89 @@ func (d *logDialer) Listen(ctx context.Context, network, address string) (net.Li
 	return d.listen.Listen(ctx, network, address)
 }
 
-// ListenPacket opens a UDP session's socket, which logs each target it first sends to as a flow.
 func (d *logDialer) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
 	pc, err := d.listen.ListenPacket(ctx, network, address)
-	client := "unknown"
-	if addr := stack.ClientAddr(ctx); addr != nil {
-		client = addr.String()
-	}
 	if err != nil {
-		log.Printf("%s -> %s %s: %v", client, network, address, err)
+		logFailure(ctx, network, address, err)
+	}
+	return pc, err
+}
+
+// logged returns a handler that serves each flow with next and logs it: as it starts, each further target a UDP session sends to, and as it ends, either rejected or with the bytes it carried each way and how long it lasted.
+func logged(next stack.Handler) stack.Handler {
+	return stack.HandlerFunc(func(ctx context.Context, f stack.Flow) {
+		lf := &logFlow{Flow: f, start: time.Now()}
+		if f.Network() == "icmp" {
+			// Neither end of an echo session has a port.
+			lf.name = fmt.Sprintf("%s -> icmp %s", f.Client().Addr(), f.Target().Addr())
+		} else {
+			lf.name = fmt.Sprintf("%s -> %s %s", f.Client(), f.Network(), f.Target())
+		}
+		log.Print(lf.name)
+		next.ServeFlow(ctx, lf)
+		lf.end()
+	})
+}
+
+// logFlow is a flow that counts the bytes of its accepted conn.
+type logFlow struct {
+	stack.Flow
+	// name is the flow as its log lines begin: its client, network and target.
+	name  string
+	start time.Time
+
+	mu   sync.Mutex
+	conn *logConn
+}
+
+// Accept returns the flow's conn counting its bytes, as a net.PacketConn if the flow's is one, which then logs each further target the client sends to.
+func (f *logFlow) Accept() (net.Conn, error) {
+	conn, err := f.Flow.Accept()
+	if err != nil {
 		return nil, err
 	}
-	return &logPacketConn{PacketConn: pc, client: client, seen: make(map[string]bool)}, nil
-}
-
-type logPacketConn struct {
-	net.PacketConn
-	client string
-	mu     sync.Mutex
-	seen   map[string]bool
-}
-
-func (c *logPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	target := addr.String()
-	c.mu.Lock()
-	seen := c.seen[target]
-	c.seen[target] = true
-	c.mu.Unlock()
-	if !seen {
-		log.Printf("%s -> udp %s", c.client, target)
+	lc := &logConn{Conn: conn}
+	f.mu.Lock()
+	f.conn = lc
+	f.mu.Unlock()
+	if pc, ok := conn.(net.PacketConn); ok {
+		return &logPacketConn{logConn: lc, pc: pc, client: f.Client(), seen: map[string]bool{f.Target().String(): true}}, nil
 	}
-	return c.PacketConn.WriteTo(b, addr)
+	return lc, nil
 }
 
+// end logs how the flow ended, once its handler returned: one never accepted was rejected, by the handler or by Serve.
+func (f *logFlow) end() {
+	f.mu.Lock()
+	conn := f.conn
+	f.mu.Unlock()
+	if conn == nil {
+		log.Printf("%s rejected", f.name)
+		return
+	}
+	log.Printf("%s closed: read %d, written %d bytes in %s",
+		f.name, conn.read.Load(), conn.written.Load(), time.Since(f.start).Round(time.Millisecond))
+}
+
+// logConn is a flow's conn counting the bytes it carries, named as a conn to the target sees them: read is what the client was sent, written what it sent.
 type logConn struct {
-	read, written int64 // first for 64-bit atomic alignment on 32-bit platforms
 	net.Conn
-	flow  string
-	start time.Time
-	once  sync.Once
+	read, written atomic.Int64
 }
 
 func (c *logConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
-	atomic.AddInt64(&c.read, int64(n))
+	c.written.Add(int64(n))
 	return n, err
 }
 
 func (c *logConn) Write(b []byte) (int, error) {
 	n, err := c.Conn.Write(b)
-	atomic.AddInt64(&c.written, int64(n))
+	c.read.Add(int64(n))
 	return n, err
 }
 
-// CloseWrite lets the stack half-close the flow instead of closing both ends at the first EOF.
+// CloseWrite lets a handler half-close a TCP flow instead of closing both ends at the first EOF.
 func (c *logConn) CloseWrite() error {
 	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()
@@ -219,11 +252,33 @@ func (c *logConn) CloseWrite() error {
 	return errors.ErrUnsupported
 }
 
-func (c *logConn) Close() error {
-	err := c.Conn.Close()
-	c.once.Do(func() {
-		log.Printf("%s closed: read %d, written %d bytes in %s",
-			c.flow, atomic.LoadInt64(&c.read), atomic.LoadInt64(&c.written), time.Since(c.start).Round(time.Millisecond))
-	})
-	return err
+// logPacketConn is the conn of a UDP session, which also logs each target its client first sends to after the flow's own.
+type logPacketConn struct {
+	*logConn
+	pc     net.PacketConn
+	client netip.AddrPort
+	mu     sync.Mutex
+	seen   map[string]bool
+}
+
+func (c *logPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, addr, err := c.pc.ReadFrom(b)
+	c.written.Add(int64(n))
+	if err == nil && addr != nil {
+		target := addr.String()
+		c.mu.Lock()
+		seen := c.seen[target]
+		c.seen[target] = true
+		c.mu.Unlock()
+		if !seen {
+			log.Printf("%s -> udp %s", c.client, target)
+		}
+	}
+	return n, addr, err
+}
+
+func (c *logPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	n, err := c.pc.WriteTo(b, addr)
+	c.read.Add(int64(n))
+	return n, err
 }
