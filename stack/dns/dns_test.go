@@ -55,6 +55,9 @@ type fakeUpstream struct {
 	// route, when set, tells for the address dialled the error that fails the dial or how its conns are served; nil, nil serves as any other.
 	route func(address string) (serve func(u *fakeUpstream, n int, conn net.Conn), err error)
 
+	// silent has the server answer no query it gets while set: what counts is when the query is among queries, not when its answer would be made.
+	silent atomic.Bool
+
 	mu     sync.Mutex
 	dials  []dialRecord
 	asked  []dnsmessage.Message
@@ -114,8 +117,12 @@ func (u *fakeUpstream) loopWith(conn net.Conn, answer func(q dnsmessage.Message,
 			continue
 		}
 		u.mu.Lock()
+		silent := u.silent.Load()
 		u.asked = append(u.asked, q)
 		u.mu.Unlock()
+		if silent {
+			continue
+		}
 		go func() {
 			reply := dnsmessage.Message{Header: q.Header, Questions: q.Questions}
 			reply.Response, reply.RecursionAvailable = true, true
@@ -548,16 +555,13 @@ func TestRefusesOtherRequestsWithoutAskingUpstream(t *testing.T) {
 	}
 }
 
-// testVersions returns an upstream on a mirror of idle and a testClock: it answers the n-th query, from 1, with n A records of 60 s, and none while silent is set.
+// testVersions returns an upstream on a mirror of idle and a testClock: its n-th answer, from 1, has n A records of 60 s, and it answers no query it gets while silent is set.
 func testVersions(idle time.Duration) (h *Handler, up *fakeUpstream, clock *testClock, silent *atomic.Bool) {
-	var asked atomic.Int32
-	silent = new(atomic.Bool)
+	var answered atomic.Int32
 	up = &fakeUpstream{}
+	silent = &up.silent
 	up.answer = func(q dnsmessage.Message, reply *dnsmessage.Message) bool {
-		n := asked.Add(1)
-		if silent.Load() {
-			return false
-		}
+		n := answered.Add(1)
 		for i := range n {
 			reply.Answers = append(reply.Answers, testRecord(q.Questions[0].Name.String(), 60, &dnsmessage.AResource{A: [4]byte{192, 0, 2, byte(i)}}))
 		}
@@ -601,7 +605,7 @@ func TestAnswersStaleReplyFirstAndThenAsksUpstreamForNewOne(t *testing.T) {
 }
 
 func TestGoesOnAnsweringStaleReplyWhileUpstreamIsDown(t *testing.T) {
-	h, up, clock, silent := testVersions(200 * time.Millisecond)
+	h, up, clock, silent := testVersions(2 * time.Second)
 	asking := testAsk(t, "example.com.")
 	testExpectAnswered(t, testServeUDP(t, h, testClient).ask(t, asking.query, testServer), 0x1234, "example.com.", 1)
 	silent.Store(true)
@@ -611,8 +615,8 @@ func TestGoesOnAnsweringStaleReplyWhileUpstreamIsDown(t *testing.T) {
 		reply := testServeTCP(t, h, testServer).ask(t, asking.withID(uint16(i)))
 		testExpectAnswered(t, reply, uint16(i), "example.com.", 1)
 		testExpectTTL(t, reply, 0)
-		if took := time.Since(start); took > 150*time.Millisecond {
-			t.Errorf("the stale reply came after %v, want it before the upstream is given up, after an Idle of 200ms", took)
+		if took := time.Since(start); took > time.Second {
+			t.Errorf("the stale reply came after %v, want it before the upstream is given up, after an Idle of 2s", took)
 		}
 	}
 	// Only the first of them was due to ask: the next is refreshRetry later.
@@ -628,7 +632,7 @@ func TestGoesOnAnsweringStaleReplyWhileUpstreamIsDown(t *testing.T) {
 		_, ok := h.cache.get(testServer.String(), asking.key, asking.query)
 		return ok
 	})
-	testExpectAnswered(t, c.ask(t, asking.query), 0x1234, "example.com.", 4)
+	testExpectAnswered(t, c.ask(t, asking.query), 0x1234, "example.com.", 2)
 }
 
 func TestAnswersNoReplyStaleForLongerThanStale(t *testing.T) {
