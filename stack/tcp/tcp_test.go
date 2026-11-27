@@ -498,3 +498,30 @@ func TestHandlerHalfCloseIdleDefaultsTo60Seconds(t *testing.T) {
 		t.Fatalf("Handler{HalfCloseIdle: 3s}.halfCloseIdle() = %v, want 3s", got)
 	}
 }
+
+// writerToConn is a conn with a WriteTo, as *net.TCPConn has, that tells when it is used.
+type writerToConn struct {
+	*net.TCPConn
+	used chan struct{}
+	once sync.Once
+}
+
+func (c *writerToConn) WriteTo(w io.Writer) (int64, error) {
+	c.once.Do(func() { close(c.used) })
+	return io.Copy(w, struct{ io.Reader }{c.TCPConn})
+}
+
+// A conn's own WriteTo copies through a buffer it allocates, leaving the pooled one unused.
+func TestRelaysThroughItsPooledBufferNotTheConnsWriteTo(t *testing.T) {
+	inner, target := loopbackPair(t)
+	dialled := &writerToConn{TCPConn: inner, used: make(chan struct{})}
+	env := testRelayEnv(t, dialled)
+	waitAccepted(t, env)
+	testRelay(t, target, env.client, "from the target")
+	testRelay(t, env.client, target, "from the client")
+	select {
+	case <-dialled.used:
+		t.Error("the relay copied with the dialled conn's WriteTo, want it to read into its own buffer")
+	default:
+	}
+}
