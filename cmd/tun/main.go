@@ -17,14 +17,13 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/bypass"
 	"github.com/wzshiming/tun/flow"
+	"github.com/wzshiming/tun/flow/flowlog"
 	"github.com/wzshiming/tun/routes"
 	"github.com/wzshiming/tun/stack"
 	"github.com/wzshiming/tun/stack/dns"
@@ -160,8 +159,8 @@ func run(ctx context.Context, s settings) error {
 	}
 
 	listen := bypass.NewListenConfig(capture)
-	dialer := &logDialer{dialer: bypass.NewDialer(capture), listen: listen, icmp: listen}
-	err = stack.Serve(ctx, dev.Device, newHandler(dialer, s), s.stack)
+	dialer := &flowlog.Dialer{Dialer: bypass.NewDialer(capture), ListenConfig: listen}
+	err = stack.Serve(ctx, dev.Device, newHandler(dialer, listen, s), s.stack)
 	if ctx.Err() != nil {
 		log.Printf("interface %s down", dev.Interface)
 		return nil
@@ -169,14 +168,14 @@ func run(ctx context.Context, s settings) error {
 	return err
 }
 
-// newHandler relays every flow through dialer, UDP full cone through its ListenPacket, and ICMP echo through sockets of its icmp config, and answers the DNS queries to port 53, of UDP and of TCP, as a mirror of the server they are addressed to, or of s.dnsTargets if any, which it asks over TCP.
+// newHandler relays every flow through dialer, UDP full cone through its ListenPacket, and ICMP echo through sockets of icmpListen, and answers the DNS queries to port 53, of UDP and of TCP, as a mirror of the server they are addressed to, or of s.dnsTargets if any, which it asks over TCP.
 // It logs every flow, whichever handler serves it, and through dialer each dial and listen that fails.
 // It answers itself the ICMP echo to the addresses of the TUN device, which an OS that routes them into the device expects to be there.
 // It serves the ready page at s.readyPort, unless 0, of readyAddrs of those addresses.
-func newHandler(dialer *logDialer, s settings) flow.Handler {
+func newHandler(dialer *flowlog.Dialer, icmpListen *net.ListenConfig, s settings) flow.Handler {
 	addresses := s.tun.Addresses
 	m := flow.NewMux()
-	m.Handle("icmp", "", &icmp.Handler{ListenConfig: dialer.icmp, Idle: s.icmpIdle})
+	m.Handle("icmp", "", &icmp.Handler{ListenConfig: icmpListen, Idle: s.icmpIdle})
 	for _, address := range addresses {
 		m.Handle("icmp", address.Addr().String(), icmp.Echo{Idle: s.icmpIdle})
 	}
@@ -195,7 +194,7 @@ func newHandler(dialer *logDialer, s settings) flow.Handler {
 		}
 		go (&nethttp.Server{Handler: nethttp.HandlerFunc(serveReady), ReadHeaderTimeout: 10 * time.Second}).Serve(ready)
 	}
-	return logged(m)
+	return flowlog.Handler(m, nil)
 }
 
 // serveReady answers a request for / with the page that says the TUN serves its flows, which a client reaches only through the device.
@@ -232,155 +231,4 @@ func readyAddrs(addresses []netip.Prefix) []netip.Addr {
 		}
 	}
 	return addrs
-}
-
-// logDialer dials and listens for the handlers, logging each dial and listen that fails with the client it was for.
-type logDialer struct {
-	dialer *net.Dialer
-	listen flow.ListenConfig
-	// icmp opens the sockets of the ICMP echo sessions.
-	icmp *net.ListenConfig
-}
-
-// logFailure logs err as the failure of a dial or listen of network and address for the client ctx carries.
-func logFailure(ctx context.Context, network, address string, err error) {
-	client := "unknown"
-	if addr := flow.ClientAddr(ctx); addr != nil {
-		client = addr.String()
-	}
-	log.Printf("%s -> %s %s: %v", client, network, address, err)
-}
-
-func (d *logDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	conn, err := d.dialer.DialContext(ctx, network, address)
-	if err != nil {
-		logFailure(ctx, network, address, err)
-	}
-	return conn, err
-}
-
-// Listen is unlogged, as the stack never calls it.
-func (d *logDialer) Listen(ctx context.Context, network, address string) (net.Listener, error) {
-	return d.listen.Listen(ctx, network, address)
-}
-
-func (d *logDialer) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
-	pc, err := d.listen.ListenPacket(ctx, network, address)
-	if err != nil {
-		logFailure(ctx, network, address, err)
-	}
-	return pc, err
-}
-
-// logged returns a handler that serves each flow with next and logs it: as it starts, each further target a UDP session sends to, and as it ends, either rejected or with the bytes it carried each way and how long it lasted.
-func logged(next flow.Handler) flow.Handler {
-	return flow.HandlerFunc(func(ctx context.Context, f flow.Flow) {
-		lf := &logFlow{Flow: f, start: time.Now()}
-		if f.Network() == "icmp" {
-			// Neither end of an echo session has a port.
-			lf.name = fmt.Sprintf("%s -> icmp %s", f.Client().Addr(), f.Target().Addr())
-		} else {
-			lf.name = fmt.Sprintf("%s -> %s %s", f.Client(), f.Network(), f.Target())
-		}
-		log.Print(lf.name)
-		next.ServeFlow(ctx, lf)
-		lf.end()
-	})
-}
-
-// logFlow is a flow that counts the bytes of its accepted conn.
-type logFlow struct {
-	flow.Flow
-	// name is the flow as its log lines begin: its client, network and target.
-	name  string
-	start time.Time
-
-	mu   sync.Mutex
-	conn *logConn
-}
-
-// Accept returns the flow's conn counting its bytes, as a net.PacketConn if the flow's is one, which then logs each further target the client sends to.
-func (f *logFlow) Accept() (net.Conn, error) {
-	conn, err := f.Flow.Accept()
-	if err != nil {
-		return nil, err
-	}
-	lc := &logConn{Conn: conn}
-	f.mu.Lock()
-	f.conn = lc
-	f.mu.Unlock()
-	if pc, ok := conn.(net.PacketConn); ok {
-		return &logPacketConn{logConn: lc, pc: pc, client: f.Client(), seen: map[string]bool{f.Target().String(): true}}, nil
-	}
-	return lc, nil
-}
-
-// end logs how the flow ended, once its handler returned: one never accepted was rejected, by the handler or by Serve.
-func (f *logFlow) end() {
-	f.mu.Lock()
-	conn := f.conn
-	f.mu.Unlock()
-	if conn == nil {
-		log.Printf("%s rejected", f.name)
-		return
-	}
-	log.Printf("%s closed: read %d, written %d bytes in %s",
-		f.name, conn.read.Load(), conn.written.Load(), time.Since(f.start).Round(time.Millisecond))
-}
-
-// logConn is a flow's conn counting the bytes it carries, named as a conn to the target sees them: read is what the client was sent, written what it sent.
-type logConn struct {
-	net.Conn
-	read, written atomic.Int64
-}
-
-func (c *logConn) Read(b []byte) (int, error) {
-	n, err := c.Conn.Read(b)
-	c.written.Add(int64(n))
-	return n, err
-}
-
-func (c *logConn) Write(b []byte) (int, error) {
-	n, err := c.Conn.Write(b)
-	c.read.Add(int64(n))
-	return n, err
-}
-
-// CloseWrite lets a handler half-close a TCP flow instead of closing both ends at the first EOF.
-func (c *logConn) CloseWrite() error {
-	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
-		return cw.CloseWrite()
-	}
-	return errors.ErrUnsupported
-}
-
-// logPacketConn is the conn of a UDP session, which also logs each target its client first sends to after the flow's own.
-type logPacketConn struct {
-	*logConn
-	pc     net.PacketConn
-	client netip.AddrPort
-	mu     sync.Mutex
-	seen   map[string]bool
-}
-
-func (c *logPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	n, addr, err := c.pc.ReadFrom(b)
-	c.written.Add(int64(n))
-	if err == nil && addr != nil {
-		target := addr.String()
-		c.mu.Lock()
-		seen := c.seen[target]
-		c.seen[target] = true
-		c.mu.Unlock()
-		if !seen {
-			log.Printf("%s -> udp %s", c.client, target)
-		}
-	}
-	return n, addr, err
-}
-
-func (c *logPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	n, err := c.pc.WriteTo(b, addr)
-	c.read.Add(int64(n))
-	return n, err
 }
