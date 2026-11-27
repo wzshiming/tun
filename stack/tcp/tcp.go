@@ -70,7 +70,8 @@ func tunnel(ctx context.Context, a, b net.Conn, idle time.Duration) {
 	done := make(chan bool, 2)
 	copyConn := func(dst, src net.Conn) {
 		buf := bufferPool.Get().(*[32 * 1024]byte)
-		_, err := io.CopyBuffer(touchWriter{dst, touch}, src, buf[:])
+		// Only src's Read is shown to the copy: a WriteTo, which *net.TCPConn has, would be used in place of buf and copy through a buffer it allocates.
+		_, err := io.CopyBuffer(touchWriter{dst, touch}, struct{ io.Reader }{src}, buf[:])
 		bufferPool.Put(buf)
 		halfClosed := false
 		if closer, ok := dst.(interface{ CloseWrite() error }); ok && err == nil {
