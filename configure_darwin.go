@@ -30,7 +30,7 @@ func steps(t tools, name string, cfg Config) ([]step, error) {
 		add(true, t.ifconfig, name, "inet6", a6.String(), "alias")
 	}
 	add(false, t.ifconfig, name, "up")
-	for _, p := range CaptureRoutes(cfg) {
+	for _, p := range installRoutes(cfg) {
 		if p.Addr().Is4() {
 			add(false, t.route, "-n", "add", "-inet", p.String(), "-interface", name)
 		} else {

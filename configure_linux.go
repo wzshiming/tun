@@ -29,7 +29,7 @@ func steps(t tools, name string, cfg Config) ([]step, error) {
 		add(true, t.ip, "-6", "addr", "add", a6.String(), "dev", name)
 	}
 	add(false, t.ip, "link", "set", "dev", name, "up")
-	for _, p := range CaptureRoutes(cfg) {
+	for _, p := range installRoutes(cfg) {
 		if p.Addr().Is4() {
 			add(false, t.ip, "-4", "route", "add", p.String(), "dev", name)
 		} else {

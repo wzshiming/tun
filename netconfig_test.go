@@ -65,9 +65,9 @@ func TestConfigureViaConfiguresEachFamilyInterfaceThenAddressThenRoutes(t *testi
 	if !slices.Equal(f.calls, want) {
 		t.Errorf("calls = %q, want %q", f.calls, want)
 	}
-	v4, v6 := ttSplit(CaptureRoutes(cfg))
+	v4, v6 := ttSplit(installRoutes(cfg))
 	if !slices.Equal(f.routes[false], v4) || !slices.Equal(f.routes[true], v6) {
-		t.Errorf("routes = v4 %v, v6 %v; want CaptureRoutes split by family: %v, %v", f.routes[false], f.routes[true], v4, v6)
+		t.Errorf("routes = v4 %v, v6 %v; want installRoutes split by family: %v, %v", f.routes[false], f.routes[true], v4, v6)
 	}
 }
 
