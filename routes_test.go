@@ -8,12 +8,6 @@ import (
 	"go4.org/netipx"
 )
 
-// ttHoles are the ranges no capture may ever route into the TUN.
-var ttHoles = ttPrefixes("127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/3", "::/8", "fe80::/10", "ff00::/8")
-
-// ttNAT64 are the only ranges of the ::/8 hole a capture routes into the TUN.
-var ttNAT64 = ttPrefixes("64:ff9b::/96", "64:ff9b:1::/48")
-
 func ttSet(t *testing.T, add, remove []netip.Prefix) *netipx.IPSet {
 	t.Helper()
 	var b netipx.IPSetBuilder
@@ -41,7 +35,7 @@ func ttSplit(routes []netip.Prefix) (v4, v6 []netip.Prefix) {
 	return v4, v6
 }
 
-func TestCaptureRoutesCoverEachFamilyMinusBypassSubnetsAndHoles(t *testing.T) {
+func TestCaptureRoutesCoverEachFamilyMinusBypassAndSubnets(t *testing.T) {
 	v4, v6 := ttSplit(CaptureRoutes(ttDefaultConfig()))
 	bypass := ttPrefixes("192.168.0.0/16", "10.0.0.0/8", "fe80::/64", "fd00::/8")
 	ownSubnets := ttPrefixes("198.18.0.0/30", "fd00:6a77:7761::/64")
@@ -50,8 +44,8 @@ func TestCaptureRoutesCoverEachFamilyMinusBypassSubnetsAndHoles(t *testing.T) {
 		routes []netip.Prefix
 		want   *netipx.IPSet
 	}{
-		{"IPv4", v4, ttSet(t, ttPrefixes("0.0.0.0/0"), slices.Concat(bypass, ownSubnets, ttHoles))},
-		{"IPv6", v6, ttSet(t, slices.Concat(ttSet(t, ttPrefixes("::/0"), ttHoles).Prefixes(), ttNAT64), slices.Concat(bypass, ownSubnets))},
+		{"IPv4", v4, ttSet(t, ttPrefixes("0.0.0.0/0"), slices.Concat(bypass, ownSubnets))},
+		{"IPv6", v6, ttSet(t, ttPrefixes("::/0"), slices.Concat(bypass, ownSubnets))},
 	} {
 		if got := ttSet(t, tc.routes, nil); !got.Equal(tc.want) {
 			t.Errorf("%s routes = %v\nwant the set %v", tc.family, tc.routes, tc.want.Prefixes())
@@ -59,29 +53,15 @@ func TestCaptureRoutesCoverEachFamilyMinusBypassSubnetsAndHoles(t *testing.T) {
 	}
 }
 
-func TestCaptureRoutesKeepOfTheIPv6ZeroBlockOnlyNAT64(t *testing.T) {
-	routes := CaptureRoutes(Config{Addresses: ttPrefixes("fd00:6a77:7761::1/64")})
-	for _, off := range []string{"::", "::1", "::ffff:192.0.2.1", "::192.0.2.1", "64:ff9a::1", "64:ff9b:2::1"} {
-		addr := netip.MustParseAddr(off)
-		if i := slices.IndexFunc(routes, func(p netip.Prefix) bool { return p.Contains(addr) }); i >= 0 {
-			t.Errorf("route %v contains %v, want it left off the TUN", routes[i], addr)
-		}
+// No destination is left off the TUN but those Bypass and Addresses name.
+func TestCaptureRoutesOfAnUnbypassedConfigAreEachFamilyMinusSubnets(t *testing.T) {
+	cfg := Config{Addresses: ttPrefixes("198.18.0.1/30", "fd00:6a77:7761::1/64")}
+	want := ttSet(t, ttPrefixes("0.0.0.0/0", "::/0"), ttPrefixes("198.18.0.0/30", "fd00:6a77:7761::/64"))
+	if got := ttSet(t, CaptureRoutes(cfg), nil); !got.Equal(want) {
+		t.Errorf("CaptureRoutes = %v\nwant the set %v", CaptureRoutes(cfg), want.Prefixes())
 	}
-	for _, on := range []string{"64:ff9b::192.0.2.1", "64:ff9b:1::1", "100::1", "2001:db8::1"} {
-		addr := netip.MustParseAddr(on)
-		if !slices.ContainsFunc(routes, func(p netip.Prefix) bool { return p.Contains(addr) }) {
-			t.Errorf("no route contains %v, want it captured", addr)
-		}
-	}
-}
-
-func TestCaptureRoutesLeaveOutIPv4BroadcastAndReserved(t *testing.T) {
-	routes := CaptureRoutes(Config{Addresses: ttPrefixes("198.18.0.1/30")})
-	for _, off := range []string{"224.0.0.251", "240.0.0.1", "255.255.255.255", "127.0.0.1", "169.254.169.254"} {
-		addr := netip.MustParseAddr(off)
-		if i := slices.IndexFunc(routes, func(p netip.Prefix) bool { return p.Contains(addr) }); i >= 0 {
-			t.Errorf("route %v contains %v, want it left off the TUN", routes[i], addr)
-		}
+	if got, want := installRoutes(cfg), ttPrefixes("0.0.0.0/0", "::/0"); !slices.Equal(got, want) {
+		t.Errorf("installRoutes = %v, want %v", got, want)
 	}
 }
 

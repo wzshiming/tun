@@ -67,9 +67,12 @@ func (p ttExecProc) Wait() error {
 	return err
 }
 
-// ttConfig is the TUN every e2e test opens, with bypass as its Bypass.
+// ttReserved are the reserved blocks every e2e test leaves off the TUN, as cmd/tun does by default.
+var ttReserved = ttPrefixes("127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/3", "::/8", "fe80::/10", "ff00::/8")
+
+// ttConfig is the TUN every e2e test opens, with bypass and ttReserved as its Bypass.
 func ttConfig(bypass []netip.Prefix) tun.Config {
-	return tun.Config{Addresses: ttPrefixes("198.18.0.1/30", "fd00:6a77:7761::1/64"), MTU: 1500, Bypass: bypass}
+	return tun.Config{Addresses: ttPrefixes("198.18.0.1/30", "fd00:6a77:7761::1/64"), MTU: 1500, Bypass: slices.Concat(bypass, ttReserved)}
 }
 
 func ttPrefixes(s ...string) []netip.Prefix {

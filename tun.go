@@ -27,6 +27,7 @@ type Config struct {
 	// MTU is the TUN's MTU, 1280 to 65535.
 	MTU int
 	// Bypass lists the destinations left to the existing routes.
+	// Nothing else is: a caller that wants loopback, link-local or multicast destinations off the TUN lists them here.
 	Bypass []netip.Prefix
 }
 
@@ -44,24 +45,6 @@ var ErrDenied = elevate.ErrDenied
 
 // ErrUnsupported reports a platform without TUN support.
 var ErrUnsupported = errors.ErrUnsupported
-
-// fixedHoles are the destinations never routed into the TUN: whole reserved blocks, so that carving them out of a family leaves a handful of routes.
-var fixedHoles = []netip.Prefix{
-	netip.MustParsePrefix("127.0.0.0/8"),
-	netip.MustParsePrefix("169.254.0.0/16"),
-	// Multicast, the reserved 240.0.0.0/4 and with it the limited broadcast address.
-	netip.MustParsePrefix("224.0.0.0/3"),
-	// The unspecified, loopback, IPv4-compatible and IPv4-mapped addresses; of this block only nat64 is a destination.
-	netip.MustParsePrefix("::/8"),
-	netip.MustParsePrefix("fe80::/10"),
-	netip.MustParsePrefix("ff00::/8"),
-}
-
-// nat64 are the NAT64 prefixes of RFC 6052 and RFC 8215, routed into the TUN though they lie in the ::/8 hole.
-var nat64 = []netip.Prefix{
-	netip.MustParsePrefix("64:ff9b::/96"),
-	netip.MustParsePrefix("64:ff9b:1::/48"),
-}
 
 // name returns the interface name, defaulting to "tun".
 func (cfg Config) name() string {
@@ -124,8 +107,7 @@ func validate(cfg Config) error {
 	return nil
 }
 
-// CaptureRoutes returns the destinations Open captures, as prefixes sorted with IPv4 first: each family with an address, less Bypass, the subnets of Addresses and the blocks never captured.
-// Those blocks are 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/3, fe80::/10, ff00::/8 and ::/8 but for the NAT64 prefixes 64:ff9b::/96 and 64:ff9b:1::/48.
+// CaptureRoutes returns the destinations Open captures, as prefixes sorted with IPv4 first: each family with an address, less Bypass and the subnets of Addresses.
 func CaptureRoutes(cfg Config) []netip.Prefix {
 	return captured(cfg, slices.Concat(cfg.Bypass, cfg.Addresses))
 }
@@ -138,7 +120,7 @@ func installRoutes(cfg Config) []netip.Prefix {
 	})
 }
 
-// captured returns each family of cfg that has an address, less the fixed holes and carved, as sorted prefixes.
+// captured returns each family of cfg that has an address, less carved, as sorted prefixes.
 func captured(cfg Config, carved []netip.Prefix) []netip.Prefix {
 	var b netipx.IPSetBuilder
 	for _, p := range cfg.Addresses {
@@ -147,14 +129,6 @@ func captured(cfg Config, carved []netip.Prefix) []netip.Prefix {
 			b.AddPrefix(netip.PrefixFrom(netip.IPv4Unspecified(), 0))
 		case p.Addr().Is6():
 			b.AddPrefix(netip.PrefixFrom(netip.IPv6Unspecified(), 0))
-		}
-	}
-	for _, p := range fixedHoles {
-		b.RemovePrefix(p)
-	}
-	if slices.ContainsFunc(cfg.Addresses, func(p netip.Prefix) bool { return p.Addr().Is6() }) {
-		for _, p := range nat64 {
-			b.AddPrefix(p)
 		}
 	}
 	for _, p := range carved {
