@@ -333,3 +333,32 @@ func TestMuxHandleConcurrentWithServeFlow(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestRejectHandlerRejectsEveryFlow(t *testing.T) {
+	for _, network := range []string{"tcp", "udp", "icmp"} {
+		f := testFlowTo(network, "10.0.0.9:0")
+		RejectHandler().ServeFlow(t.Context(), f)
+		if !f.rejected {
+			t.Errorf("%s flow not rejected", network)
+		}
+	}
+}
+
+// A pattern of RejectHandler refuses its flows though a wider pattern or the Fallback would serve them.
+func TestMuxRejectHandlerRefusesItsPatternWithinAWiderOne(t *testing.T) {
+	var served []string
+	m := NewMux()
+	m.Handle("udp", "", testNamed("udp", &served))
+	m.Handle("udp", ":443", RejectHandler())
+	m.Fallback = testNamed("fallback", &served)
+	refused := testFlowTo("udp", "10.0.0.9:443")
+	m.ServeFlow(t.Context(), refused)
+	if !refused.rejected || len(served) != 0 {
+		t.Fatalf("udp flow to port 443: rejected %v, served by %q; want rejected and no handler invoked", refused.rejected, served)
+	}
+	other := testFlowTo("udp", "10.0.0.9:53")
+	m.ServeFlow(t.Context(), other)
+	if other.rejected || len(served) != 1 || served[0] != "udp" {
+		t.Fatalf("udp flow to port 53: rejected %v, served by %q; want it served by the any-port handler", other.rejected, served)
+	}
+}

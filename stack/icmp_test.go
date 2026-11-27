@@ -73,7 +73,7 @@ func TestICMPEchoWithoutHandlerStaysUnanswered(t *testing.T) {
 			m.Handle("udp", "", testEcho)
 			return m
 		}()},
-		{"rejecting handler", HandlerFunc(func(_ context.Context, f Flow) { f.Reject() })},
+		{"rejecting handler", RejectHandler()},
 	} {
 		for _, fam := range icmpFamilies {
 			t.Run(tc.name+"/"+fam.name, func(t *testing.T) {
