@@ -9,9 +9,6 @@ import (
 	"time"
 )
 
-// sessionQueueLen is how many datagrams a session holds for its handler; a datagram arriving at a full queue is dropped.
-const sessionQueueLen = 128
-
 // datagram is one UDP payload or ICMP message and, for UDP, the destination its client addressed.
 type datagram struct {
 	payload []byte
@@ -87,8 +84,10 @@ func (c *session) SetWriteDeadline(time.Time) error { return nil }
 // sessions are one protocol's live sessions by key; the gateway's mu guards live.
 type sessions[K comparable] struct {
 	// max is how many may be live at once; negative means no limit.
-	max  int
-	live map[K]*session
+	max int
+	// queue is how many datagrams each session holds for its handler.
+	queue int
+	live  map[K]*session
 }
 
 // open starts the session of key and returns it with the one it ended to stay within max, if any: the one whose last datagram is the oldest, which the caller closes once it released mu.
@@ -104,7 +103,7 @@ func (t *sessions[K]) open(mu *sync.Mutex, clock *atomic.Uint64, key K) (c, evic
 		delete(t.live, idlest)
 	}
 	c = &session{
-		queue:        make(chan datagram, sessionQueueLen),
+		queue:        make(chan datagram, t.queue),
 		readDeadline: deadline{passed: make(chan struct{})},
 		closed:       make(chan struct{}),
 		clock:        clock,

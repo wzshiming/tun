@@ -16,9 +16,6 @@ import (
 	"github.com/wzshiming/tun/stack"
 )
 
-// maxInFlight is how many queries of one flow may wait for their answers at once: a UDP session drops the queries beyond it, a TCP conn reads no more until one is answered.
-const maxInFlight = 64
-
 // Handler serves a UDP session or a TCP conn as a DNS server that mirrors its upstream: every DNS query a client sends gets the answer of the upstream, which is the servers of Upstreams or else the server the client addressed, asked over TCP conns dialled through Dialer that all flows share.
 // The replies are kept in a cache all flows share, and a query a kept reply answers is answered from it at once: within the lifetime the TTLs of the reply give it without asking upstream, and for Stale after with TTLs of 0, the upstream then being asked for a new reply once the client has its answer, so that a mirror whose upstream is down goes on answering what it has.
 // A query no kept reply answers goes upstream, once for the clients asking the same at once, is sent once more on a new conn if a failed one left it unanswered, and is answered with SERVFAIL if the upstream does not answer.
@@ -28,8 +25,12 @@ type Handler struct {
 	Dialer stack.Dialer
 	// Upstreams, when set, are the host:port of the DNS servers mirrored, as one, for every query, whichever server the client addressed; replies still come back from that server. Empty mirrors each addressed server.
 	// A query goes to the first of them, and on to the next when one fails: when it cannot be dialled, does not answer within its share of Idle, which the servers not yet asked split evenly, or answers SERVFAIL; the reply of the last one asked stands.
-	// A server that failed to answer is asked after the others for the 30s that follow. Set them before the Handler serves flows.
+	// A server that failed to answer is asked after the others for the FailedFor that follows. Set them before the Handler serves flows.
 	Upstreams []string
+	// FailedFor is how long a server of Upstreams that failed to answer is asked after the others; 0 means 30s, a negative value not at all.
+	FailedFor time.Duration
+	// MaxInFlight is how many queries of one flow may wait for their answers at once: a UDP session drops the queries beyond it, a TCP conn reads no more until one is answered. 0 means 64.
+	MaxInFlight int
 	// Idle ends a flow after this long without a message either way and none awaiting its answer; a query the upstream leaves unanswered, or a TCP dial not back, for this long is given up. 0 means 10s.
 	Idle time.Duration
 	// CacheSize is the most replies the cache keeps to answer later DNS queries with; 0 means 4096, a negative value disables the cache.
@@ -62,6 +63,13 @@ func (h *Handler) mirrored(addressed string) (upstream string, servers []string)
 func (h *Handler) answers() *cache {
 	h.sized.Do(func() { h.cache.size, h.cache.keep = h.CacheSize, h.Stale })
 	return &h.cache
+}
+
+func (h *Handler) maxInFlight() int {
+	if h.MaxInFlight > 0 {
+		return h.MaxInFlight
+	}
+	return 64
 }
 
 func (h *Handler) idle() time.Duration {
@@ -98,7 +106,7 @@ func (h *Handler) serve(ctx context.Context, conn io.Closer, answer func(context
 	h.enter()
 	defer h.leave()
 	ctx, cancel := context.WithCancel(ctx)
-	s := &session{h: h, conn: conn, cancel: cancel, slots: make(chan struct{}, maxInFlight)}
+	s := &session{h: h, conn: conn, cancel: cancel, slots: make(chan struct{}, h.maxInFlight())}
 	defer s.workers.Wait()
 	defer s.end()
 	stop := context.AfterFunc(ctx, s.end)
