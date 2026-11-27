@@ -396,6 +396,7 @@ func udpFixQueued(n int) *udpConn {
 		readDeadline: deadline{passed: make(chan struct{})},
 		closed:       make(chan struct{}),
 		onClose:      func() {},
+		clock:        new(atomic.Uint64),
 	}
 	for range n {
 		c.queue <- datagram{payload: []byte("queued"), target: udpFamilies[0].first}
