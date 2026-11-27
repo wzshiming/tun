@@ -98,6 +98,7 @@ func TestE2EWindowsLocal(t *testing.T) {
 		t.Errorf("GET https://1.1.1.1/ through %s: %v", dev.Interface, err)
 	}
 	rec.wantDial(t, "tcp", "1.1.1.1:443", "")
+	ttServedVia(t, rec)
 
 	ttWinStop(t, cancel, errCh)
 	dev.Close()
@@ -190,6 +191,7 @@ func ttWinHelperRun(t *testing.T, exited <-chan struct{}) {
 	if err := ttGet(t, "https://1.1.1.1/", 20*time.Second); err != nil {
 		t.Errorf("GET https://1.1.1.1/ through %s: %v", dev.Interface, err)
 	}
+	ttServedVia(t, rec)
 
 	ttWinStop(t, stop, errCh)
 	dev.Close()

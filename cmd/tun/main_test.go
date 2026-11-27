@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	nethttp "net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -350,11 +352,21 @@ func TestHandlerAsksTheDNSTargetForTCPPort53(t *testing.T) {
 		peer.Close()
 	})
 	go peer.Write([]byte("\x00\x1d\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01"))
-	logged := testServeLogged(t, "203.0.113.5:5353", stacktest.NewFlow("tcp", testClient, netip.MustParseAddrPort("192.0.2.53:53"), conn), testDialTarget)
+	target := netip.MustParseAddrPort("192.0.2.53:53")
+	logged := testServeLogged(t, "203.0.113.5:5353", stacktest.NewFlow("tcp", testClient, target, flowConn{conn, target}), testDialTarget)
 	if !strings.HasPrefix(logged, "198.18.0.1:4000 -> tcp 192.0.2.53:53\n"+testDialTarget) {
 		t.Errorf("logged %q, want first the flow's line and then the failed tcp dial %q to the -dns target", logged, testDialTarget)
 	}
 }
+
+// flowConn is a conn with the addresses of a tcp flow's: its RemoteAddr testClient and its LocalAddr the target.
+type flowConn struct {
+	net.Conn
+	target netip.AddrPort
+}
+
+func (c flowConn) RemoteAddr() net.Addr { return net.TCPAddrFromAddrPort(testClient) }
+func (c flowConn) LocalAddr() net.Addr  { return net.TCPAddrFromAddrPort(c.target) }
 
 // testRunMainTimeout bounds a child of testRunMain, which exits within flag parsing.
 const testRunMainTimeout = 30 * time.Second
@@ -448,5 +460,61 @@ func TestHandlerAnswersICMPEchoToTheDeviceAddressesItself(t *testing.T) {
 	n, err := peer.Read(reply)
 	if want := []byte{0, 0, 0, 0, 0, 7, 0, 1, 'x'}; err != nil || !bytes.Equal(reply[:n], want) {
 		t.Fatalf("echo request to the device address got % x, %v, want the echo reply % x without any socket", reply[:n], err, want)
+	}
+}
+
+func TestHandlerServesTheReadyPageNextToTheDeviceAddresses(t *testing.T) {
+	testCaptureLog(t)
+	d := &logDialer{dialer: &net.Dialer{Control: func(string, string, syscall.RawConn) error { return errors.New("dial refused") }}}
+	h := newHandler(d, nil, []netip.Prefix{netip.MustParsePrefix("198.18.0.1/30"), netip.MustParsePrefix("fd00:6a77:7761::1/64")})
+	for _, target := range []string{"198.18.0.2:80", "[fd00:6a77:7761::2]:80"} {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		peer, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer peer.Close()
+		conn, err := listener.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		go h.ServeFlow(t.Context(), stacktest.NewFlow("tcp", testClient, netip.MustParseAddrPort(target), conn))
+		peer.SetDeadline(time.Now().Add(10 * time.Second))
+		fmt.Fprintf(peer, "GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)
+		resp, err := nethttp.ReadResponse(bufio.NewReader(peer), nil)
+		if err != nil {
+			t.Fatalf("GET http://%s/: %v", target, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != nethttp.StatusOK || string(body) != "ready\n" {
+			t.Fatalf("GET http://%s/ = %s %q, want 200 OK and the ready page without any dial", target, resp.Status, body)
+		}
+	}
+}
+
+func TestReadyAddrsAreNextToTheDeviceAddresses(t *testing.T) {
+	for address, want := range map[string]string{
+		"198.18.0.1/30":        "198.18.0.2",
+		"198.18.0.2/30":        "198.18.0.1",
+		"198.18.0.0/31":        "198.18.0.1",
+		"198.18.0.1/31":        "198.18.0.0",
+		"198.18.0.1/32":        "",
+		"10.0.0.254/24":        "10.0.0.253",
+		"fd00:6a77:7761::1/64": "fd00:6a77:7761::2",
+		"fd00::1/127":          "fd00::",
+		"fd00::1/128":          "",
+	} {
+		got := ""
+		if addrs := readyAddrs([]netip.Prefix{netip.MustParsePrefix(address)}); len(addrs) > 0 {
+			got = addrs[0].String()
+		}
+		if got != want {
+			t.Errorf("readyAddrs(%s) = %q, want %q", address, got, want)
+		}
 	}
 }
