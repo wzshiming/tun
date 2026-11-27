@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/wzshiming/elevate"
-	"go4.org/netipx"
 
 	"github.com/wzshiming/tun"
 	"github.com/wzshiming/tun/flow"
@@ -82,22 +81,6 @@ func ttPrefixes(s ...string) []netip.Prefix {
 		prefixes[i] = netip.MustParsePrefix(p)
 	}
 	return prefixes
-}
-
-func ttSet(t *testing.T, add, remove []netip.Prefix) *netipx.IPSet {
-	t.Helper()
-	var b netipx.IPSetBuilder
-	for _, p := range add {
-		b.AddPrefix(p)
-	}
-	for _, p := range remove {
-		b.RemovePrefix(p)
-	}
-	set, err := b.IPSet()
-	if err != nil {
-		t.Fatalf("IP set of %v minus %v: %v", add, remove, err)
-	}
-	return set
 }
 
 // ttWaitFor polls cond every 200ms and fails t unless it holds within timeout.

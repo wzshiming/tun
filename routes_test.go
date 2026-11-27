@@ -4,24 +4,45 @@ import (
 	"net/netip"
 	"slices"
 	"testing"
-
-	"go4.org/netipx"
 )
 
-func ttSet(t *testing.T, add, remove []netip.Prefix) *netipx.IPSet {
-	t.Helper()
-	var b netipx.IPSetBuilder
-	for _, p := range add {
-		b.AddPrefix(p)
+// ttSet returns the addresses of add less those of remove as the fewest prefixes that cover them, sorted with IPv4 first.
+// It works its way down from each whole family, halving a prefix that is partly covered, which is not how routes.Captured gets there.
+func ttSet(add, remove []netip.Prefix) []netip.Prefix {
+	masked := func(ps []netip.Prefix) []netip.Prefix {
+		ps = slices.Clone(ps)
+		for i, p := range ps {
+			ps[i] = p.Masked()
+		}
+		return ps
 	}
-	for _, p := range remove {
-		b.RemovePrefix(p)
+	add, remove = masked(add), masked(remove)
+	return slices.Concat(ttCover(netip.MustParsePrefix("0.0.0.0/0"), add, remove), ttCover(netip.MustParsePrefix("::/0"), add, remove))
+}
+
+// ttCover returns the part of p that add covers and remove does not.
+func ttCover(p netip.Prefix, add, remove []netip.Prefix) []netip.Prefix {
+	covers := func(q netip.Prefix) bool { return q.Bits() <= p.Bits() && q.Overlaps(p) }
+	within := func(q netip.Prefix) bool { return q.Bits() > p.Bits() && q.Overlaps(p) }
+	switch {
+	case slices.ContainsFunc(remove, covers):
+		return nil
+	case slices.ContainsFunc(add, covers):
+		if !slices.ContainsFunc(remove, within) {
+			return []netip.Prefix{p}
+		}
+	case !slices.ContainsFunc(add, within):
+		return nil
 	}
-	set, err := b.IPSet()
-	if err != nil {
-		t.Fatalf("IP set of %v minus %v: %v", add, remove, err)
+	b := p.Addr().AsSlice()
+	b[p.Bits()/8] |= 0x80 >> (p.Bits() % 8)
+	upper, _ := netip.AddrFromSlice(b)
+	lo, hi := netip.PrefixFrom(p.Addr(), p.Bits()+1), netip.PrefixFrom(upper, p.Bits()+1)
+	l, h := ttCover(lo, add, remove), ttCover(hi, add, remove)
+	if slices.Equal(l, []netip.Prefix{lo}) && slices.Equal(h, []netip.Prefix{hi}) {
+		return []netip.Prefix{p}
 	}
-	return set
+	return slices.Concat(l, h)
 }
 
 func ttSplit(routes []netip.Prefix) (v4, v6 []netip.Prefix) {
@@ -42,13 +63,13 @@ func TestCaptureRoutesCoverEachFamilyMinusBypassAndSubnets(t *testing.T) {
 	for _, tc := range []struct {
 		family string
 		routes []netip.Prefix
-		want   *netipx.IPSet
+		want   []netip.Prefix
 	}{
-		{"IPv4", v4, ttSet(t, ttPrefixes("0.0.0.0/0"), slices.Concat(bypass, ownSubnets))},
-		{"IPv6", v6, ttSet(t, ttPrefixes("::/0"), slices.Concat(bypass, ownSubnets))},
+		{"IPv4", v4, ttSet(ttPrefixes("0.0.0.0/0"), slices.Concat(bypass, ownSubnets))},
+		{"IPv6", v6, ttSet(ttPrefixes("::/0"), slices.Concat(bypass, ownSubnets))},
 	} {
-		if got := ttSet(t, tc.routes, nil); !got.Equal(tc.want) {
-			t.Errorf("%s routes = %v\nwant the set %v", tc.family, tc.routes, tc.want.Prefixes())
+		if got := ttSet(tc.routes, nil); !slices.Equal(got, tc.want) {
+			t.Errorf("%s routes = %v\nwant the set %v", tc.family, tc.routes, tc.want)
 		}
 	}
 }
@@ -56,9 +77,9 @@ func TestCaptureRoutesCoverEachFamilyMinusBypassAndSubnets(t *testing.T) {
 // No destination is left off the TUN but those Bypass and Addresses name.
 func TestCaptureRoutesOfAnUnbypassedConfigAreEachFamilyMinusSubnets(t *testing.T) {
 	cfg := Config{Addresses: ttPrefixes("198.18.0.1/30", "fd00:6a77:7761::1/64")}
-	want := ttSet(t, ttPrefixes("0.0.0.0/0", "::/0"), ttPrefixes("198.18.0.0/30", "fd00:6a77:7761::/64"))
-	if got := ttSet(t, CaptureRoutes(cfg), nil); !got.Equal(want) {
-		t.Errorf("CaptureRoutes = %v\nwant the set %v", CaptureRoutes(cfg), want.Prefixes())
+	want := ttSet(ttPrefixes("0.0.0.0/0", "::/0"), ttPrefixes("198.18.0.0/30", "fd00:6a77:7761::/64"))
+	if got := ttSet(CaptureRoutes(cfg), nil); !slices.Equal(got, want) {
+		t.Errorf("CaptureRoutes = %v\nwant the set %v", CaptureRoutes(cfg), want)
 	}
 	if got, want := installRoutes(cfg), ttPrefixes("0.0.0.0/0", "::/0"); !slices.Equal(got, want) {
 		t.Errorf("installRoutes = %v, want %v", got, want)
@@ -77,9 +98,9 @@ func TestInstallRoutesAreCaptureRoutesPlusOwnSubnets(t *testing.T) {
 	cfg := ttDefaultConfig()
 	cfg.Bypass = ttPrefixes("192.168.0.0/16", "10.0.0.0/8")
 	ownSubnets := ttPrefixes("198.18.0.0/30", "fd00:6a77:7761::/64")
-	want := ttSet(t, slices.Concat(CaptureRoutes(cfg), ownSubnets), nil)
-	if got := ttSet(t, installRoutes(cfg), nil); !got.Equal(want) {
-		t.Errorf("installRoutes = %v\nwant the set %v", installRoutes(cfg), want.Prefixes())
+	want := ttSet(slices.Concat(CaptureRoutes(cfg), ownSubnets), nil)
+	if got := ttSet(installRoutes(cfg), nil); !slices.Equal(got, want) {
+		t.Errorf("installRoutes = %v\nwant the set %v", installRoutes(cfg), want)
 	}
 }
 

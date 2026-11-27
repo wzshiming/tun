@@ -10,8 +10,9 @@ import (
 	"strings"
 
 	"github.com/wzshiming/elevate"
-	"go4.org/netipx"
 	wgtun "golang.zx2c4.com/wireguard/tun"
+
+	"github.com/wzshiming/tun/routes"
 )
 
 // HelperCommand is the subcommand Open runs the privileged helper as; the program must dispatch os.Args[1] == HelperCommand to Helper(os.Args[2:]).
@@ -109,32 +110,13 @@ func validate(cfg Config) error {
 
 // CaptureRoutes returns the destinations Open captures, as prefixes sorted with IPv4 first: each family with an address, less Bypass and the subnets of Addresses.
 func CaptureRoutes(cfg Config) []netip.Prefix {
-	return captured(cfg, slices.Concat(cfg.Bypass, cfg.Addresses))
+	return routes.Captured(cfg.Addresses, slices.Concat(cfg.Bypass, cfg.Addresses))
 }
 
 // installRoutes returns the routes Open adds to the TUN: CaptureRoutes with the subnets of Addresses left in, which saves the routes carving them out takes.
 // Each address already routes its subnet into the TUN, so a route that is exactly such a subnet is left to it.
 func installRoutes(cfg Config) []netip.Prefix {
-	return slices.DeleteFunc(captured(cfg, cfg.Bypass), func(p netip.Prefix) bool {
+	return slices.DeleteFunc(routes.Captured(cfg.Addresses, cfg.Bypass), func(p netip.Prefix) bool {
 		return slices.ContainsFunc(cfg.Addresses, func(a netip.Prefix) bool { return a.Masked() == p })
 	})
-}
-
-// captured returns each family of cfg that has an address, less carved, as sorted prefixes.
-func captured(cfg Config, carved []netip.Prefix) []netip.Prefix {
-	var b netipx.IPSetBuilder
-	for _, p := range cfg.Addresses {
-		switch {
-		case p.Addr().Is4():
-			b.AddPrefix(netip.PrefixFrom(netip.IPv4Unspecified(), 0))
-		case p.Addr().Is6():
-			b.AddPrefix(netip.PrefixFrom(netip.IPv6Unspecified(), 0))
-		}
-	}
-	for _, p := range carved {
-		b.RemovePrefix(p.Masked())
-	}
-	// Invalid prefixes are only recorded as errors, which validate reports instead.
-	set, _ := b.IPSet()
-	return set.Prefixes()
 }
