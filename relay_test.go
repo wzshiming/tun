@@ -901,3 +901,49 @@ func BenchmarkRelayWrite(b *testing.B) {
 		})
 	}
 }
+
+func TestRelayReadBlockedWhenTheDeviceClosesReturnsErrClosed(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	relay := newRelay(a, "relay0", 1500)
+	errc := make(chan error, 1)
+	go func() {
+		_, err := relay.Read([][]byte{make([]byte, 64)}, make([]int, 1), 0)
+		errc <- err
+	}()
+	// The Read is not known to block yet, but one that starts after the Close must report it the same.
+	time.Sleep(50 * time.Millisecond)
+	relay.Close()
+	select {
+	case err := <-errc:
+		if !errors.Is(err, os.ErrClosed) {
+			t.Errorf("Read = %v, want os.ErrClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read still blocked 5s after Close")
+	}
+}
+
+func TestRelayReadAndWriteAfterCloseReturnErrClosed(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	relay := newRelay(a, "relay0", 1500)
+	relay.Close()
+	if _, err := relay.Read([][]byte{make([]byte, 64)}, make([]int, 1), 0); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("Read after Close = %v, want os.ErrClosed", err)
+	}
+	if _, err := relay.Write([][]byte{[]byte("packet")}, 0); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("Write after Close = %v, want os.ErrClosed", err)
+	}
+}
+
+// A conn the helper ended is a failure of its own, not the device's Close.
+func TestRelayReadOfAConnThePeerClosedKeepsItsError(t *testing.T) {
+	a, b := net.Pipe()
+	relay := newRelay(a, "relay0", 1500)
+	defer relay.Close()
+	b.Close()
+	if _, err := relay.Read([][]byte{make([]byte, 64)}, make([]int, 1), 0); !errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+		t.Errorf("Read = %v, want io.EOF and not os.ErrClosed", err)
+	}
+}

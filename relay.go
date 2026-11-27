@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wzshiming/elevate"
@@ -53,6 +54,8 @@ type relayDevice struct {
 	mtu    int
 	events chan wgtun.Event
 	once   sync.Once
+	// closed tells Read and Write that their failure is the device's own Close.
+	closed atomic.Bool
 	// exited, when set, yields once the helper process has exited.
 	exited <-chan error
 }
@@ -75,14 +78,14 @@ func (d *relayDevice) File() *os.File { return nil }
 func (d *relayDevice) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	n, err := readPacket(d.r, bufs[0][offset:])
 	if err != nil {
-		return 0, err
+		return 0, d.closedErr(err)
 	}
 	sizes[0] = n
 	// The packets already buffered whole come along without another read of the conn.
 	count := 1
 	for ; count < len(bufs) && buffered(d.r); count++ {
 		if n, err = readPacket(d.r, bufs[count][offset:]); err != nil {
-			return count, err
+			return count, d.closedErr(err)
 		}
 		sizes[count] = n
 	}
@@ -104,13 +107,21 @@ func (d *relayDevice) Write(bufs [][]byte, offset int) (int, error) {
 	defer d.wmu.Unlock()
 	for _, b := range bufs {
 		if err := writePacket(d.w, b[offset:]); err != nil {
-			return 0, err
+			return 0, d.closedErr(err)
 		}
 	}
 	if err := d.w.Flush(); err != nil {
-		return 0, err
+		return 0, d.closedErr(err)
 	}
 	return len(bufs), nil
+}
+
+// closedErr returns os.ErrClosed, as a ringDevice and a native device do, in place of the err of a Read or Write that failed once the device was closed.
+func (d *relayDevice) closedErr(err error) error {
+	if d.closed.Load() {
+		return os.ErrClosed
+	}
+	return err
 }
 
 func (d *relayDevice) MTU() (int, error)          { return d.mtu, nil }
@@ -121,6 +132,7 @@ func (d *relayDevice) BatchSize() int             { return deviceBatch }
 func (d *relayDevice) Close() error {
 	var err error
 	d.once.Do(func() {
+		d.closed.Store(true)
 		close(d.events)
 		err = d.conn.Close()
 		if d.exited == nil {
